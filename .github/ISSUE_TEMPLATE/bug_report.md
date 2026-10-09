@@ -1,16 +1,23 @@
 ---
 name: Bug report
-about: Create a report to help us improve
+about: Report a problem with Yabadabadoo
 title: ''
 labels: ''
 assignees: ''
 
 ---
 
-**Read first**
-This repository is home to 3 libretro cores : yabause, Kronos, and yabasanshiro. Your issue will be closed if you don't mention the core you are using.
+**Device and OS**
+For example: Miyoo Mini+, Onion OS 4.3.1. Mention the CPU clock if you changed it.
 
-You should also consider this :
-- the yabause project has been dead for years, so don't expect emulation improvements and other fixes of long-term upstream issues, but requests related to libretro-specific issues and features will be considered
-- the Kronos libretro core is directly maintained upstream (https://github.com/FCare/Kronos), all issues should be reported there
-- the yabasanshiro libretro core is unmaintained, full of bugs, and shouldn't be used, but contributors who are willing to change that status are welcome
+**Game**
+Name, region and file format (cue/bin, chd, ...).
+
+**What happens**
+What you did, what you expected, and what happened instead. Does it happen every time?
+
+**Settings**
+Any core options you changed from the defaults (Quick Menu > Core Options).
+
+**Extras**
+A screenshot, a save state from just before the problem, or the RetroArch log help a lot.

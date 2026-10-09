@@ -59,7 +59,7 @@ struct retro_core_option_v2_category option_cats_ar[] = {
 };
 struct retro_core_option_v2_definition option_defs_ar[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_AR,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_AR,
@@ -73,7 +73,7 @@ struct retro_core_option_v2_definition option_defs_ar[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_AR,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_AR,
@@ -87,7 +87,7 @@ struct retro_core_option_v2_definition option_defs_ar[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_AR,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_AR,
@@ -102,7 +102,7 @@ struct retro_core_option_v2_definition option_defs_ar[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_AR,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_AR,
@@ -116,7 +116,7 @@ struct retro_core_option_v2_definition option_defs_ar[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_AR,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_AR,
@@ -131,7 +131,7 @@ struct retro_core_option_v2_definition option_defs_ar[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_AR,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_AR,
@@ -178,7 +178,7 @@ struct retro_core_option_v2_category option_cats_ast[] = {
 };
 struct retro_core_option_v2_definition option_defs_ast[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_AST,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_AST,
@@ -192,7 +192,7 @@ struct retro_core_option_v2_definition option_defs_ast[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_AST,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_AST,
@@ -206,7 +206,7 @@ struct retro_core_option_v2_definition option_defs_ast[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_AST,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_AST,
@@ -221,7 +221,7 @@ struct retro_core_option_v2_definition option_defs_ast[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_AST,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_AST,
@@ -235,7 +235,7 @@ struct retro_core_option_v2_definition option_defs_ast[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_AST,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_AST,
@@ -250,7 +250,7 @@ struct retro_core_option_v2_definition option_defs_ast[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_AST,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_AST,
@@ -297,7 +297,7 @@ struct retro_core_option_v2_category option_cats_ca[] = {
 };
 struct retro_core_option_v2_definition option_defs_ca[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_CA,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_CA,
@@ -311,7 +311,7 @@ struct retro_core_option_v2_definition option_defs_ca[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_CA,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_CA,
@@ -325,7 +325,7 @@ struct retro_core_option_v2_definition option_defs_ca[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_CA,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_CA,
@@ -340,7 +340,7 @@ struct retro_core_option_v2_definition option_defs_ca[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_CA,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_CA,
@@ -354,7 +354,7 @@ struct retro_core_option_v2_definition option_defs_ca[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_CA,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_CA,
@@ -369,7 +369,7 @@ struct retro_core_option_v2_definition option_defs_ca[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_CA,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_CA,
@@ -416,7 +416,7 @@ struct retro_core_option_v2_category option_cats_chs[] = {
 };
 struct retro_core_option_v2_definition option_defs_chs[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_CHS,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_CHS,
@@ -430,7 +430,7 @@ struct retro_core_option_v2_definition option_defs_chs[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_CHS,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_CHS,
@@ -444,7 +444,7 @@ struct retro_core_option_v2_definition option_defs_chs[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_CHS,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_CHS,
@@ -459,7 +459,7 @@ struct retro_core_option_v2_definition option_defs_chs[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_CHS,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_CHS,
@@ -473,7 +473,7 @@ struct retro_core_option_v2_definition option_defs_chs[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_CHS,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_CHS,
@@ -488,7 +488,7 @@ struct retro_core_option_v2_definition option_defs_chs[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_CHS,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_CHS,
@@ -535,7 +535,7 @@ struct retro_core_option_v2_category option_cats_cht[] = {
 };
 struct retro_core_option_v2_definition option_defs_cht[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_CHT,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_CHT,
@@ -549,7 +549,7 @@ struct retro_core_option_v2_definition option_defs_cht[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_CHT,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_CHT,
@@ -563,7 +563,7 @@ struct retro_core_option_v2_definition option_defs_cht[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_CHT,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_CHT,
@@ -578,7 +578,7 @@ struct retro_core_option_v2_definition option_defs_cht[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_CHT,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_CHT,
@@ -592,7 +592,7 @@ struct retro_core_option_v2_definition option_defs_cht[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_CHT,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_CHT,
@@ -607,7 +607,7 @@ struct retro_core_option_v2_definition option_defs_cht[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_CHT,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_CHT,
@@ -654,7 +654,7 @@ struct retro_core_option_v2_category option_cats_cs[] = {
 };
 struct retro_core_option_v2_definition option_defs_cs[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_CS,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_CS,
@@ -668,7 +668,7 @@ struct retro_core_option_v2_definition option_defs_cs[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_CS,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_CS,
@@ -682,7 +682,7 @@ struct retro_core_option_v2_definition option_defs_cs[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_CS,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_CS,
@@ -697,7 +697,7 @@ struct retro_core_option_v2_definition option_defs_cs[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_CS,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_CS,
@@ -711,7 +711,7 @@ struct retro_core_option_v2_definition option_defs_cs[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_CS,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_CS,
@@ -726,7 +726,7 @@ struct retro_core_option_v2_definition option_defs_cs[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_CS,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_CS,
@@ -773,7 +773,7 @@ struct retro_core_option_v2_category option_cats_cy[] = {
 };
 struct retro_core_option_v2_definition option_defs_cy[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_CY,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_CY,
@@ -787,7 +787,7 @@ struct retro_core_option_v2_definition option_defs_cy[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_CY,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_CY,
@@ -801,7 +801,7 @@ struct retro_core_option_v2_definition option_defs_cy[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_CY,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_CY,
@@ -816,7 +816,7 @@ struct retro_core_option_v2_definition option_defs_cy[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_CY,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_CY,
@@ -830,7 +830,7 @@ struct retro_core_option_v2_definition option_defs_cy[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_CY,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_CY,
@@ -845,7 +845,7 @@ struct retro_core_option_v2_definition option_defs_cy[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_CY,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_CY,
@@ -892,7 +892,7 @@ struct retro_core_option_v2_category option_cats_da[] = {
 };
 struct retro_core_option_v2_definition option_defs_da[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_DA,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_DA,
@@ -906,7 +906,7 @@ struct retro_core_option_v2_definition option_defs_da[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_DA,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_DA,
@@ -920,7 +920,7 @@ struct retro_core_option_v2_definition option_defs_da[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_DA,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_DA,
@@ -935,7 +935,7 @@ struct retro_core_option_v2_definition option_defs_da[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_DA,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_DA,
@@ -949,7 +949,7 @@ struct retro_core_option_v2_definition option_defs_da[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_DA,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_DA,
@@ -964,7 +964,7 @@ struct retro_core_option_v2_definition option_defs_da[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_DA,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_DA,
@@ -1011,7 +1011,7 @@ struct retro_core_option_v2_category option_cats_de[] = {
 };
 struct retro_core_option_v2_definition option_defs_de[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_DE,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_DE,
@@ -1025,7 +1025,7 @@ struct retro_core_option_v2_definition option_defs_de[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_DE,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_DE,
@@ -1039,7 +1039,7 @@ struct retro_core_option_v2_definition option_defs_de[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_DE,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_DE,
@@ -1054,7 +1054,7 @@ struct retro_core_option_v2_definition option_defs_de[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_DE,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_DE,
@@ -1068,7 +1068,7 @@ struct retro_core_option_v2_definition option_defs_de[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_DE,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_DE,
@@ -1083,7 +1083,7 @@ struct retro_core_option_v2_definition option_defs_de[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_DE,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_DE,
@@ -1130,7 +1130,7 @@ struct retro_core_option_v2_category option_cats_el[] = {
 };
 struct retro_core_option_v2_definition option_defs_el[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_EL,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_EL,
@@ -1144,7 +1144,7 @@ struct retro_core_option_v2_definition option_defs_el[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_EL,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_EL,
@@ -1158,7 +1158,7 @@ struct retro_core_option_v2_definition option_defs_el[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_EL,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_EL,
@@ -1173,7 +1173,7 @@ struct retro_core_option_v2_definition option_defs_el[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_EL,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_EL,
@@ -1187,7 +1187,7 @@ struct retro_core_option_v2_definition option_defs_el[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_EL,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_EL,
@@ -1202,7 +1202,7 @@ struct retro_core_option_v2_definition option_defs_el[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_EL,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_EL,
@@ -1249,7 +1249,7 @@ struct retro_core_option_v2_category option_cats_en[] = {
 };
 struct retro_core_option_v2_definition option_defs_en[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_EN,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_EN,
@@ -1263,7 +1263,7 @@ struct retro_core_option_v2_definition option_defs_en[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_EN,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_EN,
@@ -1277,7 +1277,7 @@ struct retro_core_option_v2_definition option_defs_en[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_EN,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_EN,
@@ -1292,7 +1292,7 @@ struct retro_core_option_v2_definition option_defs_en[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_EN,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_EN,
@@ -1306,7 +1306,7 @@ struct retro_core_option_v2_definition option_defs_en[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_EN,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_EN,
@@ -1321,7 +1321,7 @@ struct retro_core_option_v2_definition option_defs_en[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_EN,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_EN,
@@ -1368,7 +1368,7 @@ struct retro_core_option_v2_category option_cats_eo[] = {
 };
 struct retro_core_option_v2_definition option_defs_eo[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_EO,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_EO,
@@ -1382,7 +1382,7 @@ struct retro_core_option_v2_definition option_defs_eo[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_EO,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_EO,
@@ -1396,7 +1396,7 @@ struct retro_core_option_v2_definition option_defs_eo[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_EO,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_EO,
@@ -1411,7 +1411,7 @@ struct retro_core_option_v2_definition option_defs_eo[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_EO,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_EO,
@@ -1425,7 +1425,7 @@ struct retro_core_option_v2_definition option_defs_eo[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_EO,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_EO,
@@ -1440,7 +1440,7 @@ struct retro_core_option_v2_definition option_defs_eo[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_EO,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_EO,
@@ -1487,7 +1487,7 @@ struct retro_core_option_v2_category option_cats_es[] = {
 };
 struct retro_core_option_v2_definition option_defs_es[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_ES,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_ES,
@@ -1501,7 +1501,7 @@ struct retro_core_option_v2_definition option_defs_es[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_ES,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_ES,
@@ -1515,7 +1515,7 @@ struct retro_core_option_v2_definition option_defs_es[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_ES,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_ES,
@@ -1530,7 +1530,7 @@ struct retro_core_option_v2_definition option_defs_es[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_ES,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_ES,
@@ -1544,7 +1544,7 @@ struct retro_core_option_v2_definition option_defs_es[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_ES,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_ES,
@@ -1559,7 +1559,7 @@ struct retro_core_option_v2_definition option_defs_es[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_ES,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_ES,
@@ -1606,7 +1606,7 @@ struct retro_core_option_v2_category option_cats_fa[] = {
 };
 struct retro_core_option_v2_definition option_defs_fa[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_FA,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_FA,
@@ -1620,7 +1620,7 @@ struct retro_core_option_v2_definition option_defs_fa[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_FA,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_FA,
@@ -1634,7 +1634,7 @@ struct retro_core_option_v2_definition option_defs_fa[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_FA,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_FA,
@@ -1649,7 +1649,7 @@ struct retro_core_option_v2_definition option_defs_fa[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_FA,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_FA,
@@ -1663,7 +1663,7 @@ struct retro_core_option_v2_definition option_defs_fa[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_FA,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_FA,
@@ -1678,7 +1678,7 @@ struct retro_core_option_v2_definition option_defs_fa[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_FA,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_FA,
@@ -1725,7 +1725,7 @@ struct retro_core_option_v2_category option_cats_fi[] = {
 };
 struct retro_core_option_v2_definition option_defs_fi[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_FI,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_FI,
@@ -1739,7 +1739,7 @@ struct retro_core_option_v2_definition option_defs_fi[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_FI,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_FI,
@@ -1753,7 +1753,7 @@ struct retro_core_option_v2_definition option_defs_fi[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_FI,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_FI,
@@ -1768,7 +1768,7 @@ struct retro_core_option_v2_definition option_defs_fi[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_FI,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_FI,
@@ -1782,7 +1782,7 @@ struct retro_core_option_v2_definition option_defs_fi[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_FI,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_FI,
@@ -1797,7 +1797,7 @@ struct retro_core_option_v2_definition option_defs_fi[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_FI,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_FI,
@@ -1844,7 +1844,7 @@ struct retro_core_option_v2_category option_cats_fr[] = {
 };
 struct retro_core_option_v2_definition option_defs_fr[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_FR,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_FR,
@@ -1858,7 +1858,7 @@ struct retro_core_option_v2_definition option_defs_fr[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_FR,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_FR,
@@ -1872,7 +1872,7 @@ struct retro_core_option_v2_definition option_defs_fr[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_FR,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_FR,
@@ -1887,7 +1887,7 @@ struct retro_core_option_v2_definition option_defs_fr[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_FR,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_FR,
@@ -1901,7 +1901,7 @@ struct retro_core_option_v2_definition option_defs_fr[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_FR,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_FR,
@@ -1916,7 +1916,7 @@ struct retro_core_option_v2_definition option_defs_fr[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_FR,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_FR,
@@ -1963,7 +1963,7 @@ struct retro_core_option_v2_category option_cats_gl[] = {
 };
 struct retro_core_option_v2_definition option_defs_gl[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_GL,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_GL,
@@ -1977,7 +1977,7 @@ struct retro_core_option_v2_definition option_defs_gl[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_GL,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_GL,
@@ -1991,7 +1991,7 @@ struct retro_core_option_v2_definition option_defs_gl[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_GL,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_GL,
@@ -2006,7 +2006,7 @@ struct retro_core_option_v2_definition option_defs_gl[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_GL,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_GL,
@@ -2020,7 +2020,7 @@ struct retro_core_option_v2_definition option_defs_gl[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_GL,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_GL,
@@ -2035,7 +2035,7 @@ struct retro_core_option_v2_definition option_defs_gl[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_GL,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_GL,
@@ -2082,7 +2082,7 @@ struct retro_core_option_v2_category option_cats_he[] = {
 };
 struct retro_core_option_v2_definition option_defs_he[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_HE,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_HE,
@@ -2096,7 +2096,7 @@ struct retro_core_option_v2_definition option_defs_he[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_HE,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_HE,
@@ -2110,7 +2110,7 @@ struct retro_core_option_v2_definition option_defs_he[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_HE,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_HE,
@@ -2125,7 +2125,7 @@ struct retro_core_option_v2_definition option_defs_he[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_HE,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_HE,
@@ -2139,7 +2139,7 @@ struct retro_core_option_v2_definition option_defs_he[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_HE,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_HE,
@@ -2154,7 +2154,7 @@ struct retro_core_option_v2_definition option_defs_he[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_HE,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_HE,
@@ -2201,7 +2201,7 @@ struct retro_core_option_v2_category option_cats_hr[] = {
 };
 struct retro_core_option_v2_definition option_defs_hr[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_HR,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_HR,
@@ -2215,7 +2215,7 @@ struct retro_core_option_v2_definition option_defs_hr[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_HR,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_HR,
@@ -2229,7 +2229,7 @@ struct retro_core_option_v2_definition option_defs_hr[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_HR,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_HR,
@@ -2244,7 +2244,7 @@ struct retro_core_option_v2_definition option_defs_hr[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_HR,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_HR,
@@ -2258,7 +2258,7 @@ struct retro_core_option_v2_definition option_defs_hr[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_HR,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_HR,
@@ -2273,7 +2273,7 @@ struct retro_core_option_v2_definition option_defs_hr[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_HR,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_HR,
@@ -2320,7 +2320,7 @@ struct retro_core_option_v2_category option_cats_hu[] = {
 };
 struct retro_core_option_v2_definition option_defs_hu[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_HU,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_HU,
@@ -2334,7 +2334,7 @@ struct retro_core_option_v2_definition option_defs_hu[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_HU,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_HU,
@@ -2348,7 +2348,7 @@ struct retro_core_option_v2_definition option_defs_hu[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_HU,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_HU,
@@ -2363,7 +2363,7 @@ struct retro_core_option_v2_definition option_defs_hu[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_HU,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_HU,
@@ -2377,7 +2377,7 @@ struct retro_core_option_v2_definition option_defs_hu[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_HU,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_HU,
@@ -2392,7 +2392,7 @@ struct retro_core_option_v2_definition option_defs_hu[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_HU,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_HU,
@@ -2439,7 +2439,7 @@ struct retro_core_option_v2_category option_cats_id[] = {
 };
 struct retro_core_option_v2_definition option_defs_id[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_ID,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_ID,
@@ -2453,7 +2453,7 @@ struct retro_core_option_v2_definition option_defs_id[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_ID,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_ID,
@@ -2467,7 +2467,7 @@ struct retro_core_option_v2_definition option_defs_id[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_ID,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_ID,
@@ -2482,7 +2482,7 @@ struct retro_core_option_v2_definition option_defs_id[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_ID,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_ID,
@@ -2496,7 +2496,7 @@ struct retro_core_option_v2_definition option_defs_id[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_ID,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_ID,
@@ -2511,7 +2511,7 @@ struct retro_core_option_v2_definition option_defs_id[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_ID,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_ID,
@@ -2558,7 +2558,7 @@ struct retro_core_option_v2_category option_cats_it[] = {
 };
 struct retro_core_option_v2_definition option_defs_it[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_IT,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_IT,
@@ -2572,7 +2572,7 @@ struct retro_core_option_v2_definition option_defs_it[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_IT,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_IT,
@@ -2586,7 +2586,7 @@ struct retro_core_option_v2_definition option_defs_it[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_IT,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_IT,
@@ -2601,7 +2601,7 @@ struct retro_core_option_v2_definition option_defs_it[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_IT,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_IT,
@@ -2615,7 +2615,7 @@ struct retro_core_option_v2_definition option_defs_it[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_IT,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_IT,
@@ -2630,7 +2630,7 @@ struct retro_core_option_v2_definition option_defs_it[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_IT,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_IT,
@@ -2677,7 +2677,7 @@ struct retro_core_option_v2_category option_cats_ja[] = {
 };
 struct retro_core_option_v2_definition option_defs_ja[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_JA,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_JA,
@@ -2691,7 +2691,7 @@ struct retro_core_option_v2_definition option_defs_ja[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_JA,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_JA,
@@ -2705,7 +2705,7 @@ struct retro_core_option_v2_definition option_defs_ja[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_JA,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_JA,
@@ -2720,7 +2720,7 @@ struct retro_core_option_v2_definition option_defs_ja[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_JA,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_JA,
@@ -2734,7 +2734,7 @@ struct retro_core_option_v2_definition option_defs_ja[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_JA,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_JA,
@@ -2749,7 +2749,7 @@ struct retro_core_option_v2_definition option_defs_ja[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_JA,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_JA,
@@ -2796,7 +2796,7 @@ struct retro_core_option_v2_category option_cats_ko[] = {
 };
 struct retro_core_option_v2_definition option_defs_ko[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_KO,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_KO,
@@ -2810,7 +2810,7 @@ struct retro_core_option_v2_definition option_defs_ko[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_KO,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_KO,
@@ -2824,7 +2824,7 @@ struct retro_core_option_v2_definition option_defs_ko[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_KO,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_KO,
@@ -2839,7 +2839,7 @@ struct retro_core_option_v2_definition option_defs_ko[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_KO,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_KO,
@@ -2853,7 +2853,7 @@ struct retro_core_option_v2_definition option_defs_ko[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_KO,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_KO,
@@ -2868,7 +2868,7 @@ struct retro_core_option_v2_definition option_defs_ko[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_KO,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_KO,
@@ -2915,7 +2915,7 @@ struct retro_core_option_v2_category option_cats_mt[] = {
 };
 struct retro_core_option_v2_definition option_defs_mt[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_MT,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_MT,
@@ -2929,7 +2929,7 @@ struct retro_core_option_v2_definition option_defs_mt[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_MT,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_MT,
@@ -2943,7 +2943,7 @@ struct retro_core_option_v2_definition option_defs_mt[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_MT,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_MT,
@@ -2958,7 +2958,7 @@ struct retro_core_option_v2_definition option_defs_mt[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_MT,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_MT,
@@ -2972,7 +2972,7 @@ struct retro_core_option_v2_definition option_defs_mt[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_MT,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_MT,
@@ -2987,7 +2987,7 @@ struct retro_core_option_v2_definition option_defs_mt[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_MT,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_MT,
@@ -3034,7 +3034,7 @@ struct retro_core_option_v2_category option_cats_nl[] = {
 };
 struct retro_core_option_v2_definition option_defs_nl[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_NL,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_NL,
@@ -3048,7 +3048,7 @@ struct retro_core_option_v2_definition option_defs_nl[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_NL,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_NL,
@@ -3062,7 +3062,7 @@ struct retro_core_option_v2_definition option_defs_nl[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_NL,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_NL,
@@ -3077,7 +3077,7 @@ struct retro_core_option_v2_definition option_defs_nl[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_NL,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_NL,
@@ -3091,7 +3091,7 @@ struct retro_core_option_v2_definition option_defs_nl[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_NL,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_NL,
@@ -3106,7 +3106,7 @@ struct retro_core_option_v2_definition option_defs_nl[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_NL,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_NL,
@@ -3153,7 +3153,7 @@ struct retro_core_option_v2_category option_cats_no[] = {
 };
 struct retro_core_option_v2_definition option_defs_no[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_NO,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_NO,
@@ -3167,7 +3167,7 @@ struct retro_core_option_v2_definition option_defs_no[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_NO,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_NO,
@@ -3181,7 +3181,7 @@ struct retro_core_option_v2_definition option_defs_no[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_NO,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_NO,
@@ -3196,7 +3196,7 @@ struct retro_core_option_v2_definition option_defs_no[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_NO,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_NO,
@@ -3210,7 +3210,7 @@ struct retro_core_option_v2_definition option_defs_no[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_NO,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_NO,
@@ -3225,7 +3225,7 @@ struct retro_core_option_v2_definition option_defs_no[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_NO,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_NO,
@@ -3272,7 +3272,7 @@ struct retro_core_option_v2_category option_cats_oc[] = {
 };
 struct retro_core_option_v2_definition option_defs_oc[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_OC,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_OC,
@@ -3286,7 +3286,7 @@ struct retro_core_option_v2_definition option_defs_oc[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_OC,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_OC,
@@ -3300,7 +3300,7 @@ struct retro_core_option_v2_definition option_defs_oc[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_OC,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_OC,
@@ -3315,7 +3315,7 @@ struct retro_core_option_v2_definition option_defs_oc[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_OC,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_OC,
@@ -3329,7 +3329,7 @@ struct retro_core_option_v2_definition option_defs_oc[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_OC,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_OC,
@@ -3344,7 +3344,7 @@ struct retro_core_option_v2_definition option_defs_oc[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_OC,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_OC,
@@ -3391,7 +3391,7 @@ struct retro_core_option_v2_category option_cats_pl[] = {
 };
 struct retro_core_option_v2_definition option_defs_pl[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_PL,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_PL,
@@ -3405,7 +3405,7 @@ struct retro_core_option_v2_definition option_defs_pl[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_PL,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_PL,
@@ -3419,7 +3419,7 @@ struct retro_core_option_v2_definition option_defs_pl[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_PL,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_PL,
@@ -3434,7 +3434,7 @@ struct retro_core_option_v2_definition option_defs_pl[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_PL,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_PL,
@@ -3448,7 +3448,7 @@ struct retro_core_option_v2_definition option_defs_pl[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_PL,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_PL,
@@ -3463,7 +3463,7 @@ struct retro_core_option_v2_definition option_defs_pl[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_PL,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_PL,
@@ -3510,7 +3510,7 @@ struct retro_core_option_v2_category option_cats_pt_br[] = {
 };
 struct retro_core_option_v2_definition option_defs_pt_br[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_PT_BR,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_PT_BR,
@@ -3524,7 +3524,7 @@ struct retro_core_option_v2_definition option_defs_pt_br[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_PT_BR,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_PT_BR,
@@ -3538,7 +3538,7 @@ struct retro_core_option_v2_definition option_defs_pt_br[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_PT_BR,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_PT_BR,
@@ -3553,7 +3553,7 @@ struct retro_core_option_v2_definition option_defs_pt_br[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_PT_BR,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_PT_BR,
@@ -3567,7 +3567,7 @@ struct retro_core_option_v2_definition option_defs_pt_br[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_PT_BR,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_PT_BR,
@@ -3582,7 +3582,7 @@ struct retro_core_option_v2_definition option_defs_pt_br[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_PT_BR,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_PT_BR,
@@ -3629,7 +3629,7 @@ struct retro_core_option_v2_category option_cats_pt_pt[] = {
 };
 struct retro_core_option_v2_definition option_defs_pt_pt[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_PT_PT,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_PT_PT,
@@ -3643,7 +3643,7 @@ struct retro_core_option_v2_definition option_defs_pt_pt[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_PT_PT,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_PT_PT,
@@ -3657,7 +3657,7 @@ struct retro_core_option_v2_definition option_defs_pt_pt[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_PT_PT,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_PT_PT,
@@ -3672,7 +3672,7 @@ struct retro_core_option_v2_definition option_defs_pt_pt[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_PT_PT,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_PT_PT,
@@ -3686,7 +3686,7 @@ struct retro_core_option_v2_definition option_defs_pt_pt[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_PT_PT,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_PT_PT,
@@ -3701,7 +3701,7 @@ struct retro_core_option_v2_definition option_defs_pt_pt[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_PT_PT,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_PT_PT,
@@ -3748,7 +3748,7 @@ struct retro_core_option_v2_category option_cats_ro[] = {
 };
 struct retro_core_option_v2_definition option_defs_ro[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_RO,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_RO,
@@ -3762,7 +3762,7 @@ struct retro_core_option_v2_definition option_defs_ro[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_RO,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_RO,
@@ -3776,7 +3776,7 @@ struct retro_core_option_v2_definition option_defs_ro[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_RO,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_RO,
@@ -3791,7 +3791,7 @@ struct retro_core_option_v2_definition option_defs_ro[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_RO,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_RO,
@@ -3805,7 +3805,7 @@ struct retro_core_option_v2_definition option_defs_ro[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_RO,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_RO,
@@ -3820,7 +3820,7 @@ struct retro_core_option_v2_definition option_defs_ro[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_RO,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_RO,
@@ -3867,7 +3867,7 @@ struct retro_core_option_v2_category option_cats_ru[] = {
 };
 struct retro_core_option_v2_definition option_defs_ru[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_RU,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_RU,
@@ -3881,7 +3881,7 @@ struct retro_core_option_v2_definition option_defs_ru[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_RU,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_RU,
@@ -3895,7 +3895,7 @@ struct retro_core_option_v2_definition option_defs_ru[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_RU,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_RU,
@@ -3910,7 +3910,7 @@ struct retro_core_option_v2_definition option_defs_ru[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_RU,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_RU,
@@ -3924,7 +3924,7 @@ struct retro_core_option_v2_definition option_defs_ru[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_RU,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_RU,
@@ -3939,7 +3939,7 @@ struct retro_core_option_v2_definition option_defs_ru[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_RU,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_RU,
@@ -3986,7 +3986,7 @@ struct retro_core_option_v2_category option_cats_si[] = {
 };
 struct retro_core_option_v2_definition option_defs_si[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_SI,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_SI,
@@ -4000,7 +4000,7 @@ struct retro_core_option_v2_definition option_defs_si[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_SI,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_SI,
@@ -4014,7 +4014,7 @@ struct retro_core_option_v2_definition option_defs_si[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_SI,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_SI,
@@ -4029,7 +4029,7 @@ struct retro_core_option_v2_definition option_defs_si[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_SI,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_SI,
@@ -4043,7 +4043,7 @@ struct retro_core_option_v2_definition option_defs_si[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_SI,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_SI,
@@ -4058,7 +4058,7 @@ struct retro_core_option_v2_definition option_defs_si[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_SI,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_SI,
@@ -4105,7 +4105,7 @@ struct retro_core_option_v2_category option_cats_sk[] = {
 };
 struct retro_core_option_v2_definition option_defs_sk[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_SK,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_SK,
@@ -4119,7 +4119,7 @@ struct retro_core_option_v2_definition option_defs_sk[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_SK,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_SK,
@@ -4133,7 +4133,7 @@ struct retro_core_option_v2_definition option_defs_sk[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_SK,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_SK,
@@ -4148,7 +4148,7 @@ struct retro_core_option_v2_definition option_defs_sk[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_SK,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_SK,
@@ -4162,7 +4162,7 @@ struct retro_core_option_v2_definition option_defs_sk[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_SK,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_SK,
@@ -4177,7 +4177,7 @@ struct retro_core_option_v2_definition option_defs_sk[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_SK,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_SK,
@@ -4224,7 +4224,7 @@ struct retro_core_option_v2_category option_cats_sr[] = {
 };
 struct retro_core_option_v2_definition option_defs_sr[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_SR,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_SR,
@@ -4238,7 +4238,7 @@ struct retro_core_option_v2_definition option_defs_sr[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_SR,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_SR,
@@ -4252,7 +4252,7 @@ struct retro_core_option_v2_definition option_defs_sr[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_SR,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_SR,
@@ -4267,7 +4267,7 @@ struct retro_core_option_v2_definition option_defs_sr[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_SR,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_SR,
@@ -4281,7 +4281,7 @@ struct retro_core_option_v2_definition option_defs_sr[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_SR,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_SR,
@@ -4296,7 +4296,7 @@ struct retro_core_option_v2_definition option_defs_sr[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_SR,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_SR,
@@ -4343,7 +4343,7 @@ struct retro_core_option_v2_category option_cats_sv[] = {
 };
 struct retro_core_option_v2_definition option_defs_sv[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_SV,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_SV,
@@ -4357,7 +4357,7 @@ struct retro_core_option_v2_definition option_defs_sv[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_SV,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_SV,
@@ -4371,7 +4371,7 @@ struct retro_core_option_v2_definition option_defs_sv[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_SV,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_SV,
@@ -4386,7 +4386,7 @@ struct retro_core_option_v2_definition option_defs_sv[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_SV,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_SV,
@@ -4400,7 +4400,7 @@ struct retro_core_option_v2_definition option_defs_sv[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_SV,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_SV,
@@ -4415,7 +4415,7 @@ struct retro_core_option_v2_definition option_defs_sv[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_SV,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_SV,
@@ -4462,7 +4462,7 @@ struct retro_core_option_v2_category option_cats_tr[] = {
 };
 struct retro_core_option_v2_definition option_defs_tr[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_TR,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_TR,
@@ -4476,7 +4476,7 @@ struct retro_core_option_v2_definition option_defs_tr[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_TR,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_TR,
@@ -4490,7 +4490,7 @@ struct retro_core_option_v2_definition option_defs_tr[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_TR,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_TR,
@@ -4505,7 +4505,7 @@ struct retro_core_option_v2_definition option_defs_tr[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_TR,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_TR,
@@ -4519,7 +4519,7 @@ struct retro_core_option_v2_definition option_defs_tr[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_TR,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_TR,
@@ -4534,7 +4534,7 @@ struct retro_core_option_v2_definition option_defs_tr[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_TR,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_TR,
@@ -4581,7 +4581,7 @@ struct retro_core_option_v2_category option_cats_uk[] = {
 };
 struct retro_core_option_v2_definition option_defs_uk[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_UK,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_UK,
@@ -4595,7 +4595,7 @@ struct retro_core_option_v2_definition option_defs_uk[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_UK,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_UK,
@@ -4609,7 +4609,7 @@ struct retro_core_option_v2_definition option_defs_uk[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_UK,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_UK,
@@ -4624,7 +4624,7 @@ struct retro_core_option_v2_definition option_defs_uk[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_UK,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_UK,
@@ -4638,7 +4638,7 @@ struct retro_core_option_v2_definition option_defs_uk[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_UK,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_UK,
@@ -4653,7 +4653,7 @@ struct retro_core_option_v2_definition option_defs_uk[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_UK,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_UK,
@@ -4700,7 +4700,7 @@ struct retro_core_option_v2_category option_cats_val[] = {
 };
 struct retro_core_option_v2_definition option_defs_val[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_VAL,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_VAL,
@@ -4714,7 +4714,7 @@ struct retro_core_option_v2_definition option_defs_val[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_VAL,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_VAL,
@@ -4728,7 +4728,7 @@ struct retro_core_option_v2_definition option_defs_val[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_VAL,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_VAL,
@@ -4743,7 +4743,7 @@ struct retro_core_option_v2_definition option_defs_val[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_VAL,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_VAL,
@@ -4757,7 +4757,7 @@ struct retro_core_option_v2_definition option_defs_val[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_VAL,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_VAL,
@@ -4772,7 +4772,7 @@ struct retro_core_option_v2_definition option_defs_val[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_VAL,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_VAL,
@@ -4819,7 +4819,7 @@ struct retro_core_option_v2_category option_cats_vn[] = {
 };
 struct retro_core_option_v2_definition option_defs_vn[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       YABAUSE_FRAMESKIP_LABEL_VN,
       NULL,
       YABAUSE_FRAMESKIP_INFO_0_VN,
@@ -4833,7 +4833,7 @@ struct retro_core_option_v2_definition option_defs_vn[] = {
       "disabled"
    },
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       YABAUSE_FORCE_HLE_BIOS_LABEL_VN,
       NULL,
       YABAUSE_FORCE_HLE_BIOS_INFO_0_VN,
@@ -4847,7 +4847,7 @@ struct retro_core_option_v2_definition option_defs_vn[] = {
       "disabled"
    },
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       YABAUSE_ADDON_CARTRIDGE_LABEL_VN,
       NULL,
       YABAUSE_ADDON_CARTRIDGE_INFO_0_VN,
@@ -4862,7 +4862,7 @@ struct retro_core_option_v2_definition option_defs_vn[] = {
       "none"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       YABAUSE_MULTITAP_PORT1_LABEL_VN,
       NULL,
       YABAUSE_MULTITAP_PORT1_INFO_0_VN,
@@ -4876,7 +4876,7 @@ struct retro_core_option_v2_definition option_defs_vn[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       YABAUSE_MULTITAP_PORT2_LABEL_VN,
       NULL,
       YABAUSE_MULTITAP_PORT2_INFO_0_VN,
@@ -4891,7 +4891,7 @@ struct retro_core_option_v2_definition option_defs_vn[] = {
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       YABAUSE_NUMTHREADS_LABEL_VN,
       NULL,
       YABAUSE_NUMTHREADS_INFO_0_VN,

@@ -1,8 +1,122 @@
-# Yabause - A Saturn Emulator
+# Yabadabadoo
 
-[Documentation](http://wiki.yabause.org/index.php5?title=Documentations) | [Homepage](https://yabause.org/) | [Development Builds](https://yabause.org/download/)
+A Sega Saturn emulator core for RetroArch, tuned to run on Miyoo Mini devices such 
+as the Miyoo Mini+, Miyoo Mini V1-V4, and Miyoo Mini Flip. The release is packaged
+for OnionOS though it should work for other frontends. It is a fork of the libretro 
+port of Yabause.
 
-[![Travis CI Build Status](https://travis-ci.org/Yabause/yabause.svg?branch=master)](https://travis-ci.org/Yabause/yabause)
-[![Appveyor Build status](https://ci.appveyor.com/api/projects/status/n35d1obw5deo1dsl/branch/master?svg=true)](https://ci.appveyor.com/project/Guillaumito/yabause)
-[![CircleCI Build Status](https://circleci.com/gh/Yabause/yabause/tree/master.svg?style=shield&circle-token=c3153fb8a4e9d5a8801604ce5cac566c5ea16774)](https://circleci.com/gh/Yabause/yabause)
-[![Coverity Scan Status](https://scan.coverity.com/projects/6271/badge.svg)](https://scan.coverity.com/projects/6271)
+### Notes:
+
+This project has primarily been developed through the use of AI coding agents. Even
+though I have been impressed with the results, this project should be viewed as inherently
+experimental and not as a replacement for emulators written by real humans who know what
+they're doing.
+
+This project has been exclusively tested on my Miyoo Mini+. While it should work on other 
+Miyoo Mini devices I can't guarantee there won't be device specific issues. The Miyoo Mini V4
+for instance has a screen resolution that differs from other Miyoo devices. While that
+*shouldn't* break anything I'd still be interested to hear from V4 users that scaling and 
+rendering works as expected.
+
+Version 0.1. This is an early release: expect bugs, and expect some games to run slowly or
+not at all.
+
+PAL ROMs can be especially useful for this emulator as they're rendered at a lower refresh
+rate, and are therefore generally able to run smoother. However the implementation of proper 
+PAL support into this core is still at early stages.  
+
+## Requirements
+
+- Miyoo Mini device with Onion OS (other devices remain untested)
+- A Saturn BIOS file (not included, see below)
+- Your own Saturn games
+
+## Install
+
+1. Download the release zip.
+2. Extract it to the root of the SD card. It adds these files:
+
+       Emu/SATURN/                                        menu entry and launch script
+       Icons/Default/saturn.png                           menu icon
+       RetroArch/.retroarch/cores/yabadabadoo_libretro.so the core
+       RetroArch/.retroarch/cores/yabadabadoo_libretro.info
+       Roms/SATURN/put_roms_here.txt
+
+3. Put a Saturn BIOS in the `BIOS` folder of the SD card (see below).
+4. Put your games in `Roms/SATURN`. Supported formats: .cue (with its .bin files), .chd,
+   .iso, .mds, .ccd, .m3u (multi-disc games), .zip.
+5. Sega Saturn now shows up in Onion's game list.
+
+If you copy the files with the macOS Finder, it also leaves hidden `._` files on the card.
+They are harmless; `dot_clean -m /Volumes/<card name>` removes them.
+
+## Usage
+
+After installation Yabadabadoo should work like any other emulator on Onion. The settings
+page is currently a little cluttered, expect that to change in later updates. The most
+relevant core options for solving performance issues should be changing frameskip type,
+interval, and threshold.
+
+## BIOS
+
+A real Saturn BIOS is required. Without one the core shows a screen asking for it instead
+of starting the game. Put one of these files in the `BIOS` folder:
+
+    sega_101.bin     Japan v1.01       md5 85ec9ca47d8f6807718151cbcca8b964
+    mpr-17933.bin    USA/Europe v1.00  md5 3240872c70984b6cbfda1586cab68dbe
+    saturn_bios.bin  any of the above, renamed
+
+## CPU clock
+
+The launch script runs the Miyoo at 1700 MHz, which is safe on every Mini model. The value
+is stored in `Saves/CurrentProfile/config/Yabadabadoo/cpuclock.txt` (created on the first
+launch); edit that file to change it. Higher clocks run faster but are at your own risk.
+
+## Known issues
+
+- FMV's in some games still have some unresolved hiccups
+- The PAL version of Nights into Dreams shows a black screen instead of an initial FMV. Pressing start lets you skip it and play as normal.
+- Shining Force III has a texture flickering issue in its opening scene
+
+## Building
+
+The core is built with the Miyoo Mini toolchain:
+https://github.com/shauninman/union-miyoomini-toolchain
+
+1. Set up the toolchain as described in its README and open its build shell (`make shell`).
+2. Inside the shell, in the toolchain's `workspace` folder:
+
+       git clone https://github.com/ProRapSuperstarOriginalMaster/Yabadabadoo.git
+       cd Yabadabadoo/yabause/src/libretro
+       make platform=miyoomini -j4
+
+   This produces `yabadabadoo_libretro.so`.
+3. To make the release zip (on any machine with `zip`):
+
+       packaging/make-onion-zip.sh yabause/src/libretro/yabadabadoo_libretro.so yabadabadoo.zip
+
+## License
+
+Yabadabadoo is free software, licensed under the GNU General Public License version 2 or
+(at your option) any later version, like Yabause. See `yabause/COPYING`. The source code
+for every release is the matching tag of this repository.
+
+Bundled third-party code keeps its own license: libchdr, zlib, LZMA SDK and FLAC
+(`yabause/src/libchdr`), Musashi (`yabause/src/musashi`), JUnzip (`yabause/src/junzip.c`)
+and libretro-common (`yabause/src/libretro/libretro-common`). Their notices are collected in
+`packaging/THIRD-PARTY-NOTICES.txt`, which the release zip includes in `Emu/SATURN/`.
+
+Changes from upstream: this fork changes the libretro port of Yabause for speed on the
+Miyoo Mini (software renderer, SH-2 recompiler, threading, frame skipping) and for
+packaging on Onion OS. The full list is in the git history.
+
+## Credits
+
+- Yabause, by Guillaume Duhamel, Theo Berkau and the Yabause team and contributors
+  (see `yabause/AUTHORS`): https://github.com/Yabause/yabause
+- The libretro port of Yabause: https://github.com/libretro/yabause
+- Onion OS, whose emulator packaging this release follows: https://github.com/OnionUI/Onion
+- The Miyoo Mini toolchain by Shaun Inman: https://github.com/shauninman/union-miyoomini-toolchain
+
+Sega and Sega Saturn are trademarks of Sega. This project is not affiliated with or
+endorsed by Sega. No BIOS files or games are included.

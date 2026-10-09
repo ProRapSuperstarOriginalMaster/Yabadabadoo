@@ -66,7 +66,7 @@ endif
 
 CORE_DIR := .
 
-TARGET_NAME = yabause
+TARGET_NAME = yabadabadoo
 CC_AS ?= $(CC)
 GIT_VERSION := " $(shell git rev-parse --short HEAD || echo unknown)"
 ifneq ($(GIT_VERSION)," unknown")

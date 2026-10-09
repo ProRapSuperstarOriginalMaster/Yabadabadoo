@@ -1,0 +1,8 @@
+Put Sega Saturn games here.
+
+Supported formats: .cue (with its .bin files), .chd, .iso, .mds, .ccd, .m3u (multi-disc), .zip.
+For multi-disc games, an .m3u file listing the discs lets you swap discs from the RetroArch menu.
+
+A real Saturn BIOS is required (games won't start without one). Put one of these in /BIOS:
+  sega_101.bin    (Japan v1.01, md5 85ec9ca47d8f6807718151cbcca8b964)
+  mpr-17933.bin   (USA/Europe v1.00, md5 3240872c70984b6cbfda1586cab68dbe)

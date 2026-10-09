@@ -37,7 +37,7 @@ struct retro_core_option_v2_category option_cats_us[] = {
 
 struct retro_core_option_v2_definition option_defs_us[] = {
    {
-      "yabause_frameskip",
+      "yabadabadoo_frameskip",
       "Frameskip",
       NULL,
       "Skip rendering frames to improve performance. 'Auto' skips when the frontend reports an audio buffer underrun. 'Auto (Threshold)' skips when the audio buffer drops below 'Frameskip Threshold'. 'Fixed Interval' always skips 'Frameskip Interval' frames between rendered frames.",
@@ -50,10 +50,10 @@ struct retro_core_option_v2_definition option_defs_us[] = {
          { "fixed_interval", "Fixed Interval" },
          { NULL, NULL},
       },
-      "disabled"
+      "auto_threshold"
    },
    {
-      "yabause_frameskip_threshold",
+      "yabadabadoo_frameskip_threshold",
       "Frameskip Threshold (%)",
       NULL,
       "When 'Frameskip' is 'Auto (Threshold)', the audio buffer occupancy (percent) below which frames are skipped. Higher values reduce crackling at the cost of more skipped frames.",
@@ -81,7 +81,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       "33"
    },
    {
-      "yabause_frameskip_interval",
+      "yabadabadoo_frameskip_interval",
       "Frameskip Interval",
       NULL,
       "With 'Fixed Interval', the number of frames skipped after each rendered frame (1 = render every 2nd frame). With the 'Auto' modes, the maximum number of consecutive skipped frames.",
@@ -95,10 +95,10 @@ struct retro_core_option_v2_definition option_defs_us[] = {
          { "5", NULL },
          { NULL, NULL },
       },
-      "3"
+      "2"
    },
    {
-      "yabause_frameskip_sprites",
+      "yabadabadoo_frameskip_sprites",
       "Frameskip: Skip Polygon Drawing",
       NULL,
       "Also skip drawing sprites and polygons (VDP1) on skipped frames. Faster in some games (Shining Force III), but shown frames can mix polygons or FMV images from an older frame with current backgrounds, which looks like stutter, rubber banding or jumpy video (most 3D games, sprite-based FMVs). 'Disabled' shows every rendered frame exactly as without frameskip, drawing only what is shown where it can.",
@@ -111,8 +111,9 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       },
       "disabled"
    },
+#if 0 /* removed: a real BIOS and the recompiler are required (Yabadabadoo) */
    {
-      "yabause_force_hle_bios",
+      "yabadabadoo_force_hle_bios",
       "Force HLE BIOS (Restart Required)",
       NULL,
       "Use High Level Emulation BIOS. Not recommended, as it's causing more issues than it solves.",
@@ -125,8 +126,9 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       },
       "disabled"
    },
+#endif
    {
-      "yabause_addon_cartridge",
+      "yabadabadoo_addon_cartridge",
       "Add-on Cartridge (Restart Required)",
       NULL,
       "Emulate an add-on RAM expansion cartridge. Some games require this to be played, while a few others will have improved performance.",
@@ -138,10 +140,10 @@ struct retro_core_option_v2_definition option_defs_us[] = {
          { "4M_ram", "4MB RAM" },
          { NULL, NULL},
       },
-      "none"
+      "4M_ram"
    },
    {
-      "yabause_multitap_port1",
+      "yabadabadoo_multitap_port1",
       "6Player Adaptor on Port 1",
       NULL,
       "Enable multitap in port 1.",
@@ -155,7 +157,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       "disabled"
    },
    {
-      "yabause_multitap_port2",
+      "yabadabadoo_multitap_port2",
       "6Player Adaptor on Port 2",
       NULL,
       "Enable multitap in port 2.",
@@ -169,8 +171,9 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       "disabled"
    },
 #ifdef SH2_DYNAREC
+#if 0 /* removed: a real BIOS and the recompiler are required (Yabadabadoo) */
    {
-      "yabause_sh2_core",
+      "yabadabadoo_sh2_core",
       "SH2 Core (Restart Required)",
       NULL,
       "CPU emulation for the two SH-2 processors. 'Dynamic Recompiler' is much faster but experimental and less accurate; it requires a real BIOS.",
@@ -181,11 +184,12 @@ struct retro_core_option_v2_definition option_defs_us[] = {
          { "dynarec",     "Dynamic Recompiler" },
          { NULL, NULL },
       },
-      "interpreter"
+      "dynarec"
    },
 #endif
+#endif
    {
-      "yabause_vdp1_draw_timing",
+      "yabadabadoo_vdp1_draw_timing",
       "VDP1 Draw Timing",
       NULL,
       "When games running at 30 fps or less (NiGHTS, Panzer Dragoon, Shining Force III) draw their 3D. 'After Frame Change' draws once after each frame change, like the hardware: much faster in those games, and the polygons shown are the ones drawn right after the change. 'Every Frame' is the old behaviour: redraws every frame, slower, polygons can be a frame ahead of the backgrounds. Games that change every frame look the same either way.",
@@ -199,7 +203,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       "frame_change"
    },
    {
-      "yabause_video_standard",
+      "yabadabadoo_video_standard",
       "Video Standard",
       NULL,
       "Timing of the emulated console. 'Auto' follows the disc: European (PAL) games run at 50 frames per second, as on a PAL Saturn, and need less speed for full speed. 'NTSC' runs every game at 60 (PAL games then run 20% fast, as with this core before). Takes effect immediately; saves made with the other timing are converted when loaded.",
@@ -214,7 +218,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       "auto"
    },
    {
-      "yabause_m68k_idle_skip",
+      "yabadabadoo_m68k_idle_skip",
       "Sound CPU Idle Skipping",
       NULL,
       "Skip the sound CPU's time while its driver only polls for work (most of the time in most games), which saves 2-3 ms of each frame. Notes can start a few samples earlier or later than without it. 'Disabled' runs every cycle.",
@@ -228,7 +232,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       "enabled"
    },
    {
-      "yabause_rotation_line_color",
+      "yabadabadoo_rotation_line_color",
       "Per-Pixel Rotation Line Colour",
       NULL,
       "Rotating backgrounds whose coefficient table carries line colour data (Panzer Dragoon's sea haze) get it per pixel, as on the hardware. 'Disabled' uses one colour per scanline: slightly faster, but the haze shows a horizontal edge when the camera rolls.",
@@ -242,7 +246,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       "enabled"
    },
    {
-      "yabause_sh2_timeslice",
+      "yabadabadoo_sh2_timeslice",
       "SH2 Time Slice (Restart Required)",
       NULL,
       "How often the SH-2 CPUs are synchronized with the rest of the system. 'Scanline' is faster than 'Tenth of a scanline' but less accurate. Only affects the interpreter; the dynamic recompiler always slices per tenth of a scanline.",
@@ -253,11 +257,11 @@ struct retro_core_option_v2_definition option_defs_us[] = {
          { "line",     "Scanline" },
          { NULL, NULL },
       },
-      "deciline"
+      "line"
    },
 #ifdef HAVE_THREADS
    {
-      "yabause_numthreads",
+      "yabadabadoo_numthreads",
       "Number of Threads (Restart Required)",
       NULL,
       "Depending on your CPU, changing this value can improve performance.",
@@ -275,7 +279,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       "4"
    },
    {
-      "yabause_worker_priority",
+      "yabadabadoo_worker_priority",
       "Render Thread Priority (Restart Required)",
       NULL,
       "Run the rendering worker threads at a lower priority than the emulation thread (the 3D workers as batch threads that don't interrupt it), so on a dual-core CPU the emulation keeps a core when workers wake up. 'Low' is faster on the Miyoo Mini (Linux only).",

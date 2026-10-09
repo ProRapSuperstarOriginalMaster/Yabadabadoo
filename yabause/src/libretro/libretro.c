@@ -64,6 +64,10 @@ int game_height;
 
 static bool one_frame_rendered = false;
 static bool hle_bios_force = false;
+/* No BIOS found and one is required: instead of the game, show a screen
+ * saying where to put one (see no_bios_run()) */
+static bool no_bios_screen = false;
+static bool no_bios_msg_sent = false;
 
 /* Frameskip, driven by the frontend's audio buffer status */
 enum { FRAMESKIP_NONE, FRAMESKIP_AUTO, FRAMESKIP_AUTO_THRESHOLD, FRAMESKIP_FIXED_INTERVAL };
@@ -165,6 +169,118 @@ void retro_set_audio_sample(retro_audio_sample_t cb) { (void)cb; }
 void retro_set_audio_sample_batch(retro_audio_sample_batch_t cb) { audio_batch_cb = cb; }
 void retro_set_input_poll(retro_input_poll_t cb) { input_poll_cb = cb; }
 void retro_set_input_state(retro_input_state_t cb) { input_state_cb = cb; }
+
+/* ---- No BIOS: a screen instead of the game -------------------------------
+ * The recompiler needs a real BIOS and the interpreter (with the HLE BIOS) is
+ * far too slow on the Miyoo, so builds with the recompiler refuse to start a
+ * game without one. YAB_REQUIRE_BIOS=1 turns this on in other builds (to test
+ * it), YAB_SH2_INTERP=1 turns it off (debugging on the device). */
+#include "../font.h"   /* Yabause's OSD font: 9x10 cells, '#' = ink, '.' = outline */
+
+static bool bios_required(void)
+{
+   const char *e = getenv("YAB_REQUIRE_BIOS");
+   if (e)
+      return e[0] == '1';
+#ifdef SH2_DYNAREC
+   e = getenv("YAB_SH2_INTERP");
+   return !(e && e[0] == '1');
+#else
+   return false;
+#endif
+}
+
+/* Punctuation the OSD font lacks, same 9x10 format */
+static const char *no_bios_glyph(char c)
+{
+   static const char dot[]   = "         " "         " "         " "         " "         "
+                               "         " " ...     " " .##.    " " .##.    " "  ..     ";
+   static const char dash[]  = "         " "         " "         " "         " " ....... "
+                               " .#####. " " ....... " "         " "         " "         ";
+   static const char under[] = "         " "         " "         " "         " "         "
+                               "         " "         " "........." ".#######." "........."; 
+   static const char colon[] = "         " "         " " ...     " " .##.    " " .##.    "
+                               "  ..     " " ...     " " .##.    " " .##.    " "  ..     ";
+   switch (c)
+   {
+      case '.': return dot;
+      case '-': return dash;
+      case '_': return under;
+      case ':': return colon;
+   }
+   return NULL;
+}
+
+static void no_bios_text(u16 *fb, int x, int y, const char *str)
+{
+#ifdef USE_RGB_565
+   const u16 ink = 0xFFFF;
+#else
+   const u16 ink = 0x7FFF;
+#endif
+   for (; *str; str++, x += 8)
+   {
+      const char *g = no_bios_glyph(*str);
+      int l, p;
+      for (l = 0; l < 10; l++)
+         for (p = 0; p < 9; p++)
+         {
+            char c;
+            if (g)
+               c = g[l * 9 + p];
+            else if (*str > ' ' && (unsigned char)*str < 128)
+               c = font[*str * 10 + l][p];
+            else
+               c = ' ';
+            if (x + p < 0 || x + p >= 320 || y + l < 0 || y + l >= 240)
+               continue;
+            if (c == '#')
+               fb[(y + l) * 320 + x + p] = ink;
+            else if (c == '.')
+               fb[(y + l) * 320 + x + p] = 0;
+         }
+   }
+}
+
+static void no_bios_run(void)
+{
+   static u16 fb[320 * 240];
+   static int16_t silence[2 * 735];
+   static const char *lines[] = {
+      "NO SATURN BIOS FOUND",
+      "",
+      "A REAL SATURN BIOS IS NEEDED",
+      "TO RUN GAMES AT FULL SPEED.",
+      "",
+      "PUT ONE OF THESE FILES IN",
+      "THE BIOS FOLDER:",
+      "",
+      "SEGA_101.BIN    JAPAN     ",
+      "MPR-17933.BIN   USA/EUROPE",
+      "SATURN_BIOS.BIN ANY REGION",
+      "",
+      "THEN START THE GAME AGAIN.",
+   };
+   int i, n = sizeof(lines) / sizeof(*lines);
+
+   if (input_poll_cb)
+      input_poll_cb();
+   if (!no_bios_msg_sent)
+   {
+      /* The frontend's own message, with the real (lowercase) file names */
+      struct retro_message msg = {
+         "No Saturn BIOS found. Put sega_101.bin (Japan) or mpr-17933.bin (USA/Europe) in the BIOS folder.",
+         60 * 30 };
+      environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE, &msg);
+      no_bios_msg_sent = true;
+   }
+   for (i = 0; i < 320 * 240; i++)
+      fb[i] = 0x000C; /* dark blue in both 16-bit formats */
+   for (i = 0; i < n; i++)
+      no_bios_text(fb, (320 - (int)strlen(lines[i]) * 8) / 2, (240 - n * 13) / 2 + i * 13, lines[i]);
+   video_cb(fb, 320, 240, 320 * 2);
+   audio_batch_cb(silence, 735);  /* keeps audio-synced frontends pacing at 60 fps */
+}
 
 // PERLIBRETRO
 #define PERCORE_LIBRETRO 2
@@ -592,11 +708,11 @@ static struct retro_system_av_info g_av_info;
 void retro_get_system_info(struct retro_system_info *info)
 {
    memset(info, 0, sizeof(*info));
-   info->library_name     = "Yabause";
+   info->library_name     = "Yabadabadoo";
 #ifndef GIT_VERSION
 #define GIT_VERSION ""
 #endif
-   info->library_version  = "v0.9.15" GIT_VERSION;
+   info->library_version  = "0.1 (Yabause 0.9.15)" GIT_VERSION;
    info->need_fullpath    = true;
    info->block_extract    = true;
    info->valid_extensions = "cue|iso|mds|ccd|zip|chd|m3u";
@@ -663,6 +779,9 @@ size_t retro_serialize_size(void)
 {
    size_t size;
 
+   if (no_bios_screen)
+      return 0;
+
    ScspMuteAudio(SCSP_MUTE_SYSTEM);
    YabSaveStateBuffer(NULL, &size);
    ScspUnMuteAudio(SCSP_MUTE_SYSTEM);
@@ -674,6 +793,9 @@ bool retro_serialize(void *data, size_t size)
 {
    void *buffer;
    size_t out_size;
+
+   if (no_bios_screen)
+      return false;
 
    ScspMuteAudio(SCSP_MUTE_SYSTEM);
    int error = YabSaveStateBuffer (&buffer, &out_size);
@@ -688,6 +810,8 @@ bool retro_serialize(void *data, size_t size)
 
 bool retro_unserialize(const void *data, size_t size)
 {
+   if (no_bios_screen)
+      return false;
    ScspMuteAudio(SCSP_MUTE_SYSTEM);
    int error = YabLoadStateBuffer(data, size);
    ScspUnMuteAudio(SCSP_MUTE_SYSTEM);
@@ -697,6 +821,8 @@ bool retro_unserialize(const void *data, size_t size)
 
 void retro_cheat_reset(void)
 {
+   if (no_bios_screen)
+      return;
    CheatClearCodes();
 }
 
@@ -706,6 +832,8 @@ void retro_cheat_set(unsigned index, bool enabled, const char *code)
    (void)enabled;
    (void)code;
 
+   if (no_bios_screen)
+      return;
    if (CheatAddARCode(code) == 0)
       return;
 }
@@ -817,7 +945,7 @@ static void apply_video_format(void)
 static void check_variables(void)
 {
    struct retro_variable var;
-   var.key = "yabause_frameskip";
+   var.key = "yabadabadoo_frameskip";
    var.value = NULL;
 
    unsigned prev_frameskip_type = frameskip_type;
@@ -833,19 +961,19 @@ static void check_variables(void)
          frameskip_type = FRAMESKIP_FIXED_INTERVAL;
    }
 
-   var.key = "yabause_frameskip_threshold";
+   var.key = "yabadabadoo_frameskip_threshold";
    var.value = NULL;
    frameskip_threshold = 33;
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
       frameskip_threshold = strtol(var.value, NULL, 10);
 
-   var.key = "yabause_frameskip_interval";
+   var.key = "yabadabadoo_frameskip_interval";
    var.value = NULL;
    frameskip_interval = 3;
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
       frameskip_interval = strtol(var.value, NULL, 10);
 
-   var.key = "yabause_frameskip_sprites";
+   var.key = "yabadabadoo_frameskip_sprites";
    var.value = NULL;
    frameskip_sprites = environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value &&
                        !strcmp(var.value, "enabled");
@@ -853,18 +981,10 @@ static void check_variables(void)
    if (frameskip_type != prev_frameskip_type)
       init_frameskip();
 
-   var.key = "yabause_force_hle_bios";
-   var.value = NULL;
+   /* The "Force HLE BIOS" option is gone: a real BIOS is required (see
+    * bios_required()), so hle_bios_force stays false */
 
-   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
-   {
-      if (strcmp(var.value, "disabled") == 0)
-         hle_bios_force = false;
-      else if (strcmp(var.value, "enabled") == 0)
-         hle_bios_force = true;
-   }
-
-   var.key = "yabause_addon_cartridge";
+   var.key = "yabadabadoo_addon_cartridge";
    var.value = NULL;
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
    {
@@ -876,7 +996,7 @@ static void check_variables(void)
          addon_cart_type = CART_DRAM32MBIT;
    }
 
-   var.key = "yabause_multitap_port1";
+   var.key = "yabadabadoo_multitap_port1";
    var.value = NULL;
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
    {
@@ -886,7 +1006,7 @@ static void check_variables(void)
          multitap[0] = 1;
    }
 
-   var.key = "yabause_multitap_port2";
+   var.key = "yabadabadoo_multitap_port2";
    var.value = NULL;
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
    {
@@ -897,26 +1017,27 @@ static void check_variables(void)
    }
 
 #ifdef SH2_DYNAREC
-   var.key = "yabause_sh2_core";
-   var.value = NULL;
-   sh2_use_dynarec = false;
-   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
-      sh2_use_dynarec = strcmp(var.value, "dynarec") == 0;
+   /* No "SH2 Core" option any more: always the recompiler. YAB_SH2_INTERP=1
+    * (debugging only) selects the interpreter */
+   {
+      const char *e = getenv("YAB_SH2_INTERP");
+      sh2_use_dynarec = !(e && e[0] == '1');
+   }
 #endif
 
-   var.key = "yabause_vdp1_draw_timing";
+   var.key = "yabadabadoo_vdp1_draw_timing";
    var.value = NULL;
    Vdp2SetVdp1DrawEveryFrame(environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value &&
                              strcmp(var.value, "every_frame") == 0);
 
 #ifdef HAVE_MUSASHI
-   var.key = "yabause_m68k_idle_skip";
+   var.key = "yabadabadoo_m68k_idle_skip";
    var.value = NULL;
    m68k_idle_skip = !(environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value &&
                       strcmp(var.value, "disabled") == 0);
 #endif
 
-   var.key = "yabause_video_standard";
+   var.key = "yabadabadoo_video_standard";
    var.value = NULL;
    video_standard = -1;
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
@@ -927,18 +1048,18 @@ static void check_variables(void)
          video_standard = VIDEOFORMATTYPE_PAL;
    }
 
-   var.key = "yabause_rotation_line_color";
+   var.key = "yabadabadoo_rotation_line_color";
    var.value = NULL;
    vidsoft_rotation_dot_linecolor = !(environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value &&
                                       strcmp(var.value, "disabled") == 0);
 
-   var.key = "yabause_sh2_timeslice";
+   var.key = "yabadabadoo_sh2_timeslice";
    var.value = NULL;
    deciline_mode = 1;
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
       deciline_mode = strcmp(var.value, "line") != 0;
 
-   var.key = "yabause_numthreads";
+   var.key = "yabadabadoo_numthreads";
    var.value = NULL;
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
    {
@@ -957,7 +1078,7 @@ static void check_variables(void)
    }
 
 #ifdef HAVE_THREADS
-   var.key = "yabause_worker_priority";
+   var.key = "yabadabadoo_worker_priority";
    var.value = NULL;
    YabThreadSetWorkerNice((environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value &&
                            strcmp(var.value, "normal") == 0) ? 0 : 10);
@@ -1000,6 +1121,8 @@ static void extract_directory(char *buf, const char *path, size_t size)
 
 static bool disk_set_eject_state(bool ejected)
 {
+   if (no_bios_screen)
+      return false;
    disk_tray_open = ejected;
    if (ejected)
    {
@@ -1245,7 +1368,7 @@ void retro_init(void)
 
 /* Crash log. RetroArch on the Miyoo leaves no trace when a core crashes, so
  * on a fatal signal append the fault, the registers and the stack words that
- * point into the core's code to <save dir>/yabause_crash.log, as offsets from
+ * point into the core's code to <save dir>/yabadabadoo_crash.log, as offsets from
  * the core's load address (for objdump), then let the signal take its
  * course. Only async-signal-safe calls in the handler. */
 #define CRASH_NSIG 5
@@ -1460,7 +1583,7 @@ static void crash_log_install(void)
    crash_text_size = 0;
    if (!dl_iterate_phdr(crash_find_core, (void *)(uintptr_t)crash_log_install))
       return;
-   snprintf(crash_log_path, sizeof(crash_log_path), "%s%cyabause_crash.log",
+   snprintf(crash_log_path, sizeof(crash_log_path), "%s%cyabadabadoo_crash.log",
             g_save_dir[0] ? g_save_dir : g_system_dir, slash);
    snprintf(crash_header, sizeof(crash_header), "=== %s, core %s\n", game_basename, GIT_VERSION);
 
@@ -1541,7 +1664,21 @@ bool retro_load_game(const struct retro_game_info *info)
       }
    }
 
-   if (bios_path[0] == '\0' || does_file_exist(bios_path) != 1 || hle_bios_force)
+   bool have_bios = does_file_exist(bios_path) == 1;
+   if (!have_bios && bios_required())
+   {
+      /* Lazy-proofing: without a BIOS the recompiler can't run and the
+       * interpreter is far too slow here, so don't start the game at all */
+      log_cb(RETRO_LOG_ERROR, "No Saturn BIOS in %s (saturn_bios.bin, sega_101.bin or mpr-17933.bin): showing the no-BIOS screen\n", g_system_dir);
+      no_bios_screen   = true;
+      no_bios_msg_sent = false;
+      game_width       = 320;
+      game_height      = 240;
+      return true;
+   }
+   no_bios_screen = false;
+
+   if (!have_bios || hle_bios_force)
    {
       log_cb(RETRO_LOG_WARN, "HLE bios is enabled, you should use a real bios, expect lots of issues otherwise\n");
    }
@@ -1558,7 +1695,7 @@ bool retro_load_game(const struct retro_game_info *info)
          log_cb(RETRO_LOG_ERROR, "Aborting, this m3u file is invalid\n");
          return false;
       }
-      else if (bios_path[0] == '\0' && does_file_exist(bios_path) != 1)
+      else if (!have_bios)
       {
          log_cb(RETRO_LOG_ERROR, "Aborting, you don't have a real bios, but it is required for m3u support\n");
          return false;
@@ -1588,7 +1725,7 @@ bool retro_load_game(const struct retro_game_info *info)
    yinit.cdcoretype           = CDCORE_ISO;
    yinit.cdpath               = disk_paths[disk_index];
    /* Emulate BIOS */
-   yinit.biospath             = (bios_path[0] != '\0' && does_file_exist(bios_path) && !hle_bios_force) ? bios_path : NULL;
+   yinit.biospath             = (have_bios && !hle_bios_force) ? bios_path : NULL;
    yinit.percoretype          = PERCORE_LIBRETRO;
 #ifdef HAVE_PLAY_JIT
    yinit.sh2coretype          = SH2CORE_JIT;
@@ -1631,7 +1768,9 @@ bool retro_load_game(const struct retro_game_info *info)
    yinit.usethreads           = 0;
 #endif
 
-   log_cb(RETRO_LOG_DEBUG, "Starting emulation\n");
+   log_cb(RETRO_LOG_INFO, "Starting emulation: SH2 %s, BIOS %s\n",
+          yinit.sh2coretype == SH2CORE_INTERPRETER ? "interpreter" : "recompiler",
+          yinit.biospath ? yinit.biospath : "HLE");
    ret = YabauseInit(&yinit);
    if (ret == 0)
    {
@@ -1671,6 +1810,11 @@ bool retro_load_game_special(unsigned game_type, const struct retro_game_info *i
 
 void retro_unload_game(void)
 {
+   if (no_bios_screen)
+   {
+      no_bios_screen = false;
+      return;
+   }
 	YabauseDeInit();
 	crash_log_uninstall();
 }
@@ -1704,6 +1848,8 @@ void retro_deinit(void)
 
 void retro_reset(void)
 {
+   if (no_bios_screen)
+      return;
    YabauseResetButton();
    YabauseInit(&yinit);
    YabauseSetDecilineMode(deciline_mode);
@@ -1713,6 +1859,11 @@ void retro_run(void)
 {
    unsigned i;
    bool updated     = false;
+   if (no_bios_screen)
+   {
+      no_bios_run();
+      return;
+   }
    one_frame_rendered = false;
 #if defined(__linux__) && defined(__arm__)
    crash_in_run = 1;
