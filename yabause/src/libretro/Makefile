@@ -67,6 +67,12 @@ endif
 CORE_DIR := .
 
 TARGET_NAME = yabadabadoo
+# DEV=1: a development build that installs next to the release one
+# (yabadabadoo_dev_libretro.so, shown as "Yabadabadoo Dev", own settings and saves)
+ifeq ($(DEV),1)
+	TARGET_NAME = yabadabadoo_dev
+	FLAGS += -DYABADABADOO_DEV
+endif
 CC_AS ?= $(CC)
 GIT_VERSION := " $(shell git rev-parse --short HEAD || echo unknown)"
 ifneq ($(GIT_VERSION)," unknown")

@@ -708,11 +708,16 @@ static struct retro_system_av_info g_av_info;
 void retro_get_system_info(struct retro_system_info *info)
 {
    memset(info, 0, sizeof(*info));
-   info->library_name     = "Yabadabadoo";
 #ifndef GIT_VERSION
 #define GIT_VERSION ""
 #endif
+#ifdef YABADABADOO_DEV
+   info->library_name     = "Yabadabadoo Dev";
+   info->library_version  = "0.1-dev (Yabause 0.9.15)" GIT_VERSION;
+#else
+   info->library_name     = "Yabadabadoo";
    info->library_version  = "0.1 (Yabause 0.9.15)" GIT_VERSION;
+#endif
    info->need_fullpath    = true;
    info->block_extract    = true;
    info->valid_extensions = "cue|iso|mds|ccd|zip|chd|m3u";
