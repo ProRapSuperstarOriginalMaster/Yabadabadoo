@@ -4274,7 +4274,8 @@ static __attribute__((noinline)) int DrawLine(int x1, int y1, int x2, int y2, in
  * code directly, and clipping is only tested per pixel when a line is not
  * entirely inside the clip area. Everything else follows getpixel() and
  * putpixel() exactly, including the floating point steps, so the output is
- * the same. Only for a 16-bit framebuffer and colour modes 0-6. */
+ * the same. For colour modes 0-6, on the 16-bit framebuffer and (since VF2,
+ * which draws its polygons there in high resolution) the 8-bit one. */
 typedef struct {
    u32 characterAddress;
    u16 colorbank;
@@ -4283,6 +4284,7 @@ typedef struct {
    int mesh, drawmode, msbon;
    int dil_skip;     /* y parity that CheckDil() rejects, or -1 */
    int user_clip;    /* user clipping: 0 off, 1 inside, 2 outside */
+   int fb8;          /* 8-bit framebuffer (putpixel8() instead of putpixel()) */
 } Vdp1QuadState;
 
 static int Vdp1QuadSetup(Vdp1QuadState *st, Vdp1 *regs, vdp1cmd_struct *cmd)
@@ -4290,8 +4292,9 @@ static int Vdp1QuadSetup(Vdp1QuadState *st, Vdp1 *regs, vdp1cmd_struct *cmd)
    int shape = cmd->CMDCTRL & 0x7;
 
    st->colormode = (cmd->CMDPMOD >> 3) & 0x7;
-   if (vdp1pixelsize != 2 || st->colormode == 7)
+   if (st->colormode == 7)
       return 0;
+   st->fb8 = vdp1pixelsize != 2;
    st->characterAddress = cmd->CMDSRCA << 3;
    st->colorbank = cmd->CMDCOLR;
    st->colorlut = (u32)st->colorbank << 3;
@@ -4365,6 +4368,7 @@ static u32 quad_pt_buf[2][2048];
 typedef struct {
    const u32 *pts;
    u16 *fb;
+   u8 *fb8;
    u8 *ram;
    Vdp1 *regs;
    vdp1cmd_struct *cmd;
@@ -4380,10 +4384,10 @@ typedef struct {
    double lr, lg, lb;
 } QuadPen;
 
-/* DrawLineCallback(), i.e. getpixel() then putpixel(), for each point of a
- * line. CM and DM are a constant colour and drawing mode for a specialised
- * copy, or -1 to read them from the line. */
-static INLINE __attribute__((always_inline)) QuadPen QuadPlotPoints(const int CM, const int DM, const QuadLine L, QuadPen pen)
+/* DrawLineCallback(), i.e. getpixel() then putpixel() (putpixel8() if F8),
+ * for each point of a line. CM and DM are a constant colour and drawing mode
+ * for a specialised copy, or -1 to read them from the line. */
+static INLINE __attribute__((always_inline)) QuadPen QuadPlotPoints(const int CM, const int DM, const int F8, const QuadLine L, QuadPen pen)
 {
    const int colormode = CM >= 0 ? CM : L.colormode;
    const int drawmode = DM >= 0 ? DM : L.drawmode;
@@ -4422,7 +4426,7 @@ static INLINE __attribute__((always_inline)) QuadPen QuadPlotPoints(const int CM
             continue;
          yy = L.interlace == 2 ? py / 2 : py;
          pos = (yy * L.width) + px;
-         if (!(yy >= L.row_lo && yy < L.row_hi && pos < 0x20000) || (L.mesh && ((px ^ yy) & 1)))
+         if (!(yy >= L.row_lo && yy < L.row_hi && pos < (F8 ? 0x40000 : 0x20000)) || (L.mesh && ((px ^ yy) & 1)))
             continue;
          if (!L.noclip)
          {
@@ -4491,7 +4495,21 @@ static INLINE __attribute__((always_inline)) QuadPen QuadPlotPoints(const int CM
       else
       {
          if (!L.isTextured) cp = L.untexturedColor;
-         if ((py & 1) != L.dil_skip) /* CheckDil() */
+         if (F8)
+         {
+            /* putpixel8(): rows, buffer end, CheckDil(), then the colour is
+             * cut to 8 bits, then mesh and clipping; replace mode only */
+            int yy = L.interlace == 2 ? py / 2 : py;
+            int pos = (yy * L.width) + px;
+            if (yy >= L.row_lo && yy < L.row_hi && pos < 0x40000 && (py & 1) != L.dil_skip)
+            {
+               cp &= 0xFF;
+               if (!(L.mesh && ((px ^ yy) & 1)) && (L.noclip || !IsClipped(px, py, L.regs, L.cmd)) &&
+                   (L.SPD || (cp & vis)) && !((cp == 0) && !L.SPD))
+                  L.fb8[pos] = cp;
+            }
+         }
+         else if ((py & 1) != L.dil_skip) /* CheckDil() */
          {
             int yy = L.interlace == 2 ? py / 2 : py; /* py / vdp1interlace without a divide */
             int pos = (yy * L.width) + px;
@@ -4702,6 +4720,109 @@ static QuadPen QuadPlotLeanCM1(const QuadLine *Lp, QuadPen pen) { return QuadPlo
 static QuadPen QuadPlotLeanCM4(const QuadLine *Lp, QuadPen pen) { return QuadPlotLeanBody(4, 0, Lp, pen); }
 static QuadPen QuadPlotLeanCM1G(const QuadLine *Lp, QuadPen pen) { return QuadPlotLeanBody(1, 4, Lp, pen); }
 
+/* The lean loop for the 8-bit framebuffer (high resolution: Virtua Fighter 2
+ * draws 95% of its polygon area as 128-colour textures this way): no end codes
+ * (a 128-colour texel can never equal its end code 0xFF), mesh or Gouraud
+ * steps, user clipping only when the whole line is inside it. putpixel8()
+ * only replaces, so what is written is the texel's colour cut to 8 bits:
+ * for CM0 (bank & 0xf0) | t, CM1 the low byte of the table colour, CM3
+ * (bank & 0x80) | t, CM4 t; nothing when t is 0 without SPD (and for CM1
+ * when the table colour's low byte is 0). As in QuadPlotLeanBody() the points
+ * inside the clip area and this thread's rows are one run [k0, k1]; double
+ * interlace (one field) is tested per point. Gives exactly what
+ * QuadPlotPoints(CM, -1, 1, ...) gives. */
+static INLINE __attribute__((always_inline)) QuadPen QuadPlotLean8Body(const int CM, const QuadLine *Lp, QuadPen pen)
+{
+   const u32 *const pts = Lp->pts;
+   u8 *const fb8 = Lp->fb8;
+   const u8 *const ram = Lp->ram;
+   const u32 rowaddr = Lp->rowaddr, colorlut = Lp->colorlut, colorbank = Lp->colorbank;
+   const int SPD = Lp->SPD, width = Lp->width, n = Lp->n;
+   const int flip = Lp->flip & 1, cwm1 = Lp->cw - 1;
+   const int step_q = Lp->step_q, step_r = Lp->step_r, linelength = Lp->linelength;
+   const double texturestep = Lp->texturestep;
+   const int il = Lp->interlace == 2, dil = Lp->dil_skip;
+   const int xhi = Lp->regs->systemclipX2, yhi = Lp->regs->systemclipY2;
+   const int rlo = Lp->row_lo, rhi = Lp->row_hi;
+   int cp = pen.cp, k, k0 = 0, k1 = n - 1, quot, rem, read = 0;
+
+#define LEAN8_IN(pt) ((s16)(pt) >= 0 && (s16)(pt) <= xhi && ((s32)(pt) >> 16) >= 0 && ((s32)(pt) >> 16) <= yhi && \
+                      (il ? ((s32)(pt) >> 17) : ((s32)(pt) >> 16)) >= rlo && (il ? ((s32)(pt) >> 17) : ((s32)(pt) >> 16)) < rhi)
+   while (k0 < n && !LEAN8_IN(pts[k0]))
+      k0++;
+   while (k1 >= k0 && !LEAN8_IN(pts[k1]))
+      k1--;
+#undef LEAN8_IN
+
+   /* the texture step at k0, as the full loop would have counted it */
+   quot = k0 * step_q + (k0 * step_r) / (linelength > 0 ? linelength : 1);
+   rem = (k0 * step_r) % (linelength > 0 ? linelength : 1);
+
+   for (k = k0; k <= k1; k++)
+   {
+      const u32 pt = pts[k];
+      const int px = (s16)pt, py = (s32)pt >> 16;
+      int cs, pos, yy;
+      u32 idx, t;
+
+      if (rem == 0 && step_r != 0)
+         cs = (int)k * texturestep;
+      else
+         cs = quot;
+      quot += step_q;
+      rem += step_r;
+      if (rem >= linelength)
+      {
+         rem -= linelength;
+         quot++;
+      }
+      if ((py & 1) == dil)
+         continue;
+      yy = il ? py >> 1 : py;   /* py >= 0 inside [k0, k1] */
+      pos = yy * width + px;
+      if (pos >= 0x40000)
+         continue;
+      idx = flip ? (u32)(cwm1 - cs) : (u32)cs;
+      read = 1;
+      if (CM == 0 || CM == 1)
+      {
+         u32 dots = ram[(rowaddr + (idx >> 1)) & 0x7FFFF];
+         t = (idx & 1) ? (dots & 0xF) : (dots >> 4);
+      }
+      else if (CM == 3)
+         t = ram[(rowaddr + idx) & 0x7FFFF] & 0x7F;
+      else /* CM == 4 */
+         t = ram[(rowaddr + idx) & 0x7FFFF];
+      if (t == 0 && !SPD)
+      {
+         cp = 0;
+         continue;
+      }
+      if (CM == 0)
+         cp = (colorbank & 0xf0) | t;
+      else if (CM == 1)
+      {
+         cp = T1ReadWord((u8 *)ram, (t * 2 + colorlut) & 0x7FFFF) & 0xFF;
+         if (cp == 0 && !SPD)
+            continue;
+      }
+      else if (CM == 3)
+         cp = (colorbank & 0x80) | t;
+      else
+         cp = t;
+      fb8[pos] = cp;
+   }
+   pen.cp = cp;
+   if (read)
+      pen.vis = CM == 0 ? 0xf : CM == 1 ? 0xffff : CM == 3 ? 0x7f : 0xff;
+   return pen;
+}
+
+static QuadPen QuadPlotLean8CM0(const QuadLine *Lp, QuadPen pen) { return QuadPlotLean8Body(0, Lp, pen); }
+static QuadPen QuadPlotLean8CM1(const QuadLine *Lp, QuadPen pen) { return QuadPlotLean8Body(1, Lp, pen); }
+static QuadPen QuadPlotLean8CM3(const QuadLine *Lp, QuadPen pen) { return QuadPlotLean8Body(3, Lp, pen); }
+static QuadPen QuadPlotLean8CM4(const QuadLine *Lp, QuadPen pen) { return QuadPlotLean8Body(4, Lp, pen); }
+
 static void DrawLineQuad(const Vdp1QuadState *st, int x1, int y1, int x2, int y2, double linenumber, double texturestep,
    int linelength, double xredstep, double xgreenstep, double xbluestep, Vdp1 *regs, vdp1cmd_struct *cmd, u8 *ram, u8 *back_framebuffer)
 {
@@ -4797,7 +4918,7 @@ static void DrawLineQuad(const Vdp1QuadState *st, int x1, int y1, int x2, int y2
          DrawLine(x1, y1, x2, y2, 1, linenumber, texturestep, xredstep, xgreenstep, xbluestep, regs, cmd, ram, back_framebuffer);
          return;
       }
-      L.pts = quad_pt; L.fb = fb; L.ram = ram; L.regs = regs; L.cmd = cmd;
+      L.pts = quad_pt; L.fb = fb; L.fb8 = back_framebuffer; L.ram = ram; L.regs = regs; L.cmd = cmd;
       L.rowaddr = rowaddr; L.colorbank = colorbank; L.colorlut = colorlut;
       L.colormode = colormode; L.drawmode = st->drawmode; L.flip = flip; L.SPD = SPD;
       L.endcodes = endcodes; L.isTextured = isTextured; L.untexturedColor = untexturedColor;
@@ -4809,6 +4930,29 @@ static void DrawLineQuad(const Vdp1QuadState *st, int x1, int y1, int x2, int y2
       pen.cp = currentPixel; pen.vis = currentPixelIsVisible;
       pen.lr = leftColumnColor.r; pen.lg = leftColumnColor.g; pen.lb = leftColumnColor.b;
 
+      if (st->fb8)
+      {
+         /* 8-bit framebuffer: MSB-on and the drawing mode don't apply
+          * (putpixel8() only replaces), a 128-colour texel never matches its
+          * end code, and without Gouraud the colour steps are 0 */
+         const int lean8 = !(L.endcodes && colormode != 3) && !L.mesh && L.isTextured &&
+                           (L.noclip || !L.user_clip) && !(L.drawmode & 4);
+         switch (colormode)
+         {
+         case 0: pen = lean8 ? QuadPlotLean8CM0(&L, pen) : QuadPlotPoints(0, -1, 1, L, pen); break;
+         case 1: pen = lean8 ? QuadPlotLean8CM1(&L, pen) : QuadPlotPoints(1, -1, 1, L, pen); break;
+         case 3: pen = lean8 ? QuadPlotLean8CM3(&L, pen) : QuadPlotPoints(3, -1, 1, L, pen); break;
+         case 4: pen = lean8 ? QuadPlotLean8CM4(&L, pen) : QuadPlotPoints(4, -1, 1, L, pen); break;
+         default: pen = QuadPlotPoints(-1, -1, 1, L, pen); break;
+         }
+         currentPixel = pen.cp;
+         currentPixelIsVisible = pen.vis;
+         leftColumnColor.r = pen.lr;
+         leftColumnColor.g = pen.lg;
+         leftColumnColor.b = pen.lb;
+         return;
+      }
+
       /* the lean copies: no end codes, mesh, MSB-on or double interlace, and
        * user clipping only when the whole line is inside it */
       lean = !L.endcodes && !L.mesh && !L.msbon && L.dil_skip < 0 && L.isTextured &&
@@ -4818,11 +4962,11 @@ static void DrawLineQuad(const Vdp1QuadState *st, int x1, int y1, int x2, int y2
       switch (colormode * 8 + L.drawmode)
       {
       case 0 * 8 + 0:
-         pen = lean ? QuadPlotLeanCM0(&L, pen) : QuadPlotPoints(0, 0, L, pen);
+         pen = lean ? QuadPlotLeanCM0(&L, pen) : QuadPlotPoints(0, 0, 0, L, pen);
          break;
-      case 0 * 8 + 4: pen = QuadPlotPoints(0, 4, L, pen); break;
+      case 0 * 8 + 4: pen = QuadPlotPoints(0, 4, 0, L, pen); break;
       case 1 * 8 + 0:
-         pen = lean ? QuadPlotLeanCM1(&L, pen) : QuadPlotPoints(1, 0, L, pen);
+         pen = lean ? QuadPlotLeanCM1(&L, pen) : QuadPlotPoints(1, 0, 0, L, pen);
          break;
       case 1 * 8 + 4:
          if (lean && L.noclip)
@@ -4830,14 +4974,14 @@ static void DrawLineQuad(const Vdp1QuadState *st, int x1, int y1, int x2, int y2
          else if (lean)
             pen = QuadPlotLeanCM1G(&L, pen);
          else
-            pen = QuadPlotPoints(1, 4, L, pen);
+            pen = QuadPlotPoints(1, 4, 0, L, pen);
          break;
       case 4 * 8 + 0:
-         pen = lean ? QuadPlotLeanCM4(&L, pen) : QuadPlotPoints(4, 0, L, pen);
+         pen = lean ? QuadPlotLeanCM4(&L, pen) : QuadPlotPoints(4, 0, 0, L, pen);
          break;
-      case 5 * 8 + 0: pen = QuadPlotPoints(5, 0, L, pen); break;
-      case 5 * 8 + 4: pen = QuadPlotPoints(5, 4, L, pen); break;
-      default:        pen = QuadPlotPoints(-1, -1, L, pen); break;
+      case 5 * 8 + 0: pen = QuadPlotPoints(5, 0, 0, L, pen); break;
+      case 5 * 8 + 4: pen = QuadPlotPoints(5, 4, 0, L, pen); break;
+      default:        pen = QuadPlotPoints(-1, -1, 0, L, pen); break;
       }
 
       currentPixel = pen.cp;
