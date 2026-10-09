@@ -1209,6 +1209,41 @@ static INLINE __attribute__((always_inline)) void Vdp2DrawScrollLineFast(const i
    }
 }
 
+/* The fast path for a horizontally zoomed line (coordinate increment != 1, as in
+ * Virtua Fighter 2's backgrounds): each pixel's x is computed with the same
+ * expression as the per-pixel loop in Vdp2DrawScroll(), but the tile lookup
+ * (Vdp2MapCalcXYFast) runs only when x enters a new 8-pixel block; inside a
+ * block the in-tile column is linear in x, as in Vdp2DrawScrollLineFast(). */
+static INLINE __attribute__((always_inline)) void Vdp2DrawScrollLineZoom(const int colornumber, const int colormode,
+   vdp2draw_struct *info, screeninfo_struct *sinfo, Vdp2 *regs, u8 *ram, u8 *color_ram,
+   struct PixelData *titan_line, int linescrollx, int Y, int j, int fresh, u32 meta_base, int post_calc,
+   int cc_win_fixed, int cc_win_pass, int cc_wctl, clipping_struct *colorcalcwindow, const u8 *cc_tab, int start, int end,
+   const int *mosaic_x)
+{
+   int i, block = -1, x0 = 0, xf0 = 0, yf = 0, dir = 1;
+   for (i = start; i < end; i++)
+   {
+      int x = info->x + mosaic_x[i]*info->coordincx;
+      x &= sinfo->xmask;
+      if (linescrollx)
+      {
+         x += linescrollx;
+         x &= 0x3FF;
+      }
+      if ((x >> 3) != block)
+      {
+         int xc = x, y = Y;
+         Vdp2MapCalcXYFast(info, &xc, &y, sinfo, regs, ram);
+         block = x >> 3;
+         x0 = x;
+         xf0 = xc;
+         yf = y;
+         dir = (info->flipfunction & 1) ? -1 : 1;
+      }
+      Vdp2DrawScrollRun(colornumber, colormode, info, regs, ram, color_ram, titan_line, i, 1, xf0 + dir * (x - x0), dir, yf, j, fresh, meta_base, post_calc, cc_win_fixed, cc_win_pass, cc_wctl, colorcalcwindow, cc_tab);
+   }
+}
+
 /* one out-of-line copy of the line loop per colour format */
 #define SCROLL_LINE_FN(NAME, CN) \
 static void NAME(const int colormode, vdp2draw_struct *info, screeninfo_struct *sinfo, Vdp2 *regs, u8 *ram, u8 *color_ram, \
@@ -1223,6 +1258,21 @@ SCROLL_LINE_FN(Vdp2DrawScrollLine16bppPal, 2)
 SCROLL_LINE_FN(Vdp2DrawScrollLine16bppRGB, 3)
 SCROLL_LINE_FN(Vdp2DrawScrollLine32bpp, 4)
 #undef SCROLL_LINE_FN
+
+#define SCROLL_ZOOM_FN(NAME, CN) \
+static void NAME(const int colormode, vdp2draw_struct *info, screeninfo_struct *sinfo, Vdp2 *regs, u8 *ram, u8 *color_ram, \
+   struct PixelData *titan_line, int linescrollx, int Y, int j, int fresh, u32 meta_base, int post_calc, \
+   int cc_win_fixed, int cc_win_pass, int cc_wctl, clipping_struct *colorcalcwindow, const u8 *cc_tab, int start, int end, \
+   const int *mosaic_x) \
+{ \
+   Vdp2DrawScrollLineZoom(CN, colormode, info, sinfo, regs, ram, color_ram, titan_line, linescrollx, Y, j, fresh, meta_base, post_calc, cc_win_fixed, cc_win_pass, cc_wctl, colorcalcwindow, cc_tab, start, end, mosaic_x); \
+}
+SCROLL_ZOOM_FN(Vdp2DrawScrollZoom4bpp, 0)
+SCROLL_ZOOM_FN(Vdp2DrawScrollZoom8bpp, 1)
+SCROLL_ZOOM_FN(Vdp2DrawScrollZoom16bppPal, 2)
+SCROLL_ZOOM_FN(Vdp2DrawScrollZoom16bppRGB, 3)
+SCROLL_ZOOM_FN(Vdp2DrawScrollZoom32bpp, 4)
+#undef SCROLL_ZOOM_FN
 
 static void FASTCALL Vdp2DrawScroll(vdp2draw_struct *info, Vdp2* lines, Vdp2* regs, u8* ram, u8* color_ram, struct CellScrollData * cell_data)
 {
@@ -1422,13 +1472,14 @@ static void FASTCALL Vdp2DrawScroll(vdp2draw_struct *info, Vdp2* lines, Vdp2* re
          /* A line that is still stale from an earlier frame gets every pixel
           * written (zero where nothing is drawn) instead of being cleared first */
          const int fresh = skip_line ? 0 : TitanClaimLayerLine(layer, output_y);
-         /* Fast path: without zoom, mosaic or bad cycle emulation, x advances
+         /* Fast path: without mosaic or bad cycle emulation. Unzoomed, x advances
           * by one per pixel, so the line splits into runs inside one 8-pixel
           * block (split further where x wraps) that share tile data, row and
-          * flip. Vdp2MapCalcXY() is still called at the start of each run,
-          * keeping its tile state exactly as before. A layer window only
-          * selects which spans of the line are drawn. */
-         const int fast = !info->isbitmap && !zoom_x && info->mosaicxmask == 1 && !bad_cycle &&
+          * flip; zoomed, x is computed per pixel and the tile lookup is redone
+          * only when x enters a new block. Vdp2MapCalcXY() is still called at
+          * the start of each block, keeping its tile state exactly as before. A
+          * layer window only selects which spans of the line are drawn. */
+         const int fast = !info->isbitmap && info->mosaicxmask == 1 && !bad_cycle &&
                           ((sinfo.xmask & (sinfo.xmask + 1)) == 0);
 
          if (fast && !skip_line)
@@ -1457,6 +1508,20 @@ static void FASTCALL Vdp2DrawScroll(vdp2draw_struct *info, Vdp2* lines, Vdp2* re
                      end++;
                }
 #define SCROLL_LINE(FN) FN(colormode, info, &sinfo, regs, ram, color_ram, titan_line, linescrollx, Y, j, fresh, meta_base, post_calc, cc_win_fixed, cc_win_pass, cc_wctl, colorcalcwindow, cc_tab, start, end)
+#define SCROLL_ZOOM(FN) FN(colormode, info, &sinfo, regs, ram, color_ram, titan_line, linescrollx, Y, j, fresh, meta_base, post_calc, cc_win_fixed, cc_win_pass, cc_wctl, colorcalcwindow, cc_tab, start, end, mosaic_x)
+               if (zoom_x)
+                  switch (info->colornumber)
+                  {
+                  case 0: SCROLL_ZOOM(Vdp2DrawScrollZoom4bpp); break;
+                  case 1: SCROLL_ZOOM(Vdp2DrawScrollZoom8bpp); break;
+                  case 2: SCROLL_ZOOM(Vdp2DrawScrollZoom16bppPal); break;
+                  case 3: SCROLL_ZOOM(Vdp2DrawScrollZoom16bppRGB); break;
+                  case 4: SCROLL_ZOOM(Vdp2DrawScrollZoom32bpp); break;
+                  default:
+                     Vdp2DrawScrollLineZoom(info->colornumber, colormode, info, &sinfo, regs, ram, color_ram, titan_line, linescrollx, Y, j, fresh, meta_base, post_calc, cc_win_fixed, cc_win_pass, cc_wctl, colorcalcwindow, cc_tab, start, end, mosaic_x);
+                     break;
+                  }
+               else
                switch (info->colornumber)
                {
                case 0: SCROLL_LINE(Vdp2DrawScrollLine4bpp); break;
@@ -1469,6 +1534,7 @@ static void FASTCALL Vdp2DrawScroll(vdp2draw_struct *info, Vdp2* lines, Vdp2* re
                   break;
                }
 #undef SCROLL_LINE
+#undef SCROLL_ZOOM
                if (end >= vdp2width)
                   break;
                start = end;
