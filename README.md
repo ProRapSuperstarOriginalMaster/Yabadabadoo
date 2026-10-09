@@ -77,6 +77,8 @@ launch); edit that file to change it. Higher clocks run faster but are at your o
 - FMV's in some games still have some unresolved hiccups
 - The PAL version of Nights into Dreams shows a black screen instead of an initial FMV. Pressing start lets you skip it and play as normal.
 - Shining Force III has a texture flickering issue in its opening scene
+- The icon isn't the prettiest. I thought there already was an OnionOS icon for Saturn but when Claude couldn't find one it decided
+to generate its own version on its own initiative. I promise I'll clean it up manually in a later release. 
 
 ## Building
 
@@ -117,6 +119,8 @@ packaging on Onion OS. The full list is in the git history.
 - The libretro port of Yabause: https://github.com/libretro/yabause
 - Onion OS, whose emulator packaging this release follows: https://github.com/OnionUI/Onion
 - The Miyoo Mini toolchain by Shaun Inman: https://github.com/shauninman/union-miyoomini-toolchain
+- Claude, I find crediting AI models extremely corny but in this case I want to once again highlight
+this is a very AI driven project.
 
 Sega and Sega Saturn are trademarks of Sega. This project is not affiliated with or
 endorsed by Sega. No BIOS files or games are included.
