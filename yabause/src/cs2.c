@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include "cs2.h"
+#include "yabprof.h"
 #include "debug.h"
 #include "error.h"
 #include "japmodem.h"
@@ -963,7 +964,15 @@ int Cs2ForceCloseTray( int coreid, const char * cdpath ) {
  * CS2 devices execution cycle. 
  * @param[in]  timing Cycles to execute in usec
  */
+#ifdef YAB_PROFILE
+void Cs2ExecBody(u32 timing);
+void Cs2Exec(u32 timing) { YAB_PROF_BEGIN(PROF_CS2); Cs2ExecBody(timing); YAB_PROF_END(PROF_CS2); }
+#define Cs2Exec Cs2ExecBody
+#endif
 void Cs2Exec(u32 timing) {
+#ifdef YAB_PROFILE
+#undef Cs2Exec
+#endif
    Cs2Area->_statuscycles += timing * 3;
    Cs2Area->_periodiccycles += timing * 3;
 
@@ -3424,6 +3433,8 @@ void Cs2FreeBlock(block_struct * blk) {
 void Cs2SortBlocks(partition_struct * part) {
   unsigned int from, to;
 
+  /* blocknum[] (what save states store) moves with block[]: it used to stay
+     put, so a state saved after any delete restored the wrong blocks */
   for (from = to = 0; from < MAX_BLOCKS; from++)
   {
      if (part->block[from] != NULL)
@@ -3431,6 +3442,7 @@ void Cs2SortBlocks(partition_struct * part) {
         if (to != from)
         {
            part->block[to] = part->block[from];
+           part->blocknum[to] = part->blocknum[from];
         }
         to++;
      }
@@ -3438,6 +3450,7 @@ void Cs2SortBlocks(partition_struct * part) {
 
   for (; to < MAX_BLOCKS; to++) {
       part->block[to] = NULL;
+      part->blocknum[to] = 0xFF;
   }
 }
 
@@ -4030,7 +4043,24 @@ int Cs2ReadFilteredSector(u32 rfsFAD, partition_struct **partition) {
                           0xFF, 0xFF, 0xFF, 0x00};
   int isaudio = 0;
 
-  if (Cs2Area->outconcddev != NULL && !Cs2Area->isbufferfull)
+  if (Cs2Area->outconcddev == NULL || Cs2Area->isbufferfull)
+  {
+     /* CD audio goes to the SCSP, not through the filters and the buffer:
+      * games disconnect the CD device or leave the buffer full while music
+      * plays (Virtua Fighter 2's fights were silent: the pickup never moved
+      * on from the first sector of the track) */
+     const u8 track = Cs2FADToTrack(rfsFAD);
+     if (track >= 1 && track <= 99 && !((Cs2Area->TOC[track - 1] >> 24) & 0x40) &&
+         Cs2Area->cdi->ReadSectorFAD(rfsFAD, Cs2Area->workblock.data))
+     {
+        Cs2Area->isaudio = 1;
+        Cs2SetTiming(1);
+        ScspReceiveCDDA(Cs2Area->workblock.data);
+        *partition = NULL;
+        return 0;
+     }
+  }
+  else
   {     
      // read a sector using cd interface function to workblock.data
      if (!Cs2Area->cdi->ReadSectorFAD(rfsFAD, Cs2Area->workblock.data))
@@ -4224,7 +4254,8 @@ int Cs2SaveState(void ** stream) {
 
    // This is mostly kludge, but it will have to do until I have time to rewrite it all
 
-   offset = MemStateWriteHeader(stream, "CS2 ", 2);
+   // version 3: partition blocknum[] is kept in step with block[]
+   offset = MemStateWriteHeader(stream, "CS2 ", 3);
 
    // Write cart type
    MemStateWrite((void *) &Cs2Area->carttype, 4, 1, stream);
@@ -4321,6 +4352,96 @@ int Cs2SaveState(void ** stream) {
  * @param[in]  fp File pointer to read from
  * \return size of data read
  */
+/* States before version 3 saved partition blocknum[] as it was before any
+ * delete compacted block[] (Cs2SortBlocks() didn't move it), so the
+ * restored partitions pointed at the wrong blocks or at none: loading a
+ * state saved mid-FMV with sectors buffered (Magic Knight Rayearth) gave a
+ * buffer whose size read as 0, and the game waited forever. The order of
+ * the blocks can't be recovered from blocknum[], but the blocks themselves
+ * hold their FAD: when the allocated blocks all belong to one partition (a
+ * stream into one buffer, the usual case), rebuild it in FAD order.
+ * Otherwise keep the valid entries in their saved order. */
+static void Cs2RepairPartitions(void)
+{
+   int i, j, users = 0, user = -1, allocated = 0, listed = 0, consistent = 1;
+   u8 seen[MAX_BLOCKS];
+
+   /* saved before any delete: blocknum[] is right, keep it */
+   memset(seen, 0, sizeof(seen));
+   for (i = 0; i < MAX_SELECTORS && consistent; i++)
+      for (j = 0; j < MAX_BLOCKS; j++)
+      {
+         u8 b = Cs2Area->partition[i].blocknum[j];
+         if (j < Cs2Area->partition[i].numblocks)
+         {
+            if (b >= MAX_BLOCKS || seen[b] || Cs2Area->block[b].size == -1)
+            {
+               consistent = 0;
+               break;
+            }
+            seen[b] = 1;
+            listed++;
+         }
+         else if (b != 0xFF)
+         {
+            consistent = 0;
+            break;
+         }
+      }
+   for (i = 0; i < MAX_BLOCKS; i++)
+      if (Cs2Area->block[i].size != -1)
+         allocated++;
+   if (consistent && listed == allocated)
+      return;
+   allocated = 0;
+
+   for (i = 0; i < MAX_BLOCKS; i++)
+      if (Cs2Area->block[i].size != -1)
+         allocated++;
+   for (i = 0; i < MAX_SELECTORS; i++)
+      if (Cs2Area->partition[i].numblocks)
+      {
+         users++;
+         user = i;
+      }
+
+   if (users == 1 && allocated == Cs2Area->partition[user].numblocks)
+   {
+      partition_struct *part = Cs2Area->partition + user;
+      int n = 0;
+      for (i = 0; i < MAX_BLOCKS; i++)
+         if (Cs2Area->block[i].size != -1)
+         {
+            /* insertion by FAD */
+            for (j = n; j > 0 && Cs2Area->block[part->blocknum[j - 1]].FAD > Cs2Area->block[i].FAD; j--)
+               part->blocknum[j] = part->blocknum[j - 1];
+            part->blocknum[j] = (u8)i;
+            n++;
+         }
+      for (i = n; i < MAX_BLOCKS; i++)
+         part->blocknum[i] = 0xFF;
+   }
+   else
+   {
+      for (i = 0; i < MAX_SELECTORS; i++)
+      {
+         partition_struct *part = Cs2Area->partition + i;
+         int n = 0;
+         for (j = 0; j < MAX_BLOCKS; j++)
+            if (part->blocknum[j] != 0xFF && part->blocknum[j] < MAX_BLOCKS &&
+                Cs2Area->block[part->blocknum[j]].size != -1 && n < part->numblocks)
+               part->blocknum[n++] = part->blocknum[j];
+         for (j = n; j < MAX_BLOCKS; j++)
+            part->blocknum[j] = 0xFF;
+      }
+   }
+
+   for (i = 0; i < MAX_SELECTORS; i++)
+      for (j = 0; j < MAX_BLOCKS; j++)
+         Cs2Area->partition[i].block[j] = Cs2Area->partition[i].blocknum[j] == 0xFF ? NULL :
+                                          Cs2Area->block + Cs2Area->partition[i].blocknum[j];
+}
+
 int Cs2LoadState(const void * stream, int version, int size) {
    int i, i2;
    IOCheck_struct check = { 0, 0 };
@@ -4428,6 +4549,9 @@ int Cs2LoadState(const void * stream, int version, int size) {
       }
    }
 
+   if (version < 3)
+      Cs2RepairPartitions();
+
    // Read filter data
    MemStateRead((void *)Cs2Area->filter, sizeof(filter_struct), MAX_SELECTORS, stream);
 
@@ -4447,6 +4571,15 @@ int Cs2LoadState(const void * stream, int version, int size) {
    MemStateRead((void *)&Cs2Area->mpegintmask, 4, 1, stream);
    MemStateRead((void *)Cs2Area->mpegcon, sizeof(mpegcon_struct), 2, stream);
    MemStateRead((void *)Cs2Area->mpegstm, sizeof(mpegstm_struct), 2, stream);
+
+   // The transfer's partition was saved as a number only
+   if (Cs2Area->datatranspartitionnum < MAX_SELECTORS)
+      Cs2Area->datatranspartition = Cs2Area->partition + Cs2Area->datatranspartitionnum;
+   else
+   {
+      Cs2Area->datatranspartition = NULL;
+      Cs2Area->datatranstype = CDB_DATATRANSTYPE_INVALID;
+   }
 
    return size;
 }

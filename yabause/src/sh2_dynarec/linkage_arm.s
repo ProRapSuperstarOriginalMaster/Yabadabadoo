@@ -46,9 +46,9 @@
 	.bss
 	.align	12
 	.type	sh2_dynarec_target, %object
-	.size	sh2_dynarec_target, 16777216
+	.size	sh2_dynarec_target, 8388608
 sh2_dynarec_target:
-	.space	16777216
+	.space	8388608
 	.align	4
 	.type	dynarec_local, %object
 	.size	dynarec_local, 64
@@ -229,9 +229,9 @@ slave_entry:
 	ldr	r0, [fp, #sh2cycles-dynarec_local]
 	str	r10, [fp, #master_cc-dynarec_local]
 	str	r14, [fp, #master_ip-dynarec_local]
-	bl	FRTExec
+	bl	DynarecFRTExec
 	ldr	r0, [fp, #sh2cycles-dynarec_local]
-	bl	WDTExec
+	bl	DynarecWDTExec
 	ldr	r4, [fp, #slave_ip-dynarec_local]
 	/*movw	r7, #:lower16:SSH2*/
 	/*movt	r7, #:upper16:SSH2*/
@@ -267,9 +267,9 @@ cc_interrupt:
 	ldr	r0, [fp, #sh2cycles-dynarec_local]
 	str	r10, [fp, #slave_cc-dynarec_local]
 	str	r8, [fp, #slave_ip-dynarec_local]
-	bl	FRTExec
+	bl	DynarecFRTExec
 	ldr	r0, [fp, #sh2cycles-dynarec_local]
-	bl	WDTExec
+	bl	DynarecWDTExec
 	.size	cc_interrupt, .-cc_interrupt
 	.global	cc_interrupt_master
 	.type	cc_interrupt_master, %function
@@ -308,6 +308,7 @@ cc_interrupt_master:
 	b	.A1
 .A3:
 	ldr	r0, [fp, #scucycles-dynarec_local]
+	lsl	r0, r0, #1 /* ScuExec takes SH2 cycles (it halves them itself) */
 	bl	ScuExec
 	/*movw	r4, #:lower16:linecount_p*/
 	/*movt	r4, #:upper16:linecount_p*/
@@ -734,11 +735,11 @@ WriteInvalidateLong:
 	ldr	r2, [r12, r2, lsl #2]
 	mov	r12, #1
 	tst	r12, r2, ror r3
-	beq	MappedMemoryWriteLongNocache
+	beq	DynarecWriteLong
 	push	{r0, r1, r2, lr}
 	bl	invalidate_addr
 	pop	{r0, r1, r2, lr}
-	b	MappedMemoryWriteLongNocache
+	b	DynarecWriteLong
 	.size	WriteInvalidateLong, .-WriteInvalidateLong
 	.align	2
 	.global	WriteInvalidateWord
@@ -756,11 +757,11 @@ WriteInvalidateWord:
 	/*uxth	r1, r1*/
 	bic	r1, r1, #0xFF0000
 	tst	r12, r2, ror r3
-	beq	MappedMemoryWriteWordNocache
+	beq	DynarecWriteWord
 	push	{r0, r1, r2, lr}
 	bl	invalidate_addr
 	pop	{r0, r1, r2, lr}
-	b	MappedMemoryWriteWordNocache
+	b	DynarecWriteWord
 	.size	WriteInvalidateWord, .-WriteInvalidateWord
 	.align	2
 	.global	WriteInvalidateByteSwapped
@@ -780,11 +781,11 @@ WriteInvalidateByte:
 	mov	r12, #1
 	and	r1, r1, #0xff
 	tst	r12, r2, ror r3
-	beq	MappedMemoryWriteByteNocache
+	beq	DynarecWriteByte
 	push	{r0, r1, r2, lr}
 	bl	invalidate_addr
 	pop	{r0, r1, r2, lr}
-	b	MappedMemoryWriteByteNocache
+	b	DynarecWriteByte
 	.size	WriteInvalidateByte, .-WriteInvalidateByte
 
 	.align	2
@@ -862,10 +863,10 @@ macl:
 	mov	r8, r0 /* MACL */
 	mov	r9, r1 /* MACH */
 	mov	r0, r6
-	bl	MappedMemoryReadLongNocache
+	bl	DynarecReadLong
 	mov	r10, r0
 	mov	r0, r5
-	bl	MappedMemoryReadLongNocache
+	bl	DynarecReadLong
 	add	r5, r5, #4
 	add	r6, r6, #4
 	mov	r12, r0
@@ -899,11 +900,11 @@ macw:
 	mov	r8, r0 /* MACL */
 	mov	r9, r1 /* MACH */
 	mov	r0, r6
-	bl	MappedMemoryReadWordNocache
+	bl	DynarecReadWord
 	/*sxth	r10, r0*/
 	lsl	r10, r0, #16
 	mov	r0, r5
-	bl	MappedMemoryReadWordNocache
+	bl	DynarecReadWord
 	add	r5, r5, #2
 	add	r6, r6, #2
 	lsl	r12, r0, #16

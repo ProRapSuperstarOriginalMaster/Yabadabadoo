@@ -26,6 +26,7 @@
 
 #include <stdlib.h>
 #include "vdp1.h"
+#include "yabprof.h"
 #include "debug.h"
 #include "scu.h"
 #include "vdp2.h"
@@ -34,6 +35,14 @@
 #include "sh2core.h"
 
 u8 * Vdp1Ram;
+u32 Vdp1RamDirty[4];
+/* Did the last draw's command walk stop at its 2000-command limit instead
+   of an end command? Then the list was still being written: a real VDP1
+   reads it as it draws, and the game finishes it ahead of the drawing
+   (Panzer Dragoon, busy scenes: the list is completed after the frame
+   change). Yabause draws the whole list at once, so the draw is repeated
+   at the next VBlank-OUT (vdp2.c). */
+int Vdp1ListIncomplete;
 u8 * Vdp1FrameBuffer;
 
 VideoInterface_struct *VIDCore=NULL;
@@ -65,6 +74,7 @@ u32 FASTCALL Vdp1RamReadLong(u32 addr) {
 
 void FASTCALL Vdp1RamWriteByte(u32 addr, u8 val) {
    addr &= 0x7FFFF;
+   VDP1_RAM_MARK(addr);
    T1WriteByte(Vdp1Ram, addr, val);
 }
 
@@ -72,6 +82,7 @@ void FASTCALL Vdp1RamWriteByte(u32 addr, u8 val) {
 
 void FASTCALL Vdp1RamWriteWord(u32 addr, u16 val) {
    addr &= 0x7FFFF;
+   VDP1_RAM_MARK(addr);
    T1WriteWord(Vdp1Ram, addr, val);
 }
 
@@ -79,6 +90,7 @@ void FASTCALL Vdp1RamWriteWord(u32 addr, u16 val) {
 
 void FASTCALL Vdp1RamWriteLong(u32 addr, u32 val) {
    addr &= 0x7FFFF;
+   VDP1_RAM_MARK(addr);
    T1WriteLong(Vdp1Ram, addr, val);
 }
 
@@ -245,6 +257,7 @@ int Vdp1Init(void) {
 
    if ((Vdp1Ram = T1MemoryInit(0x80000)) == NULL)
       return -1;
+   VDP1_RAM_MARK_ALL();
 
    // Allocate enough memory for two frames
    if ((Vdp1FrameBuffer = T1MemoryInit(0x80000)) == NULL)
@@ -319,6 +332,7 @@ int VideoChangeCore(int coreid)
 //////////////////////////////////////////////////////////////////////////////
 
 void VideoDeInit(void) {
+   Vdp2RestoreVideoCore();
    if (VIDCore)
       VIDCore->DeInit();
    VIDCore = NULL;
@@ -390,6 +404,7 @@ void FASTCALL Vdp1WriteWord(u32 addr, u16 val) {
          if ((Vdp1Regs->FBCR & 3) == 3)
          {
             Vdp1External.manualchange = 1;
+            Vdp1External.changerequest = 1;
          }
          else if ((Vdp1Regs->FBCR & 3) == 2)
             Vdp1External.manualerase = 1;
@@ -539,6 +554,8 @@ void Vdp1DrawCommands(u8 * ram, Vdp1 * regs, u8* back_framebuffer)
       command = T1ReadWord(ram, regs->addr);
       commandCounter++;
    }
+   if (regs == Vdp1Regs)   /* drawn on the emulation thread */
+      Vdp1ListIncomplete = !(command & 0x8000);
 }
 
 //ensure that registers are set correctly 
@@ -609,9 +626,18 @@ void Vdp1FakeDrawCommands(u8 * ram, Vdp1 * regs)
       command = T1ReadWord(ram, regs->addr);
       commandCounter++;
    }
+   Vdp1ListIncomplete = !(command & 0x8000);
 }
 
+#ifdef YAB_PROFILE
+void Vdp1DrawBody(void);
+void Vdp1Draw(void) { YAB_PROF_BEGIN(PROF_VDP1DRAW); Vdp1DrawBody(); YAB_PROF_END(PROF_VDP1DRAW); }
+#define Vdp1Draw Vdp1DrawBody
+#endif
 void Vdp1Draw(void) 
+#ifdef YAB_PROFILE
+#undef Vdp1Draw
+#endif
 {
    if (!Vdp1External.disptoggle)
    {
@@ -620,6 +646,7 @@ void Vdp1Draw(void)
    }
 
    Vdp1Regs->addr = 0;
+   Vdp1ListIncomplete = 0;
 
    // beginning of a frame
    // BEF <- CEF
@@ -716,6 +743,7 @@ int Vdp1LoadState(const void * stream, UNUSED int version, int size)
 
    // Read VDP1 ram
    MemStateRead((void *)Vdp1Ram, 0x80000, 1, stream);
+   VDP1_RAM_MARK_ALL();
 
 #ifdef IMPROVED_SAVESTATES
    MemStateRead((void *)back_framebuffer, 0x40000, 1, stream);

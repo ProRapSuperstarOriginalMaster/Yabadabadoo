@@ -64,6 +64,10 @@
 #include "sh2trace.h"
 #endif
 
+#if defined(SH2_DYNAREC)
+#include "sh2_dynarec/sh2_dynarec.h"
+#endif
+
 //////////////////////////////////////////////////////////////////////////////
 
 u8 *SH1Rom;
@@ -1529,15 +1533,19 @@ int YabSaveStateStream(void ** stream)
       return -2;
    }
 
-   YuiSwapBuffers();
    #ifdef USE_OPENGL
+   YuiSwapBuffers();
    glPixelZoom(1,1);
    glReadBuffer(GL_BACK);
    glReadPixels(0, 0, outputwidth, outputheight, GL_RGBA, GL_UNSIGNED_BYTE, buf);
-   #else
-   memcpy(buf, dispbuffer, totalsize);
-   #endif
    YuiSwapBuffers();
+   #else
+   // Presenting a frame here would call the frontend's video callback from
+   // outside the frame loop. dispbuffer holds pixel_t entries, so only copy
+   // that much (the rest of the thumbnail is left blank).
+   memset(buf, 0, totalsize);
+   memcpy(buf, dispbuffer, outputwidth * outputheight * sizeof(pixel_t));
+   #endif
 
    MemStateWrite((void *)&outputwidth, sizeof(outputwidth), 1, stream);
    MemStateWrite((void *)&outputheight, sizeof(outputheight), 1, stream);
@@ -1764,6 +1772,21 @@ int YabLoadStateStream(const void * stream, size_t size_stream)
    MemStateRead((void *)BupRam, 0x10000, 1, stream);
    MemStateRead((void *)HighWram, 0x100000, 1, stream);
    MemStateRead((void *)LowWram, 0x100000, 1, stream);
+
+#if defined(SH2_DYNAREC)
+   // Work RAM is restored only now, after the SH2 states: the recompiler has
+   // already compiled code at the restored PCs from the old RAM contents.
+   // Drop all compiled code and re-resolve both CPUs' entry points.
+   if (SH2Core->id == SH2CORE_DYNAREC)
+   {
+      invalidate_all_pages();
+      SH2Core->SetPC(MSH2, SH2Core->GetPC(MSH2));
+      if (yabsys.IsSSH2Running)
+         SH2Core->SetPC(SSH2, SH2Core->GetPC(SSH2));
+      else
+         SH2Core->Reset(SSH2); // make sure the recompiler keeps the slave stopped
+   }
+#endif
 
    MemStateRead((void *)&yabsys.DecilineCount, sizeof(int), 1, stream);
    MemStateRead((void *)&yabsys.LineCount, sizeof(int), 1, stream);

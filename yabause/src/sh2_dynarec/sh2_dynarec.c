@@ -30,6 +30,26 @@
 #include "../sh2core.h"
 #include "../yabause.h"
 #include "sh2_dynarec.h"
+#include "../yabprof.h"
+
+// The SH2 whose code is currently executing; maintained by the frame loop in
+// linkage_*.s whenever it switches between the master and slave.
+SH2_struct *CurrentSH2 = NULL;
+
+// The generated code and linkage call these with the calling convention the
+// recompiler was written for (no SH2 context argument); they forward to the
+// core's per-CPU memory and on-chip timer functions.
+void FRTExec(SH2_struct *sh, u32 cycles);
+void WDTExec(SH2_struct *sh, u32 cycles);
+
+u32 DynarecReadByte(u32 addr) { return MappedMemoryReadByteNocache(CurrentSH2, addr); }
+u32 DynarecReadWord(u32 addr) { return MappedMemoryReadWordNocache(CurrentSH2, addr); }
+u32 DynarecReadLong(u32 addr) { return MappedMemoryReadLongNocache(CurrentSH2, addr); }
+void DynarecWriteByte(u32 addr, u32 val) { MappedMemoryWriteByteNocache(CurrentSH2, addr, (u8)val); }
+void DynarecWriteWord(u32 addr, u32 val) { MappedMemoryWriteWordNocache(CurrentSH2, addr, (u16)val); }
+void DynarecWriteLong(u32 addr, u32 val) { MappedMemoryWriteLongNocache(CurrentSH2, addr, val); }
+void DynarecFRTExec(u32 cycles) { FRTExec(CurrentSH2, cycles); }
+void DynarecWDTExec(u32 cycles) { WDTExec(CurrentSH2, cycles); }
 
 #ifdef __i386__
 #include "assem_x86.h"
@@ -233,6 +253,7 @@ void div1();
 void macl();
 void macw();
 void master_handle_bios();
+void add_to_linker(int addr,int target,int ext);
 void slave_handle_bios();
 
 // Needed by assembler
@@ -260,6 +281,7 @@ void nullf(const char *format, ...) {}
 // This is called from the recompiled BRAF/BSRF instructions
 void *get_addr(u32 vaddr)
 {
+  YAB_PROF_COUNT(PROF_SH2_GETADDR);
   struct ll_entry *head;
   u32 page=(vaddr&0xDFFFFFFF)>>12;
   if(page>1024) page=1024+(page&1023);
@@ -894,6 +916,7 @@ void invalidate_page(u32 page)
 
 void invalidate_blocks(u32 firstblock,u32 lastblock)
 {
+  YAB_PROF_COUNT(PROF_SH2_INVAL);
   u32 page;
   int block;
   u32 first,last;
@@ -4047,6 +4070,214 @@ void rjump_assemble(int i,struct regstat *i_regs)
   #endif
 }
 
+// Polling loop detection. The conditional branch at i is the back edge of
+// a short loop inside this block which only loads from memory and computes
+// registers from values the loop itself does not change (e.g.
+// "mov.b @r1,r0; tst #0x80,r0; bt loop"). Every iteration then does the
+// same thing until memory is changed by the other CPU, DMA or an interrupt
+// handler, all of which happen between time slices, so the rest of the
+// slice can be skipped when the branch is taken. This is the check the
+// interpreter does in sh2idle.c.
+//
+// Returns 1 for such a loop, or 2 if the loop also calls a subroutine
+// through "jsr @Rn" (SGL's frame wait calls a user hook that is normally an
+// empty function). Whether the callee is empty can only be checked at run
+// time: idle_call_desc/idle_call_addr then describe how to find the call
+// target, for idle_call_is_empty().
+#define IDLE_CALL_REG    0 // target = Rn, which the loop does not change
+#define IDLE_CALL_GBR    1 // target = mov.l @(disp,GBR),Rn
+#define IDLE_CALL_REGIND 2 // target = mov.l @(disp,Rm),Rn, Rm unchanged
+#define IDLE_CALL_ABS    3 // target = mov.l @(disp,PC),Rn (constant address)
+static u32 idle_call_desc,idle_call_addr;
+static u32 idle_cnt_desc,idle_cnt_iter;
+
+static int idle_skip_off; // YAB_DYNAREC_IDLE=0 (tests): no idle-loop skipping
+
+static int idle_loop(int i)
+{
+  int t,j,k,last,call=-1;
+  u64 all=0,written=0;
+  if(idle_skip_off) return 0;
+  if(itype[i]!=CJUMP&&itype[i]!=SJUMP) return 0;
+  if(!internal_branch(ba[i])) return 0;
+  t=(ba[i]-start)>>1;
+  if(t>i||i-t>8||is_ds[t]) return 0;
+  last=itype[i]==SJUMP?i+1:i; // include the delay slot
+  for(j=t;j<=last;j++) {
+    if(j!=i) {
+      switch(itype[j]) {
+        case NOP: case LOAD: case PCREL: case MOV: case ALU:
+        case IMM8: case SHIFTIMM: case EXT: case FLAGS:
+          break;
+        case RJUMP:
+          // JSR @Rn only, once, not in a delay slot
+          if(opcode[j]!=4||opcode2[j]!=11||opcode3[j]!=0) return 0;
+          if(call>=0||j+1>=i) return 0;
+          call=j;
+          break;
+        default: // stores, branches, calls, system
+          return 0;
+      }
+      if(itype[j]==LOAD&&(addrmode[j]==POSTINC||addrmode[j]==PREDEC)) return 0;
+    }
+    if(rt1[j]>=0) all|=1LL<<rt1[j];
+    if(rt2[j]>=0) all|=1LL<<rt2[j];
+  }
+  if(all&(1LL<<SR)) return 0;
+  // A register the loop writes must be written before it is read in each
+  // iteration, otherwise its value carries over between iterations; except
+  // one counter, ADD #imm,Rn with Rn used by nothing else in the loop (the
+  // slave's FTCSR poll in NiGHTS counts its passes as a load meter): the
+  // yield then steps it by the passes the skipped time would have run.
+  {
+    int cnt=-1;
+    for(j=t;j<=last;j++)
+      if(j!=i&&(source[j]&0xF000)==0x7000) {
+        int r=(source[j]>>8)&15,used=0;
+        for(k=t;k<=last;k++)
+          if(k!=j&&(rs1[k]==r||rs2[k]==r||rs3[k]==r||rt1[k]==r||rt2[k]==r)) used=1;
+        if(!used&&cnt<0) cnt=j;
+      }
+    if(cnt>=0) {
+      written|=1LL<<rt1[cnt];  // as if written first
+      idle_cnt_desc=((source[cnt]>>8)&15)|(slave<<8)|((source[cnt]&0xFF)<<16);
+    }
+    else idle_cnt_desc=0xFFFFFFFF;
+  }
+  for(j=t;j<=last;j++) {
+    signed char s[3];
+    s[0]=rs1[j];s[1]=rs2[j];s[2]=rs3[j];
+    for(k=0;k<3;k++) {
+      int r=s[k];
+      if(r<0||r==CCREG) continue;
+      if(r==SR) r=TBIT;
+      if(((all>>r)&1)&&!((written>>r)&1)) return 0;
+    }
+    if(rt1[j]>=0) written|=1LL<<rt1[j];
+    if(rt2[j]>=0) written|=1LL<<rt2[j];
+  }
+  if(call>=0) {
+    // Find how the call target is computed
+    int n=rs1[call],w=-1;
+    u16 op;
+    for(j=t;j<call;j++) if(rt1[j]==n||rt2[j]==n) w=j;
+    if(w<0) {
+      if((all>>n)&1) return 0;
+      idle_call_desc=IDLE_CALL_REG|(n<<8);
+      idle_call_addr=0;
+    }
+    else {
+      op=source[w];
+      if((op&0xFF00)==0xC600) { // MOV.L @(disp,GBR),R0
+        idle_call_desc=IDLE_CALL_GBR;
+        idle_call_addr=(op&0xFF)*4;
+      }
+      else if((op&0xF000)==0x5000) { // MOV.L @(disp,Rm),Rn
+        int m=(op>>4)&15;
+        if((all>>m)&1) return 0;
+        idle_call_desc=IDLE_CALL_REGIND|(m<<8);
+        idle_call_addr=(op&15)*4;
+      }
+      else if((op&0xF00F)==0x6002) { // MOV.L @Rm,Rn
+        int m=(op>>4)&15;
+        if((all>>m)&1) return 0;
+        idle_call_desc=IDLE_CALL_REGIND|(m<<8);
+        idle_call_addr=0;
+      }
+      else if((op&0xF000)==0xD000) { // MOV.L @(disp,PC),Rn
+        idle_call_desc=IDLE_CALL_ABS;
+        idle_call_addr=((start+w*2+4)&~3)+(op&0xFF)*4;
+      }
+      else return 0;
+    }
+    idle_call_desc|=slave<<16;
+    if(idle_cnt_desc!=0xFFFFFFFF) return 0;  // not both
+    return 2;
+  }
+  if(idle_cnt_desc!=0xFFFFFFFF) {
+    // cycles one pass charges: what the branch adds minus the adjustment of
+    // the taken path back to the loop start (see do_cc())
+    int adj=is_ds[t]?ccadj[t+1]-cycles[t]:ccadj[t];
+    adj-=itype[i]==CJUMP?2+cycles[i]:1+cycles[i]+cycles[i+1];
+    idle_cnt_iter=ccadj[i]-adj;
+    if((int)idle_cnt_iter<=0) return 0;
+    return 3;
+  }
+  return 1;
+}
+
+// Called from a counting idle loop's back edge (registers written back) with
+// the cycle counter: steps the counter register once for each pass the rest
+// of the slice would have run, and returns the cycle counter they would have
+// reached. Like the other idle loops, it resumes at the loop start: frames
+// are the same as with the counting loop run (NiGHTS, 600 frames); only the
+// counter of an unfinished slice can differ by a few passes.
+int idle_counter_skip(int cc,u32 desc,u32 iter)
+{
+  int *reg=((desc>>8)&1)?slave_reg:master_reg;
+  int n=0;
+  if(cc<0) n=(-cc+(int)iter-1)/(int)iter;
+  reg[desc&15]+=(s8)(desc>>16)*n;
+  return cc+n*(int)iter;
+}
+
+// Called from an idle loop's back edge (registers written back): is the
+// subroutine the loop calls still just "rts; nop"?
+int idle_call_is_empty(u32 desc,u32 addr)
+{
+  SH2_struct *sh=(desc>>16)?SSH2:MSH2;
+  int *reg=(desc>>16)?slave_reg:master_reg;
+  u32 target;
+  switch(desc&0xFF) {
+    case IDLE_CALL_REG: target=reg[(desc>>8)&0xFF]; break;
+    case IDLE_CALL_GBR: target=MappedMemoryReadLongNocache(sh,reg[GBR]+addr); break;
+    case IDLE_CALL_REGIND: target=MappedMemoryReadLongNocache(sh,reg[(desc>>8)&0xFF]+addr); break;
+    default: target=MappedMemoryReadLongNocache(sh,addr); break;
+  }
+  return MappedMemoryReadWordNocache(sh,target)==0x000B && // RTS
+         MappedMemoryReadWordNocache(sh,target+2)==0x0009; // NOP
+}
+
+// Taken branch of a polling loop: end the time slice now and resume at the
+// top of the loop, so the next slice starts with a fresh read. (Ending it
+// one iteration later would act on a value read before the slice boundary
+// and add a slice of latency, which loses back-to-back signals such as the
+// master kicking the slave twice via the FRT input capture flag.)
+static void idle_yield(int i,int idle,signed char i_regmap[],u32 i_dirty)
+{
+  pointer nonidle=0;
+  assem_debug("idle loop yield\n");
+  wb_dirtys(i_regmap,i_dirty);
+  if(idle==2) {
+    emit_movimm(idle_call_desc,0);
+    emit_movimm(idle_call_addr,1);
+    emit_call((pointer)idle_call_is_empty);
+    emit_test(0,0);
+    nonidle=(pointer)out;
+    emit_jeq(0);
+  }
+  if(idle==3) {
+    emit_mov(HOST_CCREG,0);
+    emit_movimm(idle_cnt_desc,1);
+    emit_movimm(idle_cnt_iter,2);
+    emit_call((pointer)idle_counter_skip);
+    emit_mov(0,HOST_CCREG);
+  }
+  emit_movimm(ba[i],0);
+  emit_writeword(0,slave?(int)&slave_pc:(int)&master_pc);
+  if(idle!=3) emit_andimm(HOST_CCREG,3,HOST_CCREG);
+  if(slave) {
+    emit_load_return_address(SLAVERA_REG);
+    emit_jmp((pointer)cc_interrupt);
+  }
+  else {
+    emit_call((pointer)slave_entry);
+  }
+  if(nonidle) set_jump_target(nonidle,(pointer)out);
+  add_to_linker((int)out,ba[i],0);
+  emit_jmp(0);
+}
+
 void cjump_assemble(int i,struct regstat *i_regs)
 {
   signed char *i_regmap=i_regs->regmap;
@@ -4057,6 +4288,7 @@ void cjump_assemble(int i,struct regstat *i_regs)
   int adj;
   int invert=0;
   int internal;
+  int idle=idle_loop(i);
   match=match_bt(regs[i].regmap,regs[i].dirty,ba[i]);
   assem_debug("match=%d\n",match);
   internal=internal_branch(ba[i]);
@@ -4065,6 +4297,7 @@ void cjump_assemble(int i,struct regstat *i_regs)
   #ifdef CORTEX_A8_BRANCH_PREDICTION_HACK
   if(i>(ba[i]-start)>>1) invert=1;
   #endif
+  if(idle) invert=1; // the taken path needs its own code
   sr=get_reg(i_regmap,SR);
   assert(sr>=0);
   cc=get_reg(i_regmap,CCREG);
@@ -4130,7 +4363,7 @@ void cjump_assemble(int i,struct regstat *i_regs)
     if(invert) {
       if(taken) set_jump_target(taken,(pointer)out);
       #ifdef CORTEX_A8_BRANCH_PREDICTION_HACK
-      if(match&&(!internal||!is_ds[(ba[i]-start)>>1])) {
+      if(match&&!idle&&(!internal||!is_ds[(ba[i]-start)>>1])) {
         if(adj) {
           emit_addimm(cc,-CLOCK_DIVIDER*adj,cc);
           add_to_linker((int)out,ba[i],internal);
@@ -4143,6 +4376,8 @@ void cjump_assemble(int i,struct regstat *i_regs)
       #endif
       {
         if(adj) emit_addimm(cc,-CLOCK_DIVIDER*adj,cc);
+        if(idle) idle_yield(i,idle,regs[i].regmap,regs[i].dirty);
+        else {
         store_regs_bt(regs[i].regmap,regs[i].dirty,ba[i]);
         load_regs_bt(regs[i].regmap,regs[i].dirty,ba[i]);
         if(internal)
@@ -4155,6 +4390,7 @@ void cjump_assemble(int i,struct regstat *i_regs)
         else {
           add_to_linker((int)out,ba[i],internal);
           emit_jmp(0);
+        }
         }
       }
       set_jump_target(nottaken,(pointer)out);
@@ -4175,6 +4411,7 @@ void sjump_assemble(int i,struct regstat *i_regs)
   int unconditional=0,nop=0;
   int invert=0;
   int internal=internal_branch(ba[i]);
+  int idle=idle_loop(i);
   match=match_bt(branch_regs[i].regmap,branch_regs[i].dirty,ba[i]);
   assem_debug("match=%d\n",match);
   internal=internal_branch(ba[i]);
@@ -4183,6 +4420,7 @@ void sjump_assemble(int i,struct regstat *i_regs)
   #ifdef CORTEX_A8_BRANCH_PREDICTION_HACK
   if(i>(ba[i]-start)>>1) invert=1;
   #endif
+  if(idle) invert=1; // the taken path needs its own code
   
   if(ooo[i]) {
     sr=get_reg(branch_regs[i].regmap,SR);
@@ -4269,7 +4507,7 @@ void sjump_assemble(int i,struct regstat *i_regs)
       if(invert) {
         if(taken) set_jump_target(taken,(pointer)out);
         #ifdef CORTEX_A8_BRANCH_PREDICTION_HACK
-        if(match&&(!internal||!is_ds[(ba[i]-start)>>1])) {
+        if(match&&!idle&&(!internal||!is_ds[(ba[i]-start)>>1])) {
           if(adj) {
             emit_addimm(cc,-CLOCK_DIVIDER*adj,cc);
             add_to_linker((int)out,ba[i],internal);
@@ -4282,6 +4520,8 @@ void sjump_assemble(int i,struct regstat *i_regs)
         #endif
         {
           if(adj) emit_addimm(cc,-CLOCK_DIVIDER*adj,cc);
+          if(idle) idle_yield(i,idle,branch_regs[i].regmap,branch_regs[i].dirty);
+          else {
           store_regs_bt(branch_regs[i].regmap,branch_regs[i].dirty,ba[i]);
           load_regs_bt(branch_regs[i].regmap,branch_regs[i].dirty,ba[i]);
           if(internal)
@@ -4294,6 +4534,7 @@ void sjump_assemble(int i,struct regstat *i_regs)
           else {
             add_to_linker((int)out,ba[i],internal);
             emit_jmp(0);
+          }
           }
         }
         set_jump_target(nottaken,(pointer)out);
@@ -4354,6 +4595,8 @@ void sjump_assemble(int i,struct regstat *i_regs)
       assem_debug("cycle count (adj)\n");
       /*if(adj)*/ //emit_addimm(cc,CLOCK_DIVIDER*(ccadj[i]+cycles[i]+cycles[i+1]-adj),cc);
       if(adj) emit_addimm(cc,-CLOCK_DIVIDER*adj,cc);
+      if(idle) idle_yield(i,idle,branch_regs[i].regmap,branch_regs[i].dirty);
+      else {
       load_regs_bt(branch_regs[i].regmap,branch_regs[i].dirty,ba[i]);
       if(internal)
         assem_debug("branch: internal\n");
@@ -4365,6 +4608,7 @@ void sjump_assemble(int i,struct regstat *i_regs)
       else {
         add_to_linker((int)out,ba[i],internal);
         emit_jmp(0);
+      }
       }
     }
     // branch not taken
@@ -4614,9 +4858,13 @@ void unneeded_registers(int istart,int iend,int r)
     }
     //u=uu=0; // DEBUG
     //tdep=(~uu>>rt1[i])&1;
-    // Written registers are unneeded
-    if(rt1[i]>=0) u|=1LL<<rt1[i];
-    if(rt2[i]>=0) u|=1LL<<rt2[i];
+    // Written registers are unneeded, except MACH/MACL: MAC.L and MAC.W
+    // read the accumulator inside macl()/macw() without listing it as a
+    // source, so a DMULS.L result feeding a MAC.L looked dead and was never
+    // written back (Sega Rally's polygon culling, then its own fatal-error
+    // trap). The same fix as YabaSanshiro's.
+    if(rt1[i]>=0 && rt1[i]!=MACH && rt1[i]!=MACL) u|=1LL<<rt1[i];
+    if(rt2[i]>=0 && rt2[i]!=MACH && rt2[i]!=MACL) u|=1LL<<rt2[i];
     // Accessed registers are needed
     if(rs1[i]>=0) u&=~(1LL<<rs1[i]);
     if(rs2[i]>=0) u&=~(1LL<<rs2[i]);
@@ -5233,13 +5481,26 @@ void disassemble_inst(int i)
 
 void sh2_dynarec_init()
 {
+  idle_skip_off = getenv("YAB_DYNAREC_IDLE") && !atoi(getenv("YAB_DYNAREC_IDLE"));
   int n;
   //printf("Init new dynarec\n");
   out=(u8 *)BASE_ADDR;
+#if defined(__arm__)
+  // The code buffer is a page-aligned array in our own .bss (see
+  // linkage_arm.s); make it executable in place rather than mapping over it.
+  if (mprotect (out, 1<<TARGET_SIZE_2,
+                PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {printf("mprotect() failed\n");}
+#else
   if (mmap (out, 1<<TARGET_SIZE_2,
             PROT_READ | PROT_WRITE | PROT_EXEC,
             MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS,
             -1, 0) <= 0) {printf("mmap() failed\n");}
+#endif
+  // Blocks from a previous session (YabauseInit is re-run on reset) point
+  // into the buffer that is about to be reused
+  for(n=0;n<2048;n++) ll_clear(jump_in+n);
+  for(n=0;n<2048;n++) ll_clear(jump_out+n);
+  for(n=0;n<2048;n++) ll_clear(jump_dirty+n);
   //for(n=0x80000;n<0x80800;n++)
   //  invalid_code[n]=1;
   for(n=0;n<131072;n++)
@@ -5255,10 +5516,12 @@ void sh2_dynarec_init()
   expirep=16384; // Expiry pointer, +2 blocks
   literalcount=0;
   stop_after_jal=0;
+#if !defined(__arm__)
   if (mmap ((void *)0x80000000, 4194304,
             PROT_READ | PROT_WRITE,
             MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS,
             -1, 0) <= 0) {printf("mmap() failed\n");}
+#endif
 
   // This has to be done after BiosRom etc are allocated
   for(n=0;n<1048576;n++) {
@@ -5302,6 +5565,7 @@ void sh2_dynarec_init()
 
   master_cc=slave_cc=0;
   slave_ip=(void *)0; // Slave not running, go directly to interrupt handler
+  CurrentSH2=MSH2;
 
   arch_init();
 }
@@ -5316,12 +5580,25 @@ void SH2DynarecReset(SH2_struct *context) {
 void sh2_dynarec_cleanup()
 {
   int n;
+#if defined(__arm__)
+  // The code buffer is part of our .bss (see sh2_dynarec_init): unmapping it
+  // took the pages away from under the library, so the next access (and a
+  // later sh2_dynarec_init for another game) faulted. Just drop exec rights.
+  if (mprotect ((void *)BASE_ADDR, 1<<TARGET_SIZE_2, PROT_READ | PROT_WRITE) != 0) {printf("mprotect() failed\n");}
+#else
   if (munmap ((void *)BASE_ADDR, 1<<TARGET_SIZE_2) < 0) {printf("munmap() failed\n");}
+#endif
   for(n=0;n<2048;n++) ll_clear(jump_in+n);
   for(n=0;n<2048;n++) ll_clear(jump_out+n);
   for(n=0;n<2048;n++) ll_clear(jump_dirty+n);
 }
 
+#ifdef YAB_PROFILE
+static int sh2_recompile_block_body(int addr);
+int sh2_recompile_block(int addr) { int r; YAB_PROF_BEGIN(PROF_SH2_COMPILE); r = sh2_recompile_block_body(addr); YAB_PROF_END(PROF_SH2_COMPILE); return r; }
+#define sh2_recompile_block sh2_recompile_block_body
+static
+#endif
 int sh2_recompile_block(int addr)
 {
   pointer beginning;

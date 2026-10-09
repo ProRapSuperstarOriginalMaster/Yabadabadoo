@@ -46,6 +46,7 @@ enum {
    YAB_THREAD_VIDSOFT_PRIORITY_3,
    YAB_THREAD_VIDSOFT_PRIORITY_4,
    YAB_THREAD_VIDSOFT_LAYER_SPRITE,
+   YAB_THREAD_VIDSOFT_VDP1B,
    YAB_NUM_THREADS      // Total number of subthreads
 };
 
@@ -62,6 +63,11 @@ enum {
 // success, -1 on error.
 int YabThreadStart(unsigned int id, void (*func)(void *), void *arg);
 
+// YabThreadSetWorkerNice:  Extra nice value for render worker threads started
+// after this call (Linux; 0 = same priority as the emulation thread).
+// YAB_WORKER_NICE in the environment overrides it.
+void YabThreadSetWorkerNice(int nice);
+
 // YabThreadWait:  Wait for the given ID's thread to terminate.  Returns
 // immediately if no thread has been started on the given ID.
 void YabThreadWait(unsigned int id);
@@ -75,8 +81,30 @@ void YabThreadSleep(void);
 // YabThreadSleep:  Put the specified thread to sleep.
 void YabThreadRemoteSleep(unsigned int id);
 
-// YabThreadWake:  Wake up the given thread if it is asleep.
+// YabThreadWake:  Wake up the given thread if it is asleep.  A wake that
+// arrives while the thread is still running is remembered, so the thread's
+// next YabThreadSleep() returns immediately.
 void YabThreadWake(unsigned int id);
+
+// Flags handed between the emulation thread and worker threads.  Publish with
+// YabFlagSet (release) and observe with YabFlagGet (acquire), so everything
+// written before the flag was set is visible once it is seen (ARM is weakly
+// ordered; plain volatile accesses do not guarantee this).
+#if defined(__GNUC__) || defined(__clang__)
+#define YabFlagSet(flag, val) __atomic_store_n(&(flag), (val), __ATOMIC_RELEASE)
+#define YabFlagGet(flag)      __atomic_load_n(&(flag), __ATOMIC_ACQUIRE)
+#else
+#define YabFlagSet(flag, val) ((flag) = (val))
+#define YabFlagGet(flag)      (flag)
+#endif
+
+// YabFlagWait:  Wait until *flag is non-zero. After a short spin the caller
+// sleeps, so waiting doesn't keep a core busy. The thread that sets the flag
+// (YabFlagSet) must then call YabFlagNotify.
+void YabFlagWait(volatile int *flag);
+
+// YabFlagNotify:  Wake threads waiting in YabFlagWait.
+void YabFlagNotify(void);
 
 ///////////////////////////////////////////////////////////////////////////
 

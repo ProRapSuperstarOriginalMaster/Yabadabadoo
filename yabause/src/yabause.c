@@ -30,6 +30,7 @@
 #endif
 #include <string.h>
 #include "yabause.h"
+#include "yabprof.h"
 #include "cheat.h"
 #include "cs0.h"
 #include "cs2.h"
@@ -455,6 +456,7 @@ void YabFlushBackups(void)
 //////////////////////////////////////////////////////////////////////////////
 
 void YabauseDeInit(void) {
+   YabProfReport();
    SH2DeInit();
 
    if (BiosRom)
@@ -482,11 +484,14 @@ void YabauseDeInit(void) {
    Cs2DeInit();
    ScuDeInit();
    ScspDeInit();
+   /* before the VDP memory goes: the video core's DeInit waits for its render
+      threads, and the sprite layer thread can still be drawing the last frame
+      from Vdp1Regs/Vdp2Ram (a segfault when closing content) */
+   VideoDeInit();
    Vdp1DeInit();
    Vdp2DeInit();
    SmpcDeInit();
    PerDeInit();
-   VideoDeInit();
    CheatDeInit();
 }
 
@@ -594,7 +599,15 @@ static INLINE u32 get_cycles_per_line_division(u32 clock, int frames, int lines,
    return ((u64)(clock / frames) << SCSP_FRACTIONAL_BITS) / (lines * divisions_per_line);
 }
 
+#ifdef YAB_PROFILE
+int YabauseEmulateBody(void);
+int YabauseEmulate(void) { int r; YAB_PROF_BEGIN(PROF_FRAME); r = YabauseEmulateBody(); YAB_PROF_END(PROF_FRAME); return r; }
+#define YabauseEmulate YabauseEmulateBody
+#endif
 int YabauseEmulate(void) {
+#ifdef YAB_PROFILE
+#undef YabauseEmulate
+#endif
    int oneframeexec = 0;
 
    const u32 cyclesinc =
@@ -959,7 +972,7 @@ void YabauseSetVideoFormat(int type) {
 #endif
    yabsys.OneFrameTime =
       type ? (yabsys.tickfreq / 50) : (yabsys.tickfreq * 1001 / 60000);
-   Vdp2Regs->TVSTAT = Vdp2Regs->TVSTAT | (type & 0x1);
+   Vdp2Regs->TVSTAT = (Vdp2Regs->TVSTAT & ~0x1) | (type & 0x1);
    ScspChangeVideoFormat(type);
    YabauseChangeTiming(yabsys.CurSH2FreqType);
    lastticks = YabauseGetTicks();
@@ -1068,7 +1081,7 @@ void YabauseSpeedySetup(void)
    // Set VDP2 registers to sane states
    memset(Vdp2Regs, 0, sizeof(Vdp2));
    Vdp2Regs->TVMD = 0x8000;
-   Vdp2Regs->TVSTAT = 0x020A;
+   Vdp2Regs->TVSTAT = 0x020A | (yabsys.IsPal & 0x1);  /* bit 0: PAL */
    Vdp2Regs->CYCA0L = 0x0F44;
    Vdp2Regs->CYCA0U = 0xFFFF;
    Vdp2Regs->CYCA1L = 0xFFFF;
@@ -1267,3 +1280,107 @@ int YabauseQuickLoadGame(void)
 }
 
 //////////////////////////////////////////////////////////////////////////////
+
+
+#ifdef YAB_PROFILE
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+u64 yab_prof_ticks[PROF_COUNT];
+u32 yab_prof_calls[PROF_COUNT];
+u64 yab_prof_thread_ns[PROF_COUNT];
+u64 yab_prof_cpu_ns[PROF_COUNT];
+static u32 yab_prof_frames, yab_prof_skip = (u32)-1;
+static u64 yab_prof_t0;
+static double yab_prof_wall0;
+
+static double YabProfWall(void)
+{
+   struct timespec ts;
+   clock_gettime(CLOCK_MONOTONIC, &ts);
+   return ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+void YabProfFrame(void)
+{
+   if (yab_prof_skip == (u32)-1)
+      yab_prof_skip = getenv("YAB_PROF_SKIP") ? (u32)atoi(getenv("YAB_PROF_SKIP")) : 0;
+   if (yab_prof_frames == yab_prof_skip)
+   {
+      // start (or restart after warm-up) the measurement window
+      memset(yab_prof_ticks, 0, sizeof(yab_prof_ticks));
+      memset(yab_prof_calls, 0, sizeof(yab_prof_calls));
+      memset(yab_prof_thread_ns, 0, sizeof(yab_prof_thread_ns));
+      memset(yab_prof_cpu_ns, 0, sizeof(yab_prof_cpu_ns));
+      yab_prof_t0 = YabProfNow();
+      yab_prof_wall0 = YabProfWall();
+   }
+   /* YAB_PROF_FRAMELOG=file: one line per frame with each section's time
+      in that frame (ticks, or thread ns for the [thread CPU] sections) and
+      calls, "ticks/ms" first */
+   {
+      static FILE *flog;
+      static int flog_checked;
+      static u64 prev_ticks[PROF_COUNT], prev_tns[PROF_COUNT];
+      static u32 prev_calls[PROF_COUNT];
+      static u64 prev_now;
+      static double prev_wall;
+      int i;
+      if (!flog_checked)
+      {
+         const char *path = getenv("YAB_PROF_FRAMELOG");
+         flog_checked = 1;
+         if (path)
+            flog = fopen(path, "w");
+      }
+      if (flog && yab_prof_frames > yab_prof_skip)
+      {
+         u64 now = YabProfNow();
+         double wall = YabProfWall();
+         if (prev_now)
+         {
+            fprintf(flog, "%u %.1f", yab_prof_frames, (double)(now - prev_now) / ((wall - prev_wall) * 1000.0));
+            for (i = 0; i < PROF_COUNT; i++)
+               fprintf(flog, " %llu/%u", (unsigned long long)(i >= PROF_T_VDP1 ? yab_prof_thread_ns[i] - prev_tns[i] : yab_prof_ticks[i] - prev_ticks[i]),
+                       yab_prof_calls[i] - prev_calls[i]);
+            fprintf(flog, "\n");
+         }
+         prev_now = now;
+         prev_wall = wall;
+         memcpy(prev_ticks, yab_prof_ticks, sizeof(prev_ticks));
+         memcpy(prev_tns, yab_prof_thread_ns, sizeof(prev_tns));
+         memcpy(prev_calls, yab_prof_calls, sizeof(prev_calls));
+      }
+   }
+   yab_prof_frames++;
+}
+
+void YabProfReport(void)
+{
+   static const char *names[PROF_COUNT] = {
+      "frame (YabauseEmulate)", "SH2Exec (interpreter)", "SCU", "68K", "SCSP", "SMPC", "CD block",
+      "HBlank IN/OUT", "VBlank-OUT", "  VDP2 DrawScreens", "  Vdp1Draw", "VBlank-IN",
+      "  wait for layer threads", "  Titan compositing", "wait for VDP1 thread", "video output", "VDP2 state/VRAM snapshot", "VDP1 RAM snapshot", "VDP1 erase", "VDP1 list pre-scan",
+      "SH2 block compile", "SH2 invalidations", "SH2 get_addr lookups",
+      "[thread CPU] VDP1", "[thread CPU] VDP2 layers", "[thread CPU] sprite layer", "[thread CPU] compositing", "[layer CPU] NBG0", "[layer CPU] NBG1", "[layer CPU] NBG2", "[layer CPU] NBG3", "[layer CPU] RBG0",
+   };
+   u32 frames = yab_prof_frames > yab_prof_skip ? yab_prof_frames - yab_prof_skip : 0;
+   double wall = YabProfWall() - yab_prof_wall0;
+   double ms_per_tick = wall * 1000.0 / (double)(YabProfNow() - yab_prof_t0);
+   double frame_ms;
+   int i;
+   if (!frames)
+      return;
+   frame_ms = yab_prof_ticks[PROF_FRAME] * ms_per_tick / frames;
+   fprintf(stderr, "\n=== yabause profile: %u frames, %.2f ms wall/frame (%.1f fps) ===\n", frames, wall * 1000.0 / frames, frames / wall);
+   for (i = 0; i < PROF_COUNT; i++)
+   {
+      double ms = i >= PROF_T_VDP1 ? yab_prof_thread_ns[i] / 1e6 / frames : yab_prof_ticks[i] * ms_per_tick / frames;
+      fprintf(stderr, "%-26s %7.3f ms/frame %5.1f%%  %8.1f calls/frame", names[i], ms,
+              frame_ms > 0 ? 100.0 * ms / frame_ms : 0.0, (double)yab_prof_calls[i] / frames);
+      if ((1u << i) & PROF_CPU_MASK)
+         fprintf(stderr, "  cpu %6.3f off-cpu %6.3f", yab_prof_cpu_ns[i] / 1e6 / frames, ms - yab_prof_cpu_ns[i] / 1e6 / frames);
+      fprintf(stderr, "\n");
+   }
+}
+#endif

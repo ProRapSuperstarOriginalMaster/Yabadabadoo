@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include <time.h>
 #include "smpc.h"
+#include "yabprof.h"
 #include "cs2.h"
 #include "debug.h"
 #include "peripheral.h"
@@ -507,7 +508,15 @@ static void SmpcRESDISA(void) {
 
 //////////////////////////////////////////////////////////////////////////////
 
+#ifdef YAB_PROFILE
+void SmpcExecBody(s32 t);
+void SmpcExec(s32 t) { YAB_PROF_BEGIN(PROF_SMPC); SmpcExecBody(t); YAB_PROF_END(PROF_SMPC); }
+#define SmpcExec SmpcExecBody
+#endif
 void SmpcExec(s32 t) {
+#ifdef YAB_PROFILE
+#undef SmpcExec
+#endif
    if (SmpcInternalVars->timing > 0) {
 
       if (intback_wait_for_line)

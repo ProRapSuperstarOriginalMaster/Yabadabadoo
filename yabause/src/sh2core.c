@@ -24,6 +24,7 @@
 
 #include <stdlib.h>
 #include "sh2core.h"
+#include "yabprof.h"
 #include "debug.h"
 #include "memory.h"
 #include "yabause.h"
@@ -287,7 +288,15 @@ void SH2PowerOn(SH2_struct *context) {
 
 //////////////////////////////////////////////////////////////////////////////
 
+#ifdef YAB_PROFILE
+void FASTCALL SH2ExecBody(SH2_struct *context, u32 cycles);
+void FASTCALL SH2Exec(SH2_struct *context, u32 cycles) { YAB_PROF_BEGIN(PROF_SH2); SH2ExecBody(context, cycles); YAB_PROF_END(PROF_SH2); }
+#define SH2Exec SH2ExecBody
+#endif
 void FASTCALL SH2Exec(SH2_struct *context, u32 cycles)
+#ifdef YAB_PROFILE
+#undef SH2Exec
+#endif
 {
    context->core->Exec(context, cycles);
 
@@ -2944,15 +2953,8 @@ int SH2LoadState(SH2_struct *context, const void * stream, UNUSED int version, i
    MemStateRead((void *)&context->isIdle, sizeof(u8), 1, stream);
    MemStateRead((void *)&context->instruction, sizeof(u16), 1, stream);
 
-   #if defined(SH2_DYNAREC)
-   if(SH2Core->id==2) {
-     invalidate_all_pages();
-     if (context->isslave == 1) {
-       // If the slave SH2 isn't running, make sure the dynarec stops it
-       if(!yabsys.IsSSH2Running) SH2Core->Reset(SSH2);
-     }
-   }
-   #endif
+   // The SH2 dynarec is resynchronised in YabLoadStateStream() once work
+   // RAM has been restored as well
 
    return size;
 }

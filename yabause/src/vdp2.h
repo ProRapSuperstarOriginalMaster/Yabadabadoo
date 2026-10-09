@@ -26,6 +26,11 @@
 #include "osdcore.h"
 
 extern u8 * Vdp2Ram;
+/* 4 KB pages of VDP2 RAM written since the render threads' copy was last
+   brought up to date (one bit a page; see VidsoftSyncRamCopy) */
+extern u32 Vdp2RamDirty[4];
+#define VDP2_RAM_MARK(addr) (Vdp2RamDirty[((addr) >> 17) & 3] |= 1u << (((addr) >> 12) & 31))
+#define VDP2_RAM_MARK_ALL() memset(Vdp2RamDirty, 0xFF, sizeof(Vdp2RamDirty))
 extern u8 * Vdp2ColorRam;
 
 u8 FASTCALL     Vdp2RamReadByte(u32);
@@ -376,6 +381,7 @@ typedef struct {
 extern Vdp2Internal_struct Vdp2Internal;
 extern u64 lastticks;
 extern int vdp2_is_odd_frame;
+extern u32 vdp2_frame_number;
 extern Vdp2 Vdp2Lines[270];
 
 struct CellScrollData
@@ -428,6 +434,16 @@ void ToggleRBG0(void);
 void ToggleFullScreen(void);
 void EnableAutoFrameSkip(void);
 void DisableAutoFrameSkip(void);
+/* Let the frontend decide frameskip; applies from the next VBlank-OUT.
+   -1 restores the built-in auto frameskip logic. */
+#define VDP2_FRAMESKIP_NONE      0 /* render normally */
+#define VDP2_FRAMESKIP_VDP2_ONLY 1 /* run VDP1, skip VDP2 rendering and output */
+#define VDP2_FRAMESKIP_ALL       2 /* skip all rendering */
+void Vdp2SetExternalFrameSkip(int mode);
+void Vdp2SetExternalFrameSkipNext(int next_shown, int lazy);
+void Vdp2RestoreVideoCore(void);
+void Vdp2SetVdp1DrawEveryFrame(int every);
+extern int vdp2_skip_draw;
 
 Vdp2 * Vdp2RestoreRegs(int line, Vdp2* lines);
 

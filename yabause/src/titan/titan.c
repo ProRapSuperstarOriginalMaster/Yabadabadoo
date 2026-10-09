@@ -18,6 +18,7 @@
 */
 
 #include "titan.h"
+#include "../yabprof.h"
 #include "../vidshared.h"
 #include "../vidsoft.h"
 #include "../threads.h"
@@ -32,33 +33,65 @@ extern int vdp2_interlace;
 
 int vidsoft_num_priority_threads = 0;
 
-struct PixelData
-{
-   u32 pixel;
-   u8 priority;
-   u8 linescreen;
-   u8 shadow_type;
-   u8 shadow_enabled;
-};
-
 static struct TitanContext {
    int inited;
    struct PixelData * vdp2framebuffer[6];
    u32 * linescreen[4];
+   u32 * dot_linecolor[2];   /* see TitanGetDotLineColors, allocated on first use */
    int vdp2width;
    int vdp2height;
    TitanBlendFunc blend;
    TitanTransFunc trans;
    struct PixelData * backscreen;
    int layer_priority[6];
+   int layer_dirtied[6];
+   /* layers drawn this frame, highest index first (TitanDigPixel order) */
+   int active_layers[6];
+   int num_active_layers;
+   /* Layer lines are cleared lazily: a line is valid only if it was written
+    * in the current frame (line_frame == frame); otherwise it reads as empty.
+    * This avoids a full memset of every drawn layer each frame. */
+   u32 frame;
+   u32 line_frame[6][512];
+   /* upper bound of the pixel priorities in each layer line (valid when
+    * line_frame matches); 7 unless the writer said otherwise */
+   u8 line_maxprio[6][512];
+   int blend_mode;       /* TITAN_BLEND_*, selects blend/trans below */
 } tt_context = {
    0,
    { NULL, NULL, NULL, NULL, NULL, NULL },
    { NULL, NULL, NULL, NULL },
+   { NULL, NULL },
    320,
    224,
-   NULL,NULL,NULL
+   NULL,NULL,NULL,
+   { 0, 0, 0, 0, 0, 0 },
+   { 0, 0, 0, 0, 0, 0 },
+   { 0, 0, 0, 0, 0, 0 },
+   0,
+   1,
+   { { 0 } },
+   { { 0 } },
+   TITAN_BLEND_TOP
 };
+
+/* line colour of a top pixel with linescreen != 0; pos is its layer offset */
+static INLINE u32 TitanLineColor(const struct PixelData *pd, int pos, int y)
+{
+   if (pd->linescreen < TITAN_LINESCREEN_DOT)
+      return tt_context.linescreen[pd->linescreen][y];
+   return tt_context.dot_linecolor[pd->linescreen - TITAN_LINESCREEN_DOT][pos];
+}
+
+/* stands in for layer lines not written this frame */
+static struct PixelData titan_empty_line[704];
+
+static INLINE struct PixelData *TitanReadLine(int layer, int layer_y)
+{
+   if (tt_context.line_frame[layer][layer_y] != tt_context.frame)
+      return titan_empty_line;
+   return &tt_context.vdp2framebuffer[layer][layer_y * tt_context.vdp2width];
+}
 
 struct
 {
@@ -142,19 +175,24 @@ void TitanRenderLinesSimplified(pixel_t * dispbuffer, int start_line, int end_li
 
    set_layer_y(start_line, &layer_y);
 
+   struct PixelData *back_buf = tt_context.backscreen;
+
    for (y = start_line + interlace_line; y < end_line; y += line_increment)
    {
-      for (x = 0; x < tt_context.vdp2width; x++)
-      {
-         int layer_pos = (layer_y * tt_context.vdp2width) + x;
-         i = (y * tt_context.vdp2width) + x;
+      pixel_t *disp_row = dispbuffer + (y * tt_context.vdp2width);
+      int layer_pos = layer_y * tt_context.vdp2width;
+      struct PixelData *rows[6];
 
-         dispbuffer[i] = 0;
+      for (layer = 0; layer < 6; layer++)
+         rows[layer] = TitanReadLine(layer, layer_y);
+
+      for (x = 0; x < tt_context.vdp2width; x++, layer_pos++)
+      {
+         u32 out_pixel = 0;
+         struct PixelData sprite = rows[TITAN_SPRITE][x];
 
          for (j = 0; j < num_layers; j++)
          {
-            struct PixelData sprite = tt_context.vdp2framebuffer[TITAN_SPRITE][layer_pos];
-
             int bg_layer = sorted_layers[j];
 
             //if the top layer is the back screen
@@ -163,13 +201,14 @@ void TitanRenderLinesSimplified(pixel_t * dispbuffer, int start_line, int end_li
                //use a sprite pixel if it is not transparent
                if (sprite.pixel)
                {
-                  dispbuffer[i] = TitanFixAlpha(sprite.pixel);
+                  out_pixel = TitanFixAlpha(sprite.pixel);
                   break;
                }
                else
                {
                   //otherwise use the back screen pixel
-                  dispbuffer[i] = TitanFixAlpha(tt_context.backscreen[y].pixel);
+                  u32 back_px = back_buf[layer_pos].pixel ? back_buf[layer_pos].pixel : back_buf[y].pixel;
+                  if (back_px) out_pixel = TitanFixAlpha(back_px);
                   break;
                }
             }
@@ -179,20 +218,23 @@ void TitanRenderLinesSimplified(pixel_t * dispbuffer, int start_line, int end_li
                //use the sprite pixel if it is not transparent
                if (sprite.pixel)
                {
-                  dispbuffer[i] = TitanFixAlpha(sprite.pixel);
+                  out_pixel = TitanFixAlpha(sprite.pixel);
                   break;
                }
             }
             else
             {
                //use the bg layer if it is not covered with a sprite pixel and not transparent
-               if (tt_context.vdp2framebuffer[bg_layer][layer_pos].pixel)
+               u32 bg_px = rows[bg_layer][x].pixel;
+               if (bg_px)
                {
-                  dispbuffer[i] = TitanFixAlpha(tt_context.vdp2framebuffer[bg_layer][layer_pos].pixel);
+                  out_pixel = TitanFixAlpha(bg_px);
                   break;
                }
             }
          }
+
+         disp_row[x] = out_pixel;
       }
       layer_y++;
    }
@@ -211,11 +253,14 @@ void FUNC_NAME(void* data) \
 { \
    for (;;) \
    { \
-      if (priority_thread_context.need_draw[THREAD_NUMBER]) \
+      if (YabFlagGet(priority_thread_context.need_draw[THREAD_NUMBER])) \
       { \
          priority_thread_context.need_draw[THREAD_NUMBER] = 0; \
+         YAB_PROF_TBEGIN(PROF_T_PRIO); \
          TitanRenderSimplifiedCheck(priority_thread_context.dispbuffer, priority_thread_context.lines[THREAD_NUMBER].start, priority_thread_context.lines[THREAD_NUMBER].end, priority_thread_context.use_simplified); \
-         priority_thread_context.draw_finished[THREAD_NUMBER] = 1; \
+         YAB_PROF_TEND(PROF_T_PRIO); \
+         YabFlagSet(priority_thread_context.draw_finished[THREAD_NUMBER], 1); \
+         YabFlagNotify(); \
       } \
       YabThreadSleep(); \
    } \
@@ -227,46 +272,61 @@ DECLARE_PRIORITY_THREAD(VidsoftPriorityThread2, 2);
 DECLARE_PRIORITY_THREAD(VidsoftPriorityThread3, 3);
 DECLARE_PRIORITY_THREAD(VidsoftPriorityThread4, 4);
 
-static u32 TitanBlendPixelsTop(u32 top, u32 bottom)
+#define FAST_DIV255(val) (((val) * 257 + 257) >> 16)
+
+static INLINE u32 TitanBlendPixelsTop(u32 top, u32 bottom)
 {
-   u8 alpha, ralpha, tr, tg, tb, br, bg, bb;
+   u32 alpha, ralpha, tr, tg, tb, br, bg, bb;
 
    alpha = (TitanGetAlpha(top) << 2) + 3;
    ralpha = 0xFF - alpha;
 
-   tr = (TitanGetRed(top) * alpha) / 0xFF;
-   tg = (TitanGetGreen(top) * alpha) / 0xFF;
-   tb = (TitanGetBlue(top) * alpha) / 0xFF;
+   tr = FAST_DIV255(TitanGetRed(top) * alpha);
+   tg = FAST_DIV255(TitanGetGreen(top) * alpha);
+   tb = FAST_DIV255(TitanGetBlue(top) * alpha);
 
-   br = (TitanGetRed(bottom) * ralpha) / 0xFF;
-   bg = (TitanGetGreen(bottom) * ralpha) / 0xFF;
-   bb = (TitanGetBlue(bottom) * ralpha) / 0xFF;
+   br = FAST_DIV255(TitanGetRed(bottom) * ralpha);
+   bg = FAST_DIV255(TitanGetGreen(bottom) * ralpha);
+   bb = FAST_DIV255(TitanGetBlue(bottom) * ralpha);
 
    return TitanCreatePixel(0x3F, tr + br, tg + bg, tb + bb);
 }
 
-static u32 TitanBlendPixelsBottom(u32 top, u32 bottom)
+static INLINE u32 TitanBlendPixelsBottom(u32 top, u32 bottom)
 {
-   u8 alpha, ralpha, tr, tg, tb, br, bg, bb;
+   u32 alpha, ralpha, tr, tg, tb, br, bg, bb;
 
    if ((top & 0x80000000) == 0) return top;
 
    alpha = (TitanGetAlpha(bottom) << 2) + 3;
    ralpha = 0xFF - alpha;
 
-   tr = (TitanGetRed(top) * alpha) / 0xFF;
-   tg = (TitanGetGreen(top) * alpha) / 0xFF;
-   tb = (TitanGetBlue(top) * alpha) / 0xFF;
+   tr = FAST_DIV255(TitanGetRed(top) * alpha);
+   tg = FAST_DIV255(TitanGetGreen(top) * alpha);
+   tb = FAST_DIV255(TitanGetBlue(top) * alpha);
 
-   br = (TitanGetRed(bottom) * ralpha) / 0xFF;
-   bg = (TitanGetGreen(bottom) * ralpha) / 0xFF;
-   bb = (TitanGetBlue(bottom) * ralpha) / 0xFF;
+   br = FAST_DIV255(TitanGetRed(bottom) * ralpha);
+   bg = FAST_DIV255(TitanGetGreen(bottom) * ralpha);
+   bb = FAST_DIV255(TitanGetBlue(bottom) * ralpha);
 
    return TitanCreatePixel(TitanGetAlpha(top), tr + br, tg + bg, tb + bb);
 }
 
-static u32 TitanBlendPixelsAdd(u32 top, u32 bottom)
+static INLINE u32 TitanBlendShadow(u32 bottom)
 {
+   u32 br = FAST_DIV255(TitanGetRed(bottom) * 124);
+   u32 bg = FAST_DIV255(TitanGetGreen(bottom) * 124);
+   u32 bb = FAST_DIV255(TitanGetBlue(bottom) * 124);
+   return TitanCreatePixel(0x3F, br, bg, bb);
+}
+
+static INLINE u32 TitanBlendPixelsAdd(u32 top, u32 bottom)
+{
+#if defined(__arm__)
+   u32 res;
+   asm("uqadd8 %0, %1, %2" : "=r"(res) : "r"(top), "r"(bottom));
+   return (res & 0x00FFFFFF) | 0x3F000000;
+#else
    u32 r, g, b;
 
    r = TitanGetRed(top) + TitanGetRed(bottom);
@@ -279,6 +339,7 @@ static u32 TitanBlendPixelsAdd(u32 top, u32 bottom)
    if (b > 0xFF) b = 0xFF;
 
    return TitanCreatePixel(0x3F, r, g, b);
+#endif
 }
 
 static INLINE int FASTCALL TitanTransAlpha(u32 pixel)
@@ -291,92 +352,113 @@ static INLINE int FASTCALL TitanTransBit(u32 pixel)
    return pixel & 0x80000000;
 }
 
-static u32 TitanDigPixel(int pos, int y)
+/* tt_context.blend / tt_context.trans for a blend mode known at compile time
+ * (same pairs as TitanSetBlendingMode) */
+static INLINE u32 TitanBlendM(const int mode, u32 top, u32 bottom)
 {
-   struct PixelData pixel_stack[2] = { 0 };
+   if (mode == TITAN_BLEND_BOTTOM)
+      return TitanBlendPixelsBottom(top, bottom);
+   if (mode == TITAN_BLEND_ADD)
+      return TitanBlendPixelsAdd(top, bottom);
+   return TitanBlendPixelsTop(top, bottom);
+}
 
-   int pixel_stack_pos = 0;
+static INLINE int TitanTransM(const int mode, u32 pixel)
+{
+   if (mode == TITAN_BLEND_BOTTOM || mode == TITAN_BLEND_ADD)
+      return TitanTransBit(pixel);
+   return TitanTransAlpha(pixel);
+}
 
-   int priority;
+static INLINE u32 TitanDigPixel(const int mode, int sprite_window, struct PixelData **rows, int num_rows, int x, int pos, int y)
+{
+   struct PixelData *p1 = NULL;
+   struct PixelData *p2 = NULL;
+   int prio1 = 0;
+   int prio2 = 0;
+   int i;
 
-   //sort the pixels from highest to lowest priority
-   for (priority = 7; priority > 0; priority--)
+   /* Layers/lines not drawn this frame read as empty (priority 0) and can
+    * never be picked, so only the ones written this frame are visited */
+   for (i = 0; i < num_rows; i++)
    {
-      int which_layer;
-
-      for (which_layer = TITAN_SPRITE; which_layer >= 0; which_layer--)
+      struct PixelData *pd = &rows[i][x];
+      int p = pd->priority;
+      if (p > prio1)
       {
-         if (tt_context.vdp2framebuffer[which_layer][pos].priority == priority)
-         {
-            pixel_stack[pixel_stack_pos] = tt_context.vdp2framebuffer[which_layer][pos];
-            pixel_stack_pos++;
-
-            if (pixel_stack_pos == 2)
-               goto finished;//backscreen is unnecessary in this case
-         }
+         p2 = p1;
+         prio2 = prio1;
+         p1 = pd;
+         prio1 = p;
+      }
+      else if (p > prio2)
+      {
+         p2 = pd;
+         prio2 = p;
       }
    }
 
-   pixel_stack[pixel_stack_pos] = tt_context.backscreen[pos];
+   struct PixelData *back = &tt_context.backscreen[pos];
+   if (!p1) p1 = back;
+   if (!p2) p2 = back;
 
-finished:
+   u32 pixel = p1->pixel;
 
-   if (pixel_stack[0].linescreen)
+   if (p1->linescreen)
    {
-      pixel_stack[0].pixel = tt_context.blend(pixel_stack[0].pixel, tt_context.linescreen[pixel_stack[0].linescreen][y]);
+      pixel = TitanBlendM(mode, pixel, TitanLineColor(p1, pos, y));
    }
 
-   if ((pixel_stack[0].shadow_type == TITAN_MSB_SHADOW) && ((pixel_stack[0].pixel & 0xFFFFFF) == 0))
+   if ((p1->shadow_type == TITAN_MSB_SHADOW) && ((pixel & 0xFFFFFF) == 0))
    {
       //transparent sprite shadow
-      if (pixel_stack[1].shadow_enabled)
+      if (p2->shadow_enabled)
       {
-         pixel_stack[0].pixel = TitanBlendPixelsTop(0x20000000, pixel_stack[1].pixel);
+         pixel = TitanBlendShadow(p2->pixel);
       }
       else
       {
-         pixel_stack[0].pixel = pixel_stack[1].pixel;
+         pixel = p2->pixel;
       }
    }
-   else if (pixel_stack[0].shadow_type == TITAN_MSB_SHADOW && ((pixel_stack[0].pixel & 0xFFFFFF) != 0))
+   else if (p1->shadow_type == TITAN_MSB_SHADOW && ((pixel & 0xFFFFFF) != 0))
    {
-      if (tt_context.trans(pixel_stack[0].pixel))
+      if (TitanTransM(mode, pixel))
       {
-         u32 bottom = pixel_stack[1].pixel;
-         pixel_stack[0].pixel = tt_context.blend(pixel_stack[0].pixel, bottom);
+         pixel = TitanBlendM(mode, pixel, p2->pixel);
       }
 
       //sprite self-shadowing, only if sprite window is not enabled
-      if (!(Vdp2Regs->SPCTL & 0x10))
-         pixel_stack[0].pixel = TitanBlendPixelsTop(0x20000000, pixel_stack[0].pixel);
+      if (!sprite_window)
+         pixel = TitanBlendShadow(pixel);
    }
-   else if (pixel_stack[0].shadow_type == TITAN_NORMAL_SHADOW)
+   else if (p1->shadow_type == TITAN_NORMAL_SHADOW)
    {
-      if (pixel_stack[1].shadow_enabled)
+      if (p2->shadow_enabled)
       {
-         pixel_stack[0].pixel = TitanBlendPixelsTop(0x20000000, pixel_stack[1].pixel);
+         pixel = TitanBlendShadow(p2->pixel);
       }
       else
       {
-         pixel_stack[0].pixel = pixel_stack[1].pixel;
+         pixel = p2->pixel;
       }
    }
    else
    {
-      if (tt_context.trans(pixel_stack[0].pixel))
+      if (TitanTransM(mode, pixel))
       {
-         u32 bottom = pixel_stack[1].pixel;
-         pixel_stack[0].pixel = tt_context.blend(pixel_stack[0].pixel, bottom);
+         pixel = TitanBlendM(mode, pixel, p2->pixel);
       }
    }
 
-   return pixel_stack[0].pixel;
+   return pixel;
 }
 
 /* public */
 int TitanInit()
 {
    int i;
+   const int reinit = tt_context.inited;
 
    if (! tt_context.inited)
    {
@@ -411,8 +493,15 @@ int TitanInit()
       tt_context.inited = 1;
    }
 
+   /* Freshly calloc()ed buffers are already zero; clearing them again would
+    * make all 6 x 1.4 MB resident, while a normal-resolution game only ever
+    * touches the first half of each. Re-inits clear the old contents. */
    for(i = 0;i < 6;i++)
-      memset(tt_context.vdp2framebuffer[i], 0, sizeof(u32) * 704 * 256);
+   {
+      if (reinit)
+         memset(tt_context.vdp2framebuffer[i], 0, sizeof(struct PixelData) * 704 * 256);
+      tt_context.layer_dirtied[i] = 0;
+   }
 
    for(i = 1;i < 4;i++)
       memset(tt_context.linescreen[i], 0, sizeof(u32) * 512);
@@ -429,8 +518,11 @@ void TitanErase()
    if (vdp2_interlace)
       height /= 2;
 
+   (void)height;
+   // lines are cleared on first write (see TitanClaimLayerLine)
+   tt_context.frame++;
    for (i = 0; i < 6; i++)
-      memset(tt_context.vdp2framebuffer[i], 0, sizeof(struct PixelData) * tt_context.vdp2width * height);
+      tt_context.layer_dirtied[i] = 0;
 }
 
 int TitanDeInit()
@@ -443,13 +535,22 @@ int TitanDeInit()
    for(i = 1;i < 4;i++)
       free(tt_context.linescreen[i]);
 
+   for (i = 0; i < 2; i++)
+   {
+      free(tt_context.dot_linecolor[i]);
+      tt_context.dot_linecolor[i] = NULL;
+   }
+
    return 0;
 }
 
 void TitanSetResolution(int width, int height)
 {
+   int i;
    tt_context.vdp2width = width;
    tt_context.vdp2height = height;
+   for (i = 0; i < 6; i++)
+      tt_context.layer_dirtied[i] = 1;
 }
 
 void TitanGetResolution(int * width, int * height)
@@ -460,6 +561,7 @@ void TitanGetResolution(int * width, int * height)
 
 void TitanSetBlendingMode(int blend_mode)
 {
+   tt_context.blend_mode = (blend_mode == TITAN_BLEND_BOTTOM || blend_mode == TITAN_BLEND_ADD) ? blend_mode : TITAN_BLEND_TOP;
    if (blend_mode == TITAN_BLEND_BOTTOM)
    {
       tt_context.blend = TitanBlendPixelsBottom;
@@ -477,10 +579,32 @@ void TitanSetBlendingMode(int blend_mode)
    }
 }
 
+/* The colour each back screen line was last filled with, at width
+ * back_fill_width: refilling a line with the same colour is skipped. Only
+ * TitanPutBackHLine writes the back screen, and most games keep the same
+ * back colour frame after frame; the fill (8 bytes a pixel, 675 KB at
+ * 352x240) took ~11% of the emulation thread on the Miyoo. */
+static u32 back_fill_color[512];
+static u8 back_fill_valid[512];
+static int back_fill_width = -1;
+
 void TitanPutBackHLine(s32 y, u32 color)
 {
    struct PixelData* buffer = &tt_context.backscreen[(y * tt_context.vdp2width)];
    int i;
+
+   if (back_fill_width != tt_context.vdp2width)
+   {
+      memset(back_fill_valid, 0, sizeof(back_fill_valid));
+      back_fill_width = tt_context.vdp2width;
+   }
+   if (y >= 0 && y < 512)
+   {
+      if (back_fill_valid[y] && back_fill_color[y] == color)
+         return;
+      back_fill_valid[y] = 1;
+      back_fill_color[y] = color;
+   }
 
    for (i = 0; i < tt_context.vdp2width; i++)
       buffer[i].pixel = color;
@@ -496,17 +620,50 @@ void TitanPutLineHLine(int linescreen, s32 y, u32 color)
    }
 }
 
+u32 *TitanGetDotLineColors(int n)
+{
+   if (!tt_context.dot_linecolor[n])
+      tt_context.dot_linecolor[n] = (u32 *)calloc(sizeof(u32), 704 * 256);
+   return tt_context.dot_linecolor[n];
+}
+
+struct PixelData *TitanGetLayerLine(int layer, int y)
+{
+   return &tt_context.vdp2framebuffer[layer][y * tt_context.vdp2width];
+}
+
+int TitanClaimLayerLine(int layer, int y)
+{
+   tt_context.layer_dirtied[layer] = 1;
+   tt_context.line_maxprio[layer][y] = 7;
+   if (tt_context.line_frame[layer][y] == tt_context.frame)
+      return 0;
+   tt_context.line_frame[layer][y] = tt_context.frame;
+   return 1;
+}
+
+void TitanSetLineMaxPriority(int layer, int y, int maxprio)
+{
+   tt_context.line_maxprio[layer][y] = maxprio;
+}
+
+void TitanSetLayerDirty(int layer)
+{
+   tt_context.layer_dirtied[layer] = 1;
+}
+
 void TitanPutPixel(int priority, s32 x, s32 y, u32 color, int linescreen, vdp2draw_struct* info)
 {
    if (priority == 0) return;
 
    {
       int pos = (y * tt_context.vdp2width) + x;
-      tt_context.vdp2framebuffer[info->titan_which_layer][pos].pixel = color;
-      tt_context.vdp2framebuffer[info->titan_which_layer][pos].priority = priority;
-      tt_context.vdp2framebuffer[info->titan_which_layer][pos].linescreen = linescreen;
-      tt_context.vdp2framebuffer[info->titan_which_layer][pos].shadow_enabled = info->titan_shadow_enabled;
-      tt_context.vdp2framebuffer[info->titan_which_layer][pos].shadow_type = info->titan_shadow_type;
+      int layer = info->titan_which_layer;
+      struct PixelData *pd = &tt_context.vdp2framebuffer[layer][pos];
+      if (TitanClaimLayerLine(layer, y))
+         memset(&tt_context.vdp2framebuffer[layer][y * tt_context.vdp2width], 0, sizeof(struct PixelData) * tt_context.vdp2width);
+      pd->pixel = color;
+      pd->meta = TitanPackMeta(priority, linescreen, info->titan_shadow_type, info->titan_shadow_enabled);
    }
 }
 
@@ -523,16 +680,11 @@ void TitanPutHLine(int priority, s32 x, s32 y, s32 width, u32 color)
    }
 }
 
-void TitanRenderLines(pixel_t * dispbuffer, int start_line, int end_line)
+static INLINE void TitanRenderLinesM(const int mode, pixel_t * dispbuffer, int start_line, int end_line)
 {
    int x, y, layer_y;
-   u32 dot;
    int line_increment, interlace_line;
-
-   if (!tt_context.inited || (!tt_context.trans))
-   {
-      return;
-   }
+   const int sprite_window = (Vdp2Regs->SPCTL & 0x10) != 0;
 
    Vdp2GetInterlaceInfo(&interlace_line, &line_increment);
 
@@ -540,22 +692,93 @@ void TitanRenderLines(pixel_t * dispbuffer, int start_line, int end_line)
    
    for (y = start_line + interlace_line; y < end_line; y += line_increment)
    {
-      for (x = 0; x < tt_context.vdp2width; x++)
+      pixel_t *disp_row = dispbuffer + (y * tt_context.vdp2width);
+      int layer_pos = layer_y * tt_context.vdp2width;
+      struct PixelData *rows[6];
+      /* The same rows ordered by the highest key any of their pixels can
+       * have, where key = priority * 8 + tie and tie prefers earlier rows,
+       * exactly as TitanDigPixel picks the top pixel */
+      struct PixelData *sorted[6];
+      int sorted_tie[6], sorted_max[6];
+      int i, j, num_rows = 0;
+
+      for (i = 0; i < tt_context.num_active_layers; i++)
       {
-         int i = (y * tt_context.vdp2width) + x;
-         int layer_pos = (layer_y * tt_context.vdp2width) + x;
-
-         dispbuffer[i] = 0;
-
-         dot = TitanDigPixel(layer_pos, y);
-
-         if (dot)
+         int layer = tt_context.active_layers[i];
+         if (tt_context.line_frame[layer][layer_y] == tt_context.frame)
          {
-            dispbuffer[i] = TitanFixAlpha(dot);
+            int tie = 7 - num_rows;
+            int max = tt_context.line_maxprio[layer][layer_y] * 8 + tie;
+            for (j = num_rows; j > 0 && sorted_max[j - 1] < max; j--)
+            {
+               sorted[j] = sorted[j - 1];
+               sorted_tie[j] = sorted_tie[j - 1];
+               sorted_max[j] = sorted_max[j - 1];
+            }
+            sorted[j] = &tt_context.vdp2framebuffer[layer][layer_y * tt_context.vdp2width];
+            sorted_tie[j] = tie;
+            sorted_max[j] = max;
+            rows[num_rows++] = &tt_context.vdp2framebuffer[layer][layer_pos];
          }
       }
 
+      for (x = 0; x < tt_context.vdp2width; x++, layer_pos++)
+      {
+         u32 dot;
+
+         /* Fast path: find the top pixel, stopping once no remaining row can
+          * beat it. If it is opaque and has no shadow, nothing below it
+          * matters. Otherwise TitanDigPixel does the full job. */
+         {
+            struct PixelData *top = NULL;
+            int best = 0;
+            for (i = 0; i < num_rows && best < sorted_max[i]; i++)
+            {
+               struct PixelData *pd = &sorted[i][x];
+               int p = pd->priority;
+               if (p)
+               {
+                  int key = p * 8 + sorted_tie[i];
+                  if (key > best)
+                  {
+                     best = key;
+                     top = pd;
+                  }
+               }
+            }
+            if (top && !top->shadow_type)
+            {
+               u32 pixel = top->pixel;
+               if (top->linescreen)
+                  pixel = TitanBlendM(mode, pixel, TitanLineColor(top, layer_pos, y));
+               if (!TitanTransM(mode, pixel))
+               {
+                  disp_row[x] = pixel ? TitanFixAlpha(pixel) : 0;
+                  continue;
+               }
+            }
+         }
+
+         dot = TitanDigPixel(mode, sprite_window, rows, num_rows, x, layer_pos, y);
+         disp_row[x] = dot ? TitanFixAlpha(dot) : 0;
+      }
+
       layer_y++;
+   }
+}
+
+void TitanRenderLines(pixel_t * dispbuffer, int start_line, int end_line)
+{
+   if (!tt_context.inited || (!tt_context.trans))
+   {
+      return;
+   }
+
+   switch (tt_context.blend_mode)
+   {
+   case TITAN_BLEND_BOTTOM: TitanRenderLinesM(TITAN_BLEND_BOTTOM, dispbuffer, start_line, end_line); break;
+   case TITAN_BLEND_ADD:    TitanRenderLinesM(TITAN_BLEND_ADD, dispbuffer, start_line, end_line); break;
+   default:                 TitanRenderLinesM(TITAN_BLEND_TOP, dispbuffer, start_line, end_line); break;
    }
 }
 
@@ -573,14 +796,14 @@ void VIDSoftSetNumPriorityThreads(int num)
 
 void TitanStartPriorityThread(int which)
 {
-   priority_thread_context.need_draw[which] = 1;
    priority_thread_context.draw_finished[which] = 0;
+   YabFlagSet(priority_thread_context.need_draw[which], 1);
    YabThreadWake(YAB_THREAD_VIDSOFT_PRIORITY_0 + which);
 }
 
 void TitanWaitForPriorityThread(int which)
 {
-   while (!priority_thread_context.draw_finished[which]){}
+   YabFlagWait(&priority_thread_context.draw_finished[which]);
 }
 
 void TitanRenderThreads(pixel_t * dispbuffer, int can_use_simplified)
@@ -623,9 +846,18 @@ void TitanRenderThreads(pixel_t * dispbuffer, int can_use_simplified)
    }
 }
 
+#ifdef YAB_PROFILE
+void TitanRenderBody(pixel_t * dispbuffer);
+void TitanRender(pixel_t * dispbuffer) { YAB_PROF_BEGIN(PROF_TITAN); TitanRenderBody(dispbuffer); YAB_PROF_END(PROF_TITAN); }
+#define TitanRender TitanRenderBody
+#endif
 void TitanRender(pixel_t * dispbuffer)
+#ifdef YAB_PROFILE
+#undef TitanRender
+#endif
 {
    int can_use_simplified_rendering = 1;
+   int i;
 
    if (!tt_context.inited || (!tt_context.trans))
    {
@@ -653,6 +885,11 @@ void TitanRender(pixel_t * dispbuffer)
    tt_context.layer_priority[TITAN_NBG2] = (Vdp2Regs->PRINB & 0x7);
    tt_context.layer_priority[TITAN_NBG3] = ((Vdp2Regs->PRINB >> 8) & 0x7);
    tt_context.layer_priority[TITAN_RBG0] = (Vdp2Regs->PRIR & 0x7);
+
+   tt_context.num_active_layers = 0;
+   for (i = TITAN_SPRITE; i >= 0; i--)
+      if (tt_context.layer_dirtied[i])
+         tt_context.active_layers[tt_context.num_active_layers++] = i;
 
    if (vidsoft_num_priority_threads > 0)
    {

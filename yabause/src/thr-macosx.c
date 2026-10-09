@@ -133,3 +133,22 @@ void YabThreadWake(unsigned int id) {
 
     pthread_cond_signal(&thread_handle[id].cond);
 }
+
+//////////////////////////////////////////////////////////////////////////////
+
+void YabFlagWait(volatile int *flag)
+{
+   while (!YabFlagGet(*flag))
+      YabThreadYield();
+}
+
+void YabFlagNotify(void)
+{
+}
+
+//////////////////////////////////////////////////////////////////////////////
+
+void YabThreadSetWorkerNice(int nice)
+{
+   (void)nice;
+}

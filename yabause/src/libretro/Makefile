@@ -255,6 +255,25 @@ else ifeq ($(platform), classic_armv7_a7)
 	    LDFLAGS += -static-libgcc -static-libstdc++
 	  endif
 	endif
+
+# Miyoo Mini / Miyoo Mini+ (Cortex-A7 ARMv7 + NEON-VFPv4)
+else ifeq ($(platform), miyoomini)
+	TARGET := $(TARGET_NAME)_libretro.so
+	fpic := -fPIC
+	SHARED := -shared -Wl,--no-undefined -Wl,--version-script=link.T
+	CC = arm-linux-gnueabihf-gcc
+	CXX = arm-linux-gnueabihf-g++
+	CC_AS = arm-linux-gnueabihf-gcc
+	AR = arm-linux-gnueabihf-ar
+	FLAGS += -pthread -fomit-frame-pointer -ffast-math
+	# -mcpu (not just -mtune) enables the A7's hardware divide; plain armv7-a
+	# makes GCC call a software division routine
+	FLAGS += -marm -mcpu=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=hard
+	FLAGS += -DHAVE_ARMv6=1 -DHAVE_ARMv7=1
+	LDFLAGS += -pthread
+	HAVE_SSE = 0
+	DYNAREC = 3
+	ARCH_IS_LINUX = 1
 	
 # (armv8 a35, hard point, neon based) ###
 # Playstation Classic
@@ -535,7 +554,8 @@ ifeq ($(HAVE_FSEEKO), 1)
 	FLAGS += -DHAVE_FSEEKO
 endif
 
-OBJECTS += $(OBJECTS_C) $(OBJECTS_CXX)
+OBJECTS_ASM := $(OBJECTS_S:.s=.s.o)
+OBJECTS += $(OBJECTS_C) $(OBJECTS_CXX) $(OBJECTS_ASM)
 
 LDFLAGS += $(fpic) $(SHARED)
 FLAGS += $(fpic)

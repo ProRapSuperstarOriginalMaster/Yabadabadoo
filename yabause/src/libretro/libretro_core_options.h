@@ -40,13 +40,74 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       "yabause_frameskip",
       "Frameskip",
       NULL,
-      "Skip frames to improve performance.",
+      "Skip rendering frames to improve performance. 'Auto' skips when the frontend reports an audio buffer underrun. 'Auto (Threshold)' skips when the audio buffer drops below 'Frameskip Threshold'. 'Fixed Interval' always skips 'Frameskip Interval' frames between rendered frames.",
+      NULL,
+      NULL,
+      {
+         { "disabled",       NULL },
+         { "auto",           "Auto" },
+         { "auto_threshold", "Auto (Threshold)" },
+         { "fixed_interval", "Fixed Interval" },
+         { NULL, NULL},
+      },
+      "disabled"
+   },
+   {
+      "yabause_frameskip_threshold",
+      "Frameskip Threshold (%)",
+      NULL,
+      "When 'Frameskip' is 'Auto (Threshold)', the audio buffer occupancy (percent) below which frames are skipped. Higher values reduce crackling at the cost of more skipped frames.",
+      NULL,
+      NULL,
+      {
+         { "15", NULL },
+         { "18", NULL },
+         { "21", NULL },
+         { "24", NULL },
+         { "27", NULL },
+         { "30", NULL },
+         { "33", NULL },
+         { "36", NULL },
+         { "39", NULL },
+         { "42", NULL },
+         { "45", NULL },
+         { "48", NULL },
+         { "51", NULL },
+         { "54", NULL },
+         { "57", NULL },
+         { "60", NULL },
+         { NULL, NULL },
+      },
+      "33"
+   },
+   {
+      "yabause_frameskip_interval",
+      "Frameskip Interval",
+      NULL,
+      "With 'Fixed Interval', the number of frames skipped after each rendered frame (1 = render every 2nd frame). With the 'Auto' modes, the maximum number of consecutive skipped frames.",
+      NULL,
+      NULL,
+      {
+         { "1", NULL },
+         { "2", NULL },
+         { "3", NULL },
+         { "4", NULL },
+         { "5", NULL },
+         { NULL, NULL },
+      },
+      "3"
+   },
+   {
+      "yabause_frameskip_sprites",
+      "Frameskip: Skip Polygon Drawing",
+      NULL,
+      "Also skip drawing sprites and polygons (VDP1) on skipped frames. Faster in some games (Shining Force III), but shown frames can mix polygons or FMV images from an older frame with current backgrounds, which looks like stutter, rubber banding or jumpy video (most 3D games, sprite-based FMVs). 'Disabled' shows every rendered frame exactly as without frameskip, drawing only what is shown where it can.",
       NULL,
       NULL,
       {
          { "disabled", NULL },
-         { "enabled", NULL },
-         { NULL, NULL},
+         { "enabled",  NULL },
+         { NULL, NULL },
       },
       "disabled"
    },
@@ -107,6 +168,93 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       },
       "disabled"
    },
+#ifdef SH2_DYNAREC
+   {
+      "yabause_sh2_core",
+      "SH2 Core (Restart Required)",
+      NULL,
+      "CPU emulation for the two SH-2 processors. 'Dynamic Recompiler' is much faster but experimental and less accurate; it requires a real BIOS.",
+      NULL,
+      NULL,
+      {
+         { "interpreter", "Interpreter" },
+         { "dynarec",     "Dynamic Recompiler" },
+         { NULL, NULL },
+      },
+      "interpreter"
+   },
+#endif
+   {
+      "yabause_vdp1_draw_timing",
+      "VDP1 Draw Timing",
+      NULL,
+      "When games running at 30 fps or less (NiGHTS, Panzer Dragoon, Shining Force III) draw their 3D. 'After Frame Change' draws once after each frame change, like the hardware: much faster in those games, and the polygons shown are the ones drawn right after the change. 'Every Frame' is the old behaviour: redraws every frame, slower, polygons can be a frame ahead of the backgrounds. Games that change every frame look the same either way.",
+      NULL,
+      NULL,
+      {
+         { "frame_change", "After Frame Change" },
+         { "every_frame",  "Every Frame" },
+         { NULL, NULL },
+      },
+      "frame_change"
+   },
+   {
+      "yabause_video_standard",
+      "Video Standard",
+      NULL,
+      "Timing of the emulated console. 'Auto' follows the disc: European (PAL) games run at 50 frames per second, as on a PAL Saturn, and need less speed for full speed. 'NTSC' runs every game at 60 (PAL games then run 20% fast, as with this core before). Takes effect immediately; saves made with the other timing are converted when loaded.",
+      NULL,
+      NULL,
+      {
+         { "auto", "Auto" },
+         { "ntsc", "NTSC (60 Hz)" },
+         { "pal",  "PAL (50 Hz)" },
+         { NULL, NULL },
+      },
+      "auto"
+   },
+   {
+      "yabause_m68k_idle_skip",
+      "Sound CPU Idle Skipping",
+      NULL,
+      "Skip the sound CPU's time while its driver only polls for work (most of the time in most games), which saves 2-3 ms of each frame. Notes can start a few samples earlier or later than without it. 'Disabled' runs every cycle.",
+      NULL,
+      NULL,
+      {
+         { "enabled",  NULL },
+         { "disabled", NULL },
+         { NULL, NULL },
+      },
+      "enabled"
+   },
+   {
+      "yabause_rotation_line_color",
+      "Per-Pixel Rotation Line Colour",
+      NULL,
+      "Rotating backgrounds whose coefficient table carries line colour data (Panzer Dragoon's sea haze) get it per pixel, as on the hardware. 'Disabled' uses one colour per scanline: slightly faster, but the haze shows a horizontal edge when the camera rolls.",
+      NULL,
+      NULL,
+      {
+         { "enabled",  NULL },
+         { "disabled", NULL },
+         { NULL, NULL },
+      },
+      "enabled"
+   },
+   {
+      "yabause_sh2_timeslice",
+      "SH2 Time Slice (Restart Required)",
+      NULL,
+      "How often the SH-2 CPUs are synchronized with the rest of the system. 'Scanline' is faster than 'Tenth of a scanline' but less accurate. Only affects the interpreter; the dynamic recompiler always slices per tenth of a scanline.",
+      NULL,
+      NULL,
+      {
+         { "deciline", "Tenth of a scanline" },
+         { "line",     "Scanline" },
+         { NULL, NULL },
+      },
+      "deciline"
+   },
 #ifdef HAVE_THREADS
    {
       "yabause_numthreads",
@@ -125,6 +273,20 @@ struct retro_core_option_v2_definition option_defs_us[] = {
          { NULL, NULL},
       },
       "4"
+   },
+   {
+      "yabause_worker_priority",
+      "Render Thread Priority (Restart Required)",
+      NULL,
+      "Run the rendering worker threads at a lower priority than the emulation thread (the 3D workers as batch threads that don't interrupt it), so on a dual-core CPU the emulation keeps a core when workers wake up. 'Low' is faster on the Miyoo Mini (Linux only).",
+      NULL,
+      NULL,
+      {
+         { "low",    "Low" },
+         { "normal", "Normal" },
+         { NULL, NULL},
+      },
+      "low"
    },
 #endif
    { NULL, NULL, NULL, NULL, NULL, NULL, {{0}}, NULL },

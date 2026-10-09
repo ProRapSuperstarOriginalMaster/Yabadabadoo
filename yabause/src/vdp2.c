@@ -24,6 +24,7 @@
 
 #include <stdlib.h>
 #include "vdp2.h"
+#include "yabprof.h"
 #include "debug.h"
 #include "peripheral.h"
 #include "scu.h"
@@ -35,6 +36,7 @@
 #include "osdcore.h"
 
 u8 * Vdp2Ram;
+u32 Vdp2RamDirty[4];
 u8 * Vdp2ColorRam;
 Vdp2 * Vdp2Regs;
 Vdp2Internal_struct Vdp2Internal;
@@ -45,9 +47,34 @@ Vdp2 Vdp2Lines[270];
 
 static int autoframeskipenab=0;
 static int throttlespeed=0;
+/* Frontend-driven frameskip (Vdp2SetExternalFrameSkip): -1 = use the
+   built-in logic above, otherwise one of VDP2_FRAMESKIP_*. */
+static int externalframeskip=-1;
+/* Frontend frameskip: is the next frame shown, and may skipped frames
+   defer their VDP1 drawing (exact mode)? See VIDSoftVdp1LazyFrame() */
+static int external_next_shown = 1, external_lazy = 0;
+/* Set while a frame only runs VDP1 (VDP2_FRAMESKIP_VDP2_ONLY); the video
+   core then skips VDP2 layer rendering/compositing but still swaps the VDP1
+   framebuffers, so the next rendered frame has up-to-date sprites. */
+int vdp2_skip_draw=0;
+/* Is a VDP1 draw due? With plot trigger mode 2 VDP1 starts drawing at a
+   frame change, so in manual change mode (FBCR.FCM = 1) it draws only after
+   the game asked for a change. Games running at 30 fps or less change every
+   second frame or so; drawing at every VBlank-OUT redrew the same list into
+   a buffer that was erased and drawn again before it was shown.
+   Set at VBlank-IN when a change happened, cleared when a real video core
+   draws: under frameskip the dummy core's draws don't count, so the change
+   is drawn in the next frame that renders. Starts at 1 so a loaded state
+   draws. */
+static int vdp1_draw_pending = 1;
+static int vdp1_draw_every_frame = 0;  /* core option; YAB_VDP1_EVERYFRAME=0/1 overrides it for tests */
+static int vdp1_draw_env_checked = 0;
+/* The real video core while a skipped frame runs on VIDDummy */
+static VideoInterface_struct *vdp2_saved_vidcore = NULL;
 u64 lastticks=0;
 static int fps;
 int vdp2_is_odd_frame = 0;
+u32 vdp2_frame_number = 0;  /* counts VBlank-OUTs */
 
 //////////////////////////////////////////////////////////////////////////////
 
@@ -74,6 +101,7 @@ u32 FASTCALL Vdp2RamReadLong(u32 addr) {
 
 void FASTCALL Vdp2RamWriteByte(u32 addr, u8 val) {
    addr &= 0x7FFFF;
+   VDP2_RAM_MARK(addr);
    T1WriteByte(Vdp2Ram, addr, val);
 }
 
@@ -81,6 +109,7 @@ void FASTCALL Vdp2RamWriteByte(u32 addr, u8 val) {
 
 void FASTCALL Vdp2RamWriteWord(u32 addr, u16 val) {
    addr &= 0x7FFFF;
+   VDP2_RAM_MARK(addr);
    T1WriteWord(Vdp2Ram, addr, val);
 }
 
@@ -88,6 +117,7 @@ void FASTCALL Vdp2RamWriteWord(u32 addr, u16 val) {
 
 void FASTCALL Vdp2RamWriteLong(u32 addr, u32 val) {
    addr &= 0x7FFFF;
+   VDP2_RAM_MARK(addr);
    T1WriteLong(Vdp2Ram, addr, val);
 }
 
@@ -215,6 +245,7 @@ int Vdp2Init(void) {
 
    if ((Vdp2Ram = T1MemoryInit(0x80000)) == NULL)
       return -1;
+   VDP2_RAM_MARK_ALL();
 
    if ((Vdp2ColorRam = T2MemoryInit(0x1000)) == NULL)
       return -1;
@@ -327,7 +358,18 @@ void Vdp2Reset(void) {
 
 //////////////////////////////////////////////////////////////////////////////
 
+#ifdef YAB_PROFILE
+void Vdp2VBlankINBody(void);
+void Vdp2VBlankIN(void) { YAB_PROF_BEGIN(PROF_VBLANKIN); Vdp2VBlankINBody(); YAB_PROF_END(PROF_VBLANKIN); }
+#define Vdp2VBlankIN Vdp2VBlankINBody
+#endif
 void Vdp2VBlankIN(void) {
+#ifdef YAB_PROFILE
+#undef Vdp2VBlankIN
+#endif
+   if (!(Vdp1Regs->FBCR & 2) || Vdp1External.changerequest)
+      vdp1_draw_pending = 1;
+   Vdp1External.changerequest = 0;
    VIDCore->Vdp2DrawEnd();
    /* this should be done after a frame change or a plot trigger */
    Vdp1Regs->COPR = 0;
@@ -346,7 +388,15 @@ void Vdp2VBlankIN(void) {
 
 //////////////////////////////////////////////////////////////////////////////
 
+#ifdef YAB_PROFILE
+void Vdp2HBlankINBody(void);
+void Vdp2HBlankIN(void) { YAB_PROF_BEGIN(PROF_HBLANK); Vdp2HBlankINBody(); YAB_PROF_END(PROF_HBLANK); }
+#define Vdp2HBlankIN Vdp2HBlankINBody
+#endif
 void Vdp2HBlankIN(void) {
+#ifdef YAB_PROFILE
+#undef Vdp2HBlankIN
+#endif
    Vdp2Regs->TVSTAT |= 0x0004;
    ScuSendHBlankIN();
 
@@ -356,7 +406,15 @@ void Vdp2HBlankIN(void) {
 
 //////////////////////////////////////////////////////////////////////////////
 
+#ifdef YAB_PROFILE
+void Vdp2HBlankOUTBody(void);
+void Vdp2HBlankOUT(void) { YAB_PROF_BEGIN(PROF_HBLANK); Vdp2HBlankOUTBody(); YAB_PROF_END(PROF_HBLANK); }
+#define Vdp2HBlankOUT Vdp2HBlankOUTBody
+#endif
 void Vdp2HBlankOUT(void) {
+#ifdef YAB_PROFILE
+#undef Vdp2HBlankOUT
+#endif
    int i;
    Vdp2Regs->TVSTAT &= ~0x0004;
 
@@ -410,7 +468,15 @@ void SpeedThrottleDisable(void) {
 
 //////////////////////////////////////////////////////////////////////////////
 
+#ifdef YAB_PROFILE
+void Vdp2VBlankOUTBody(void);
+void Vdp2VBlankOUT(void) { YAB_PROF_BEGIN(PROF_VBLANKOUT); Vdp2VBlankOUTBody(); YAB_PROF_END(PROF_VBLANKOUT); }
+#define Vdp2VBlankOUT Vdp2VBlankOUTBody
+#endif
 void Vdp2VBlankOUT(void) {
+#ifdef YAB_PROFILE
+#undef Vdp2VBlankOUT
+#endif
    static int framestoskip = 0;
    static int framesskipped = 0;
    static int skipnextframe = 0;
@@ -418,36 +484,73 @@ void Vdp2VBlankOUT(void) {
    static u64 diffticks = 0;
    static u32 framecount = 0;
    static u64 onesecondticks = 0;
-   static VideoInterface_struct * saved = NULL;
+
+   YabProfFrame();
 
    if (vdp2_is_odd_frame)
       vdp2_is_odd_frame = 0;
    else
       vdp2_is_odd_frame = 1;
+   vdp2_frame_number++;
 
    Vdp2Regs->TVSTAT = ((Vdp2Regs->TVSTAT & ~0x0008) & ~0x0002) | (vdp2_is_odd_frame << 1);
 
-   if (skipnextframe && (! saved))
+   if (externalframeskip >= 0)
    {
-      saved = VIDCore;
+      skipnextframe = externalframeskip == VDP2_FRAMESKIP_ALL;
+      vdp2_skip_draw = externalframeskip == VDP2_FRAMESKIP_VDP2_ONLY;
+      framestoskip = 0;
+   }
+   else
+      /* Frameskip was switched off: a VDP2_ONLY frame must not stay in
+         effect, or VDP2 never draws again (black screen, sound running) */
+      vdp2_skip_draw = 0;
+
+   if (skipnextframe && (! vdp2_saved_vidcore))
+   {
+      vdp2_saved_vidcore = VIDCore;
       VIDCore = &VIDDummy;
    }
-   else if (saved && (! skipnextframe))
+   else if (vdp2_saved_vidcore && (! skipnextframe))
    {
-      VIDCore = saved;
-      saved = NULL;
+      VIDCore = vdp2_saved_vidcore;
+      vdp2_saved_vidcore = NULL;
+   }
+
+   if (VIDCore->id == 2 /* VIDCORE_SOFT */)
+   {
+      extern void VIDSoftVdp1LazyFrame(int active, int shown, int next_shown, int draw_due);
+      VIDSoftVdp1LazyFrame(externalframeskip >= 0 && external_lazy, externalframeskip <= VDP2_FRAMESKIP_NONE /* -1: frameskip off */,
+                           external_next_shown, Vdp1Regs->PTMR == 2 && (vdp1_draw_pending || vdp1_draw_every_frame));
    }
 
    VIDCore->Vdp2DrawStart();
 
-   if (Vdp2Regs->TVMD & 0x8000) {
-      VIDCore->Vdp2DrawScreens();
-      if (Vdp1Regs->PTMR == 2) Vdp1Draw();
-   }
-   else
+   if (!vdp1_draw_env_checked)
    {
-      VIDCore->Vdp2DispOff();
-      if (Vdp1Regs->PTMR == 2) Vdp1Draw();
+      const char *env = getenv("YAB_VDP1_EVERYFRAME");
+      if (env)
+         vdp1_draw_every_frame = env[0] == '1';
+      vdp1_draw_env_checked = 1;
+   }
+
+   {
+      const int draw = Vdp1Regs->PTMR == 2 && (vdp1_draw_pending || vdp1_draw_every_frame);
+      if (draw && VIDCore->id != VIDCORE_DUMMY)
+         vdp1_draw_pending = 0;
+
+      if (Vdp2Regs->TVMD & 0x8000) {
+         VIDCore->Vdp2DrawScreens();
+         if (draw) Vdp1Draw();
+      }
+      else
+      {
+         VIDCore->Vdp2DispOff();
+         if (draw) Vdp1Draw();
+      }
+      /* the list wasn't finished yet: draw it again next frame */
+      if (draw && Vdp1ListIncomplete && VIDCore->id != VIDCORE_DUMMY && !vdp1_draw_every_frame)
+         vdp1_draw_pending = 1;
    }
 
    FPSDisplay();
@@ -1132,9 +1235,11 @@ int Vdp2LoadState(const void * stream, UNUSED int version, int size)
 {
    // Read registers
    MemStateRead((void *)Vdp2Regs, sizeof(Vdp2), 1, stream);
+   vdp1_draw_pending = 1;
 
    // Read VDP2 ram
    MemStateRead((void *)Vdp2Ram, 0x80000, 1, stream);
+   VDP2_RAM_MARK_ALL();
 
    // Read CRAM
    MemStateRead((void *)Vdp2ColorRam, 0x1000, 1, stream);
@@ -1207,6 +1312,39 @@ void EnableAutoFrameSkip(void)
 void DisableAutoFrameSkip(void)
 {
    autoframeskipenab = 0;
+}
+
+//////////////////////////////////////////////////////////////////////////////
+
+/* Put the real video core back if a skipped frame left VIDDummy in place,
+   e.g. before shutting video down: otherwise the real core's DeInit (which
+   stops its worker threads) would never run. */
+void Vdp2RestoreVideoCore(void)
+{
+   if (vdp2_saved_vidcore)
+   {
+      VIDCore = vdp2_saved_vidcore;
+      vdp2_saved_vidcore = NULL;
+   }
+}
+
+/* Draw VDP1 at every VBlank-OUT in plot trigger mode 2 (the old behaviour)
+   instead of only after a frame change. Core option. */
+void Vdp2SetVdp1DrawEveryFrame(int every)
+{
+   if (!getenv("YAB_VDP1_EVERYFRAME"))
+      vdp1_draw_every_frame = every;
+}
+
+void Vdp2SetExternalFrameSkip(int skip)
+{
+   externalframeskip = skip;
+}
+
+void Vdp2SetExternalFrameSkipNext(int next_shown, int lazy)
+{
+   external_next_shown = next_shown;
+   external_lazy = lazy;
 }
 
 //////////////////////////////////////////////////////////////////////////////

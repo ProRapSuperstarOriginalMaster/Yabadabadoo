@@ -67,6 +67,12 @@ typedef struct {
 
 	void (*SaveState)(void ** stream);
 	void (*LoadState)(const void * stream);
+
+	/* Optional (NULL if the core lacks them): CPU state the register
+	   accessors above don't cover, for save states: the user and interrupt
+	   stack pointers, the stopped state and the interrupt level */
+	void (*GetExtraState)(u32 extra[4]);
+	void (*SetExtraState)(const u32 extra[4]);
 } M68K_struct;
 
 extern M68K_struct * M68K;

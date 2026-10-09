@@ -72,7 +72,7 @@
  * and m68k_read_pcrelative_xx() for PC-relative addressing.
  * If off, all read requests from the CPU will be redirected to m68k_read_xx()
  */
-#define M68K_SEPARATE_READS         OPT_OFF
+#define M68K_SEPARATE_READS         OPT_ON   /* m68kmusashi.c: tells data reads from fetches */
 
 /* If ON, the CPU will call m68k_write_32_pd() when it executes move.l with a
  * predecrement destination EA mode instead of m68k_write_32().
@@ -130,8 +130,10 @@
 /* If ON, CPU will call the instruction hook callback before every
  * instruction.
  */
-#define M68K_INSTRUCTION_HOOK       OPT_OFF
-#define M68K_INSTRUCTION_CALLBACK() your_instruction_hook_function()
+#define M68K_INSTRUCTION_HOOK       OPT_SPECIFY_HANDLER  /* m68kmusashi.c: idle-loop probes */
+extern int m68k_probe_hook_active;
+void m68k_probe_hook(void);
+#define M68K_INSTRUCTION_CALLBACK() do { if (m68k_probe_hook_active) m68k_probe_hook(); } while (0)
 
 
 /* If ON, the CPU will emulate the 4-byte prefetch queue of a real 68000 */

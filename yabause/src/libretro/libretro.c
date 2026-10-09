@@ -1,3 +1,6 @@
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE  /* dl_iterate_phdr() for the crash log */
+#endif
 #ifndef _MSC_VER
 #include <stdbool.h>
 #endif
@@ -17,22 +20,31 @@
 #include <retro_miscellaneous.h>
 
 #include "vdp1.h"
+#include "../yabprof.h"
 #include "vdp2.h"
 #include "peripheral.h"
 #include "cdbase.h"
 #include "yabause.h"
 #include "yui.h"
+#include "threads.h"
 #include "cheat.h"
 
 #include "cs0.h"
 #include "cs2.h"
+#include "smpc.h"
 
 #include "m68kcore.h"
+#ifdef HAVE_MUSASHI
+#include "m68kmusashi.h"
+#endif
 #include "vidogl.h"
 #include "vidsoft.h"
 #include "libretro_core_options.h"
 #ifdef HAVE_PLAY_JIT
 #include "sh2_jit.h"
+#endif
+#ifdef SH2_DYNAREC
+#include "sh2_dynarec/sh2_dynarec.h"
 #endif
 
 yabauseinit_struct yinit;
@@ -52,9 +64,33 @@ int game_height;
 
 static bool one_frame_rendered = false;
 static bool hle_bios_force = false;
-static bool frameskip_enable = false;
+
+/* Frameskip, driven by the frontend's audio buffer status */
+enum { FRAMESKIP_NONE, FRAMESKIP_AUTO, FRAMESKIP_AUTO_THRESHOLD, FRAMESKIP_FIXED_INTERVAL };
+static unsigned frameskip_type             = FRAMESKIP_NONE;
+static unsigned frameskip_threshold        = 33;
+static unsigned frameskip_interval         = 3;
+/* Skip VDP1 too on skipped frames (only the frame before a rendered one runs
+ * it). Faster, but a skipped frame's frame change then shows a sprite buffer
+ * that was never drawn: shown frames mix older polygons or FMV images with
+ * current VDP2 layers. Off (default): rendered frames are identical to a run
+ * without frameskip; VDP1 drawing is deferred and only what is shown is
+ * drawn (vidsoft.c, VIDSoftVdp1LazyFrame). */
+static bool frameskip_sprites              = false;
+static unsigned frameskip_counter          = 0;
+static bool frameskip_skip_current         = false;
+static bool retro_audio_buff_active        = false;
+static unsigned retro_audio_buff_occupancy = 0;
+static bool retro_audio_buff_underrun      = false;
+static unsigned audio_latency              = 0;
+static bool update_audio_latency           = false;
 static int addon_cart_type = CART_NONE;
 static int numthreads = 1;
+static bool sh2_use_dynarec = false;
+static int deciline_mode = 1;
+/* Video standard (core option): -1 = the disc's region, else VIDEOFORMATTYPE_* */
+static int video_standard = -1;
+static int reported_pal = -1;  /* the timing the frontend was last given */
 
 static bool libretro_supports_bitmasks = false;
 static int16_t libretro_input_bitmask[12] = {-1,};
@@ -469,6 +505,9 @@ SH2Interface_struct *SH2CoreList[] = {
 #ifdef HAVE_PLAY_JIT
     &SH2Jit,
 #endif
+#ifdef SH2_DYNAREC
+    &SH2Dynarec,
+#endif
     NULL
 };
 
@@ -517,7 +556,15 @@ int YuiSetVideoMode(int width, int height, int bpp, int fullscreen)
     return 0;
 }
 
+#ifdef YAB_PROFILE
+void YuiSwapBuffersBody(void);
+void YuiSwapBuffers(void) { YAB_PROF_BEGIN(PROF_OUTPUT); YuiSwapBuffersBody(); YAB_PROF_END(PROF_OUTPUT); }
+#define YuiSwapBuffers YuiSwapBuffersBody
+#endif
 void YuiSwapBuffers(void)
+#ifdef YAB_PROFILE
+#undef YuiSwapBuffers
+#endif
 {
    int current_width  = 320;
    int current_height = 240;
@@ -532,7 +579,6 @@ void YuiSwapBuffers(void)
    game_width  = current_width;
    game_height = current_height;
 
-   audio_size = soundlen;
    video_cb(dispbuffer, game_width, game_height, game_width * 2);
    one_frame_rendered = true;
 }
@@ -591,7 +637,7 @@ void retro_get_system_av_info(struct retro_system_av_info *info)
 {
    memset(info, 0, sizeof(*info));
 
-   info->timing.fps            = (retro_get_region() == RETRO_REGION_NTSC) ? 60 : 50;
+   info->timing.fps            = yabsys.IsPal ? 50 : 60;
    info->timing.sample_rate    = 44100;
    info->geometry.base_width   = game_width;
    info->geometry.base_height  = game_height;
@@ -664,25 +710,148 @@ void retro_cheat_set(unsigned index, bool enabled, const char *code)
       return;
 }
 
+static void retro_audio_buff_status_cb(bool active, unsigned occupancy, bool underrun_likely)
+{
+   retro_audio_buff_active    = active;
+   retro_audio_buff_occupancy = occupancy;
+   retro_audio_buff_underrun  = underrun_likely;
+}
+
+static void init_frameskip(void)
+{
+   /* The built-in frameskip measures wall-clock time and busy-waits when it
+    * thinks it is ahead; under a libretro frontend, pacing is the frontend's
+    * job, so it stays disabled and skipping is decided in retro_run(). */
+   DisableAutoFrameSkip();
+   frameskip_counter = 0;
+
+   if (frameskip_type != FRAMESKIP_NONE)
+   {
+      struct retro_audio_buffer_status_callback buf_status_cb;
+      buf_status_cb.callback = retro_audio_buff_status_cb;
+
+      if (frameskip_type != FRAMESKIP_FIXED_INTERVAL &&
+          !environ_cb(RETRO_ENVIRONMENT_SET_AUDIO_BUFFER_STATUS_CALLBACK, &buf_status_cb))
+      {
+         /* Without buffer status the auto modes would never skip; render
+          * every other frame instead */
+         if (log_cb)
+            log_cb(RETRO_LOG_WARN, "Frontend has no audio buffer status interface, using fixed interval frameskip (1)\n");
+         frameskip_type             = FRAMESKIP_FIXED_INTERVAL;
+         frameskip_interval         = 1;
+         retro_audio_buff_active    = false;
+         retro_audio_buff_occupancy = 0;
+         retro_audio_buff_underrun  = false;
+      }
+
+      /* Skipping frames needs some audio buffer headroom: ask for at least
+       * 6 frames' worth, rounded up to a multiple of 32 ms */
+      audio_latency = (unsigned)(6.0f * 1000.0f / (yabsys.IsPal ? 50.0f : 60.0f) + 0.5f);
+      audio_latency = (audio_latency + 0x1F) & ~0x1F;
+   }
+   else
+   {
+      environ_cb(RETRO_ENVIRONMENT_SET_AUDIO_BUFFER_STATUS_CALLBACK, NULL);
+      audio_latency = 0;
+   }
+
+   update_audio_latency = true;
+   frameskip_skip_current = false;
+   Vdp2SetExternalFrameSkip(frameskip_type != FRAMESKIP_NONE ? VDP2_FRAMESKIP_NONE : -1);
+}
+
+static bool frameskip_should_skip(void)
+{
+   bool skip = false;
+   unsigned max_skip = frameskip_interval;
+
+   switch (frameskip_type)
+   {
+      case FRAMESKIP_AUTO:
+         skip = retro_audio_buff_active && retro_audio_buff_underrun;
+         break;
+      case FRAMESKIP_AUTO_THRESHOLD:
+         skip = retro_audio_buff_active && (retro_audio_buff_occupancy < frameskip_threshold);
+         break;
+      case FRAMESKIP_FIXED_INTERVAL:
+         skip = true;
+         break;
+      default:
+         break;
+   }
+
+   if (!skip || frameskip_counter >= max_skip)
+   {
+      frameskip_counter = 0;
+      return false;
+   }
+
+   frameskip_counter++;
+   return true;
+}
+
+static int wanted_video_format(void)
+{
+   if (video_standard >= 0)
+      return video_standard;
+   /* SMPC area codes above 6 (A, E, L) are the PAL areas; the SMPC takes the
+    * first one listed on the disc */
+   return (SmpcInternalVars && SmpcInternalVars->regionid > 6) ? VIDEOFORMATTYPE_PAL
+                                                              : VIDEOFORMATTYPE_NTSC;
+}
+
+/* The emulation always ran with NTSC timing (263 lines and 735 samples per
+ * frame, 60 frames a second) while the frontend was told 50 fps for PAL
+ * discs: they ran 20% fast, and starved the audio when the frontend paced
+ * them at 50. Switches the timing (lines per frame, clocks, audio per frame)
+ * whenever it differs from the wanted one: at load, after a state saved with
+ * the other one, and when the option changes. Called between frames only. */
+static void apply_video_format(void)
+{
+   int pal = wanted_video_format();
+   yinit.videoformattype = pal;  /* retro_reset() runs YabauseInit() again */
+   if (yabsys.IsPal != pal)
+      YabauseSetVideoFormat(pal);
+}
+
 static void check_variables(void)
 {
    struct retro_variable var;
    var.key = "yabause_frameskip";
    var.value = NULL;
 
+   unsigned prev_frameskip_type = frameskip_type;
+   frameskip_type = FRAMESKIP_NONE;
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
    {
-      if (strcmp(var.value, "disabled") == 0)
-      {
-         DisableAutoFrameSkip();
-         frameskip_enable = false;
-      }
-      else if (strcmp(var.value, "enabled") == 0)
-      {
-         EnableAutoFrameSkip();
-         frameskip_enable = true;
-      }
+      /* "enabled" is the value used by older versions of this core */
+      if (strcmp(var.value, "auto") == 0 || strcmp(var.value, "enabled") == 0)
+         frameskip_type = FRAMESKIP_AUTO;
+      else if (strcmp(var.value, "auto_threshold") == 0)
+         frameskip_type = FRAMESKIP_AUTO_THRESHOLD;
+      else if (strcmp(var.value, "fixed_interval") == 0)
+         frameskip_type = FRAMESKIP_FIXED_INTERVAL;
    }
+
+   var.key = "yabause_frameskip_threshold";
+   var.value = NULL;
+   frameskip_threshold = 33;
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+      frameskip_threshold = strtol(var.value, NULL, 10);
+
+   var.key = "yabause_frameskip_interval";
+   var.value = NULL;
+   frameskip_interval = 3;
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+      frameskip_interval = strtol(var.value, NULL, 10);
+
+   var.key = "yabause_frameskip_sprites";
+   var.value = NULL;
+   frameskip_sprites = environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value &&
+                       !strcmp(var.value, "enabled");
+
+   if (frameskip_type != prev_frameskip_type)
+      init_frameskip();
 
    var.key = "yabause_force_hle_bios";
    var.value = NULL;
@@ -727,6 +896,48 @@ static void check_variables(void)
          multitap[1] = 1;
    }
 
+#ifdef SH2_DYNAREC
+   var.key = "yabause_sh2_core";
+   var.value = NULL;
+   sh2_use_dynarec = false;
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+      sh2_use_dynarec = strcmp(var.value, "dynarec") == 0;
+#endif
+
+   var.key = "yabause_vdp1_draw_timing";
+   var.value = NULL;
+   Vdp2SetVdp1DrawEveryFrame(environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value &&
+                             strcmp(var.value, "every_frame") == 0);
+
+#ifdef HAVE_MUSASHI
+   var.key = "yabause_m68k_idle_skip";
+   var.value = NULL;
+   m68k_idle_skip = !(environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value &&
+                      strcmp(var.value, "disabled") == 0);
+#endif
+
+   var.key = "yabause_video_standard";
+   var.value = NULL;
+   video_standard = -1;
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (strcmp(var.value, "ntsc") == 0)
+         video_standard = VIDEOFORMATTYPE_NTSC;
+      else if (strcmp(var.value, "pal") == 0)
+         video_standard = VIDEOFORMATTYPE_PAL;
+   }
+
+   var.key = "yabause_rotation_line_color";
+   var.value = NULL;
+   vidsoft_rotation_dot_linecolor = !(environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value &&
+                                      strcmp(var.value, "disabled") == 0);
+
+   var.key = "yabause_sh2_timeslice";
+   var.value = NULL;
+   deciline_mode = 1;
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+      deciline_mode = strcmp(var.value, "line") != 0;
+
    var.key = "yabause_numthreads";
    var.value = NULL;
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
@@ -744,6 +955,13 @@ static void check_variables(void)
       else if (strcmp(var.value, "32") == 0)
          numthreads = 32;
    }
+
+#ifdef HAVE_THREADS
+   var.key = "yabause_worker_priority";
+   var.value = NULL;
+   YabThreadSetWorkerNice((environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value &&
+                           strcmp(var.value, "normal") == 0) ? 0 : 10);
+#endif
 
 }
 
@@ -1015,6 +1233,281 @@ void retro_init(void)
    init_disk_control_interface();
 }
 
+#if defined(__linux__) && defined(__arm__)
+#include <signal.h>
+#include <ucontext.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <link.h>
+#include <sys/syscall.h>
+#include <dirent.h>
+#include <pthread.h>
+
+/* Crash log. RetroArch on the Miyoo leaves no trace when a core crashes, so
+ * on a fatal signal append the fault, the registers and the stack words that
+ * point into the core's code to <save dir>/yabause_crash.log, as offsets from
+ * the core's load address (for objdump), then let the signal take its
+ * course. Only async-signal-safe calls in the handler. */
+#define CRASH_NSIG 5
+static const int crash_signals[CRASH_NSIG] = { SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT };
+static struct sigaction crash_old[CRASH_NSIG];
+static int crash_installed = 0;
+static char crash_log_path[PATH_MAX_LENGTH];
+static char crash_header[PATH_MAX_LENGTH + 64];
+static uintptr_t crash_base, crash_text_size;
+static volatile unsigned crash_frame;
+static volatile int crash_in_run;  /* the frontend is inside retro_run() */
+static int crash_probe[2] = { -1, -1 };  /* pipe: tests whether a stack word is readable */
+static unsigned crash_test_frame;  /* YAB_CRASH_TEST=N: crash at frame N, to test the log */
+static unsigned crash_stall_test_frame;  /* YAB_STALL_TEST=N: stall at frame N */
+#ifdef SH2_DYNAREC
+extern char sh2_dynarec_target[];
+#endif
+
+static void crash_puts(int fd, const char *str)
+{
+   size_t n = 0;
+   while (str[n])
+      n++;
+   if (write(fd, str, n) < 0) { }
+}
+
+static void crash_hex(int fd, const char *label, uintptr_t v)
+{
+   char buf[16];
+   int i;
+   crash_puts(fd, label);
+   for (i = 7; i >= 0; i--, v >>= 4)
+      buf[i] = "0123456789abcdef"[v & 15];
+   buf[8] = 0;
+   crash_puts(fd, buf);
+}
+
+static void crash_dump(int sig, siginfo_t *si, void *ctx)
+{
+   const ucontext_t *uc = (const ucontext_t *)ctx;
+   const struct sigcontext *mc = &uc->uc_mcontext;
+   int i, fd = open(crash_log_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+
+   if (fd >= 0)
+   {
+      const uintptr_t *sp = (const uintptr_t *)mc->arm_sp;
+      const uintptr_t regs[13] = { mc->arm_r0, mc->arm_r1, mc->arm_r2, mc->arm_r3, mc->arm_r4,
+         mc->arm_r5, mc->arm_r6, mc->arm_r7, mc->arm_r8, mc->arm_r9, mc->arm_r10, mc->arm_fp, mc->arm_ip };
+      crash_puts(fd, crash_header);
+      crash_hex(fd, "signal ", sig);
+      crash_hex(fd, " frame ", crash_frame);
+      crash_hex(fd, " tid ", (uintptr_t)syscall(SYS_gettid));
+      crash_hex(fd, " fault_addr ", (uintptr_t)si->si_addr);
+      crash_hex(fd, "\ncore_base ", crash_base);
+      crash_hex(fd, " pc ", mc->arm_pc);
+      crash_hex(fd, " (core+", mc->arm_pc - crash_base);
+      crash_hex(fd, ") lr ", mc->arm_lr);
+      crash_hex(fd, " (core+", mc->arm_lr - crash_base);
+      crash_hex(fd, ") sp ", mc->arm_sp);
+#ifdef SH2_DYNAREC
+      if (mc->arm_pc - (uintptr_t)sh2_dynarec_target < (8u << 20))
+         crash_puts(fd, " [pc in dynarec code]");
+#endif
+      crash_puts(fd, "\nregs");
+      for (i = 0; i < 13; i++)
+         crash_hex(fd, " ", regs[i]);
+      crash_puts(fd, "\nstack code refs (core+)");
+      for (i = 0; i < 512; i++)
+      {
+         /* stop at the end of the stack: write() of an unmapped address
+          * fails with EFAULT instead of faulting (checked once a page) */
+         if (i == 0 || !((uintptr_t)&sp[i] & 0xFFF))
+         {
+            uintptr_t tmp;
+            if (crash_probe[1] < 0 || write(crash_probe[1], &sp[i], sizeof(tmp)) != (ssize_t)sizeof(tmp))
+               break;
+            if (read(crash_probe[0], &tmp, sizeof(tmp)) < 0) { }
+         }
+         if (sp[i] - crash_base < crash_text_size)
+            crash_hex(fd, " ", sp[i] - crash_base);
+      }
+      crash_puts(fd, "\n\n");
+      close(fd);
+   }
+}
+
+static void crash_handler(int sig, siginfo_t *si, void *ctx)
+{
+   int i;
+   crash_dump(sig, si, ctx);
+
+   /* back to the previous action: a fault re-executes the instruction and
+    * gets it, abort() raises again */
+   for (i = 0; i < CRASH_NSIG; i++)
+      if (crash_signals[i] == sig)
+         sigaction(sig, &crash_old[i], NULL);
+   if (sig == SIGABRT || sig == SIGFPE)
+      raise(sig);
+}
+
+/* finds the core among the loaded objects: its load address and the end of
+ * its code */
+static int crash_find_core(struct dl_phdr_info *info, size_t size, void *data)
+{
+   const uintptr_t self = (uintptr_t)data;
+   int i, found = 0;
+   (void)size;
+   for (i = 0; i < info->dlpi_phnum; i++)
+   {
+      const ElfW(Phdr) *ph = &info->dlpi_phdr[i];
+      if (ph->p_type == PT_LOAD && self - (info->dlpi_addr + ph->p_vaddr) < ph->p_memsz)
+         found = 1;
+   }
+   if (!found)
+      return 0;
+   crash_base = info->dlpi_addr;
+   for (i = 0; i < info->dlpi_phnum; i++)
+   {
+      const ElfW(Phdr) *ph = &info->dlpi_phdr[i];
+      if (ph->p_type == PT_LOAD && (ph->p_flags & PF_X) && ph->p_vaddr + ph->p_memsz > crash_text_size)
+         crash_text_size = ph->p_vaddr + ph->p_memsz;
+   }
+   return 1;
+}
+
+/* Freeze watchdog. A frozen game leaves no crash: when one retro_run() has
+ * taken STALL_SECONDS, log every thread's name and state, then have each
+ * thread log its registers and stack (STALL_SIG handler, same format as a
+ * crash) and carry on. Once per stall. Time outside retro_run() (the
+ * frontend paused or in its menu) doesn't count. */
+#define STALL_SECONDS 10
+#define STALL_SIG (SIGRTMIN + 6)
+static pthread_t stall_thread;
+static volatile int stall_quit;
+static struct sigaction stall_old;
+
+static void stall_handler(int sig, siginfo_t *si, void *ctx)
+{
+   crash_dump(sig, si, ctx);
+}
+
+static void *stall_watch(void *arg)
+{
+   unsigned last = crash_frame, idle = 0;
+   int dumped = 0;
+   (void)arg;
+   while (!stall_quit)
+   {
+      sleep(1);
+      if (crash_frame != last || !crash_in_run)
+      {
+         last = crash_frame;
+         idle = 0;
+         dumped = 0;
+         continue;
+      }
+      if (++idle < STALL_SECONDS || dumped)
+         continue;
+      dumped = 1;
+      {
+         FILE *f = fopen(crash_log_path, "a");
+         DIR *d = opendir("/proc/self/task");
+         struct dirent *e;
+         const pid_t self = (pid_t)syscall(SYS_gettid);
+         if (f)
+         {
+            fprintf(f, "%s=== stall: no frame for %d s at frame %08x; threads:\n", crash_header, STALL_SECONDS, last);
+            if (d)
+            {
+               while ((e = readdir(d)))
+               {
+                  char path[64], comm[32] = "", stat[256] = "";
+                  FILE *t;
+                  if (e->d_name[0] == '.')
+                     continue;
+                  snprintf(path, sizeof(path), "/proc/self/task/%s/comm", e->d_name);
+                  if ((t = fopen(path, "r"))) { if (!fgets(comm, sizeof(comm), t)) comm[0] = 0; fclose(t); }
+                  snprintf(path, sizeof(path), "/proc/self/task/%s/stat", e->d_name);
+                  if ((t = fopen(path, "r"))) { if (!fgets(stat, sizeof(stat), t)) stat[0] = 0; fclose(t); }
+                  comm[strcspn(comm, "\n")] = 0;
+                  stat[strcspn(stat, "\n")] = 0;
+                  fprintf(f, "  tid %08x %s | %s\n", atoi(e->d_name), comm, stat);
+               }
+               rewinddir(d);
+            }
+            fclose(f);
+         }
+         if (d)
+         {
+            while ((e = readdir(d)))
+            {
+               pid_t tid = atoi(e->d_name);
+               if (tid <= 0 || tid == self)
+                  continue;
+               syscall(SYS_tgkill, getpid(), tid, STALL_SIG);
+               usleep(100000);  /* one thread's dump at a time */
+            }
+            closedir(d);
+         }
+      }
+   }
+   return NULL;
+}
+
+static void crash_log_install(void)
+{
+   struct sigaction sa;
+   int i;
+
+   if (crash_installed)
+      return;
+   crash_text_size = 0;
+   if (!dl_iterate_phdr(crash_find_core, (void *)(uintptr_t)crash_log_install))
+      return;
+   snprintf(crash_log_path, sizeof(crash_log_path), "%s%cyabause_crash.log",
+            g_save_dir[0] ? g_save_dir : g_system_dir, slash);
+   snprintf(crash_header, sizeof(crash_header), "=== %s, core %s\n", game_basename, GIT_VERSION);
+
+   memset(&sa, 0, sizeof(sa));
+   sa.sa_sigaction = crash_handler;
+   sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+   sigemptyset(&sa.sa_mask);
+   for (i = 0; i < CRASH_NSIG; i++)
+      sigaction(crash_signals[i], &sa, &crash_old[i]);
+   if (crash_probe[0] < 0 && pipe(crash_probe) == 0)
+   {
+      fcntl(crash_probe[0], F_SETFL, O_NONBLOCK);
+      fcntl(crash_probe[1], F_SETFL, O_NONBLOCK);
+   }
+   crash_installed = 1;
+   crash_test_frame = getenv("YAB_CRASH_TEST") ? atoi(getenv("YAB_CRASH_TEST")) : 0;
+   crash_stall_test_frame = getenv("YAB_STALL_TEST") ? atoi(getenv("YAB_STALL_TEST")) : 0;
+
+   sa.sa_sigaction = stall_handler;
+   sa.sa_flags = SA_SIGINFO | SA_RESTART;
+   sigaction(STALL_SIG, &sa, &stall_old);
+   stall_quit = 0;
+   if (pthread_create(&stall_thread, NULL, stall_watch, NULL) != 0)
+      stall_quit = 1;
+}
+
+static void crash_log_uninstall(void)
+{
+   int i;
+   if (!crash_installed)
+      return;
+   if (!stall_quit)
+   {
+      stall_quit = 1;
+      pthread_join(stall_thread, NULL);
+   }
+   sigaction(STALL_SIG, &stall_old, NULL);
+   for (i = 0; i < CRASH_NSIG; i++)
+      sigaction(crash_signals[i], &crash_old[i], NULL);
+   crash_installed = 0;
+}
+#else
+#define crash_log_install()
+#define crash_log_uninstall()
+static unsigned crash_frame, crash_test_frame;
+#endif
+
 bool retro_load_game(const struct retro_game_info *info)
 {
    int ret;
@@ -1104,6 +1597,17 @@ bool retro_load_game(const struct retro_game_info *info)
 #else
    yinit.sh2coretype          = SH2CORE_INTERPRETER;
 #endif
+#ifdef SH2_DYNAREC
+   /* The recompiler's HLE BIOS hooks are unmaintained; only use it with a
+    * real BIOS */
+   if (sh2_use_dynarec)
+   {
+      if (yinit.biospath)
+         yinit.sh2coretype = SH2CORE_DYNAREC;
+      else
+         log_cb(RETRO_LOG_WARN, "SH2 dynarec needs a real BIOS, using the interpreter\n");
+   }
+#endif
    yinit.vidcoretype          = VIDCORE_SOFT;
    yinit.sndcoretype          = SNDCORE_LIBRETRO;
 #ifdef HAVE_MUSASHI
@@ -1117,7 +1621,7 @@ bool retro_load_game(const struct retro_game_info *info)
    yinit.use_new_scsp         = 0;
    yinit.mpegpath             = NULL;
    yinit.videoformattype      = VIDEOFORMATTYPE_NTSC;
-   yinit.frameskip            = frameskip_enable;
+   yinit.frameskip            = 0; /* see init_frameskip() */
    yinit.clocksync            = 0;
    yinit.basetime             = 0;
 #ifdef HAVE_THREADS
@@ -1129,8 +1633,15 @@ bool retro_load_game(const struct retro_game_info *info)
 
    log_cb(RETRO_LOG_DEBUG, "Starting emulation\n");
    ret = YabauseInit(&yinit);
+   if (ret == 0)
+   {
+      apply_video_format();
+      crash_log_install();
+   }
+   reported_pal = yabsys.IsPal;  /* the frontend asks for the AV info after loading */
+   init_frameskip();
    OSDChangeCore(OSDCORE_DUMMY);
-   YabauseSetDecilineMode(1);
+   YabauseSetDecilineMode(deciline_mode);
 
    log_cb(RETRO_LOG_DEBUG, "Enabling cheevos\n");
    bool cheevos_supported                  = true;
@@ -1161,11 +1672,14 @@ bool retro_load_game_special(unsigned game_type, const struct retro_game_info *i
 void retro_unload_game(void)
 {
 	YabauseDeInit();
+	crash_log_uninstall();
 }
 
 unsigned retro_get_region(void)
 {
-   return Cs2GetRegionID() > 6 ? RETRO_REGION_PAL : RETRO_REGION_NTSC;
+   /* Not Cs2GetRegionID(): it reads the disc's first sector through the CD
+    * block, which must not happen whenever the frontend asks */
+   return yabsys.IsPal ? RETRO_REGION_PAL : RETRO_REGION_NTSC;
 }
 
 unsigned retro_api_version(void)
@@ -1192,29 +1706,29 @@ void retro_reset(void)
 {
    YabauseResetButton();
    YabauseInit(&yinit);
-   YabauseSetDecilineMode(1);
+   YabauseSetDecilineMode(deciline_mode);
 }
 
 void retro_run(void)
 {
    unsigned i;
-   bool fastforward = false;
    bool updated     = false;
    one_frame_rendered = false;
+#if defined(__linux__) && defined(__arm__)
+   crash_in_run = 1;
+#endif
+   if (++crash_frame == crash_test_frame)
+      *(volatile int *)0 = 0;
+#if defined(__linux__) && defined(__arm__)
+   if (crash_frame == crash_stall_test_frame)
+      sleep(STALL_SECONDS + 3);
+#endif
    if (!all_devices_ready)
    {
       // Running first frame, so we can assume all devices id were set
       // Let's send input descriptors
       all_devices_ready = true;
       set_descriptors();
-   }
-
-   if (environ_cb(RETRO_ENVIRONMENT_GET_FASTFORWARDING, &fastforward) && fastforward)
-   {
-      if (frameskip_enable && !fastforward)
-         EnableAutoFrameSkip();
-      else
-         DisableAutoFrameSkip();
    }
 
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated)
@@ -1225,13 +1739,59 @@ void retro_run(void)
          PERCore->Init();
    }
 
+   apply_video_format();
+   /* only when the rate changes (the option): RetroArch reinitialises its
+    * drivers for this, and a state saved with the other timing is switched
+    * back to the same one */
+   if (reported_pal != yabsys.IsPal)
+   {
+      struct retro_system_av_info av_info;
+      retro_get_system_av_info(&av_info);
+      environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &av_info);
+      reported_pal = yabsys.IsPal;
+   }
+
+   if (update_audio_latency)
+   {
+      environ_cb(RETRO_ENVIRONMENT_SET_MINIMUM_AUDIO_LATENCY, &audio_latency);
+      update_audio_latency = false;
+   }
+
+   /* The mode set here is applied at this frame's VBlank-OUT and covers the
+    * rendering shown during the next retro_run(). Skip decisions are made one
+    * frame ahead. With "Skip Polygon Drawing" (default) only the skipped
+    * frame that precedes a rendered one runs VDP1; games that change frames
+    * every 2nd frame or less can then show polygons 1-3 frames older than
+    * the VDP2 layers. Without it every skipped frame runs VDP1 (exact). */
+   if (frameskip_type != FRAMESKIP_NONE)
+   {
+      bool skip_next = frameskip_should_skip();
+      Vdp2SetExternalFrameSkipNext(!skip_next, !frameskip_sprites);
+      if (!frameskip_skip_current)
+         Vdp2SetExternalFrameSkip(VDP2_FRAMESKIP_NONE);
+      else
+         Vdp2SetExternalFrameSkip(skip_next && frameskip_sprites ? VDP2_FRAMESKIP_ALL : VDP2_FRAMESKIP_VDP2_ONLY);
+      frameskip_skip_current = skip_next;
+   }
+
+   /* Audio budget is per emulated frame; it used to be refilled only when a
+    * frame was rendered, which dropped all audio on skipped frames */
+   audio_size = soundlen;
+
    //YabauseExec(); runs from handle events
    if(PERCore)
       PERCore->HandleEvents();
 
-   // If no frame rendered, dupe
+   /* If no frame rendered, dupe. RetroArch keeps the last frame's data
+    * pointer but stores the size and pitch passed here, and its screenshots
+    * and save-state thumbnails read them: pitch 0 gave row 0 repeated down
+    * the image. game_width/height are still those of the last rendered
+    * frame, which is what dispbuffer holds. */
    if(!one_frame_rendered)
-      video_cb(NULL, game_width, game_height, 0);
+      video_cb(NULL, game_width, game_height, game_width * 2);
+#if defined(__linux__) && defined(__arm__)
+   crash_in_run = 0;
+#endif
 }
 
 #ifdef ANDROID

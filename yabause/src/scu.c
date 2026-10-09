@@ -25,6 +25,7 @@
 
 #include <stdlib.h>
 #include "scu.h"
+#include "yabprof.h"
 #include "debug.h"
 #include "memory.h"
 #include "sh2core.h"
@@ -1410,13 +1411,12 @@ void scu_dma_tick(struct QueuedDma * dma)
 
 void scu_dma_tick_all(u32 cycles)
 {
-   int i = 0;
+   u32 i;
 
-   for (i = 0; i < cycles; i++)
-   {
-      if (scu_dma_queue[0].status == DMA_ACTIVE)
-         scu_dma_tick(&scu_dma_queue[0]);
-   }
+   // Nothing but scu_dma_tick() changes the queue during this loop, so once
+   // it is idle it stays idle: stop instead of polling it once per cycle
+   for (i = 0; i < cycles && scu_dma_queue[0].status == DMA_ACTIVE; i++)
+      scu_dma_tick(&scu_dma_queue[0]);
 }
 
 static void FASTCALL ScuDMA(scudmainfo_struct *dmainfo) {
@@ -2164,7 +2164,15 @@ static void writedmadest(u8 num, u32 val, u8 add)
 //////////////////////////////////////////////////////////////////////////////
 
 
+#ifdef YAB_PROFILE
+void ScuExecBody(u32 cycles);
+void ScuExec(u32 cycles) { YAB_PROF_BEGIN(PROF_SCU); ScuExecBody(cycles); YAB_PROF_END(PROF_SCU); }
+#define ScuExec ScuExecBody
+#endif
 void ScuExec(u32 cycles) {
+#ifdef YAB_PROFILE
+#undef ScuExec
+#endif
    int i;
    u32 timing = cycles / 2;
    int scu_dma_cycles = cycles;

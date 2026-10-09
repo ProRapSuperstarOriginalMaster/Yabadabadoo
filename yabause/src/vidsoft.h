@@ -27,6 +27,8 @@
 extern pixel_t *dispbuffer;
 
 extern VideoInterface_struct VIDSoft;
+/* per-pixel line colour for rotation screens (core option), see vidsoft.c */
+extern int vidsoft_rotation_dot_linecolor;
 
 void VIDSoftVdp2DrawScreen(int screen);
 

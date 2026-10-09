@@ -89,6 +89,7 @@
 #include <math.h>
 
 #include "c68k/c68k.h"
+#include "yabprof.h"
 #include "cs2.h"
 #include "debug.h"
 #include "error.h"
@@ -97,6 +98,9 @@
 #include "scu.h"
 #include "yabause.h"
 #include "scsp.h"
+#ifdef HAVE_MUSASHI
+#include "m68kmusashi.h"
+#endif
 #include "scspdsp.h"
 #include "scsp_dsp_jit.h"
 #if 0
@@ -4949,6 +4953,9 @@ ScspChangeVideoFormat (int type)
 
   if (scsp_alloc_bufs () < 0)
     return -1;
+  /* the positions pointed into the old buffers */
+  scspsoundgenpos = 0;
+  scspsoundoutleft = 0;
 
   SNDCore->ChangeVideoFormat (type ? 50 : 60);
 
@@ -4964,8 +4971,16 @@ __attribute__((noinline))
 #endif
 static s32 FASTCALL M68KExecBP (s32 cycles);
 
+#ifdef YAB_PROFILE
+void M68KExecBody(s32 cycles);
+void M68KExec(s32 cycles) { YAB_PROF_BEGIN(PROF_M68K); M68KExecBody(cycles); YAB_PROF_END(PROF_M68K); }
+#define M68KExec M68KExecBody
+#endif
 void
 M68KExec (s32 cycles)
+#ifdef YAB_PROFILE
+#undef M68KExec
+#endif
 {
   s32 newcycles = savedcycles - cycles;
   if (LIKELY(IsM68KRunning))
@@ -5180,8 +5195,16 @@ void new_scsp_update_samples(s32 *bufL, s32 *bufR, int scspsoundlen)
    new_scsp_outbuf_pos = 0;
 }
 
+#ifdef YAB_PROFILE
+void ScspExecBody(void);
+void ScspExec(void) { YAB_PROF_BEGIN(PROF_SCSP); ScspExecBody(); YAB_PROF_END(PROF_SCSP); }
+#define ScspExec ScspExecBody
+#endif
 void
 ScspExec ()
+#ifdef YAB_PROFILE
+#undef ScspExec
+#endif
 {
   u32 audiosize;
 
@@ -5465,7 +5488,11 @@ SoundSaveState (void ** stream)
   u8 nextphase;
   IOCheck_struct check = { 0, 0 };
 
-  offset = MemStateWriteHeader(stream, "SCSP", 2);
+  offset = MemStateWriteHeader(stream, "SCSP", 4);
+
+#ifdef HAVE_MUSASHI
+  M68KMusashiIdleSync();
+#endif
 
   // Save 68k registers first
   MemStateWrite((void *)&IsM68KRunning, 1, 1, stream);
@@ -5636,6 +5663,23 @@ SoundSaveState (void ** stream)
 
   MemStateWrite((void *)scsp.stack, 4, 32 * 2, stream);
 
+  // Version 3: CD audio the CD block has already delivered but that hasn't
+  // been played yet. Without it the music skips ahead by up to the buffer
+  // length (two seconds) after a load. The whole buffer is written so the
+  // state size stays constant.
+  MemStateWrite((void *)&cdda_next_in, 4, 1, stream);
+  MemStateWrite((void *)&cdda_out_left, 4, 1, stream);
+  MemStateWrite((void *)cddabuf.data, sizeof(cddabuf.data), 1, stream);
+
+  // Version 4: the 68K state outside its registers (both stack pointers,
+  // stopped state, interrupt level)
+  {
+    u32 extra[4] = { 0, 0, 0, 0 };
+    if (M68K->GetExtraState)
+      M68K->GetExtraState(extra);
+    MemStateWrite((void *)extra, 4, 4, stream);
+  }
+
   return MemStateFinishHeader(stream, offset);
 }
 
@@ -5655,22 +5699,24 @@ SoundLoadState (const void * stream, int version, int size)
 #ifdef IMPROVED_SAVESTATES
   M68K->LoadState(stream);
 #else
-  for (i = 0; i < 8; i++)
-    {
-      MemStateRead((void *)&temp, 4, 1, stream);
-      M68K->SetDReg (i, temp);
-    }
-
-  for (i = 0; i < 8; i++)
-    {
-      MemStateRead((void *)&temp, 4, 1, stream);
-      M68K->SetAReg (i, temp);
-    }
-
-  MemStateRead((void *)&temp, 4, 1, stream);
-  M68K->SetSR (temp);
-  MemStateRead((void *)&temp, 4, 1, stream);
-  M68K->SetPC (temp);
+  {
+    // SR goes first: setting it can switch between the user and supervisor
+    // stack, which would otherwise move the A7 just loaded into the other
+    // stack pointer and leave A7 stale (a sound driver saved in its
+    // interrupt handler then ran on a stack at address 0 and stopped all
+    // its notes)
+    u32 dreg[8], areg[8], sr, pc;
+    MemStateRead((void *)dreg, 4, 8, stream);
+    MemStateRead((void *)areg, 4, 8, stream);
+    MemStateRead((void *)&sr, 4, 1, stream);
+    MemStateRead((void *)&pc, 4, 1, stream);
+    M68K->SetSR (sr);
+    for (i = 0; i < 8; i++)
+      M68K->SetDReg (i, dreg[i]);
+    for (i = 0; i < 8; i++)
+      M68K->SetAReg (i, areg[i]);
+    M68K->SetPC (pc);
+  }
 #endif
 
   // Now for the SCSP registers
@@ -5681,11 +5727,15 @@ SoundLoadState (const void * stream, int version, int size)
 
   if (version > 1)
     {
-      // Internal variables need to be regenerated
+      // Internal variables need to be regenerated. The slot register
+      // functions take the register's address, not its offset in the slot:
+      // with the offset, every slot was rebuilt from slot 0's registers
+      // (level, sample address, loop, envelope rates...), which silenced
+      // the notes playing at the save until the game rewrote each slot.
       for(i = 0; i < 32; i++)
         {
           for (i2 = 0; i2 < 0x20; i2+=2)
-            scsp_slot_set_w (i, 0x1E - i2, scsp_slot_get_w (i, 0x1E - i2));
+            scsp_slot_set_w (i, (i << 5) + 0x1E - i2, scsp_slot_get_w (i, (i << 5) + 0x1E - i2));
         }
 
       scsp_set_w (0x402, scsp_get_w (0x402));
@@ -5864,6 +5914,29 @@ SoundLoadState (const void * stream, int version, int size)
       MemStateRead((void *)&scsp.mcipd, 4, 1, stream);
 
       MemStateRead((void *)scsp.stack, 4, 32 * 2, stream);
+    }
+
+  if (version > 2)
+    {
+      MemStateRead((void *)&cdda_next_in, 4, 1, stream);
+      MemStateRead((void *)&cdda_out_left, 4, 1, stream);
+      MemStateRead((void *)cddabuf.data, sizeof(cddabuf.data), 1, stream);
+      if (cdda_next_in >= sizeof(cddabuf.data) || cdda_out_left > sizeof(cddabuf.data))
+        cdda_next_in = cdda_out_left = 0;
+    }
+  else
+    {
+      // Don't play what was buffered before the load
+      cdda_next_in = 0;
+      cdda_out_left = 0;
+    }
+
+  if (version > 3)
+    {
+      u32 extra[4];
+      MemStateRead((void *)extra, 4, 4, stream);
+      if (M68K->SetExtraState)
+        M68K->SetExtraState(extra);
     }
 
   return size;

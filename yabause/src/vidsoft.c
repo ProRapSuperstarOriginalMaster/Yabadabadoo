@@ -25,6 +25,7 @@
 */
 
 #include "vidsoft.h"
+#include "yabprof.h"
 #include "ygl.h"
 #include "vidshared.h"
 #include "debug.h"
@@ -41,6 +42,8 @@
 
 #include "yui.h"
 #include "threads.h"
+#include <limits.h>
+#include <time.h>
 
 #include <stdlib.h>
 #include <limits.h>
@@ -167,7 +170,78 @@ int vdp2_interlace = 0;
 static int rbg0height = 0;
 int bilinear = 0;
 int vidsoft_num_layer_threads = 0;
+
+/* Bring a render thread's copy of VDP1 or VDP2 RAM up to date: only the
+ * 4 KB pages written since the last copy (all VRAM writes go through the
+ * Vdp1Ram/Vdp2Ram write handlers, which mark them; init and state loads
+ * mark everything). Games change a few pages a frame, so this replaces two
+ * 512 KB copies per drawn frame on the emulation thread. YAB_SNAPSHOT_VERIFY=1
+ * compares the whole copy afterwards and reports pages that differ. */
+static int snapshot_verify = -1;
+static unsigned long snapshot_mismatches;
+
+static void VidsoftSyncRamCopy(u8 *dst, const u8 *src, u32 *dirty, const char *what)
+{
+   int w;
+   for (w = 0; w < 4; w++)
+   {
+      u32 bits = dirty[w];
+      dirty[w] = 0;
+      while (bits)
+      {
+         int first = __builtin_ctz(bits), n = 0;
+         while (first + n < 32 && (bits >> (first + n)) & 1)
+            n++;
+         memcpy(dst + ((w * 32 + first) << 12), src + ((w * 32 + first) << 12), (size_t)n << 12);
+         bits &= ~(n == 32 ? 0xFFFFFFFFu : ((1u << n) - 1) << first);
+      }
+   }
+   if (snapshot_verify < 0)
+      snapshot_verify = getenv("YAB_SNAPSHOT_VERIFY") && getenv("YAB_SNAPSHOT_VERIFY")[0] == '1';
+   if (snapshot_verify)
+   {
+      int page, bad = 0, firstbad = -1;
+      for (page = 0; page < 128; page++)
+         if (memcmp(dst + (page << 12), src + (page << 12), 4096))
+         {
+            if (firstbad < 0) firstbad = page;
+            bad++;
+         }
+      if (bad)
+      {
+         snapshot_mismatches += bad;
+         fprintf(stderr, "snapshot verify: %s copy stale in %d pages (first %d), %lu so far\n", what, bad, firstbad, snapshot_mismatches);
+         memcpy(dst, src, 0x80000);
+      }
+   }
+}
+/* Rotation screens whose coefficient table holds line colour data and is
+   read per dot (Panzer Dragoon's sea haze): take the line colour per pixel,
+   as the hardware does, instead of once per line. Core option. */
+int vidsoft_rotation_dot_linecolor = 1;
 int bad_cycle_setting[6] = { 0 };
+
+/* VDP1 drawing state. Two threads can draw the same command list into
+ * different framebuffer rows (see VIDSoftVdp1DrawStart), so all of it is
+ * per thread. The default TLS model for a shared library calls
+ * __tls_get_addr() on every access, which the per-pixel code can't afford:
+ * the few scalars use the initial-exec model (a read of the thread pointer
+ * register; they fit easily in the static TLS space glibc keeps for dlopen),
+ * and the arrays are plain statics with one copy per drawing thread,
+ * picked by vdp1_tid. */
+#if defined(__GNUC__) || defined(__clang__)
+#define VDP1_TLS __thread __attribute__((tls_model("initial-exec")))
+#else
+#define VDP1_TLS
+#endif
+
+/* framebuffer rows this thread draws (all when not split) */
+static VDP1_TLS int vdp1_row_lo = INT_MIN, vdp1_row_hi = INT_MAX;
+/* which copy of the per-thread arrays this thread uses: 1 for the second
+ * VDP1 thread, 0 everywhere else */
+static VDP1_TLS int vdp1_tid;
+/* framebuffer row of VDP1 y coordinate y, as putpixel() computes it */
+#define VDP1_ROW(y) (vdp1interlace == 2 ? (y) / 2 : (y))
 
 struct VidsoftVdp1ThreadContext
 {
@@ -175,10 +249,58 @@ struct VidsoftVdp1ThreadContext
    volatile int need_draw;
    Vdp1 regs;
    u8 ram[0x80000];
-   u8 back_framebuffer[0x40000];
+   // What the threads draw from: ram for a draw started at once, a
+   // deferred job's own snapshot otherwise (see Vdp1Job)
+   u8 *ramp;
+   // Drawn in place: every other access to the back framebuffer (CPU
+   // reads/writes, swaps) waits for the thread first
+   u8 *back_framebuffer;
+   // rows this thread draws, and its CPU time for the last frame (ns)
+   int row_lo, row_hi;
+   u64 cpu_ns;
 }vidsoft_vdp1_thread_context;
 
+/* The second VDP1 thread draws the same commands, from the first thread's
+ * snapshot of VDP1 RAM, into the other rows of the framebuffer */
+struct VidsoftVdp1SplitContext
+{
+   volatile int draw_finished;
+   volatile int need_draw;
+   Vdp1 regs;
+   int row_lo, row_hi;
+   u64 cpu_ns;
+}vidsoft_vdp1b_context;
+
 int vidsoft_vdp1_thread_enabled = 0;
+static int vdp1_split_enabled = -1;  // YAB_VDP1_SPLIT: 0 off, 2 every frame (for tests), else when worth it
+static int vdp1_split_row = 112;     // first row of the second thread, rebalanced each frame
+static int vdp1_last_split;          // was the previous frame split?
+static unsigned long vdp1_frames_split, vdp1_frames_single;
+static void VidsoftVdp1Erase(const Vdp1* regs, u8 * back_framebuffer);
+
+typedef struct
+{
+   int pending;      /* captured, not drawn */
+   int erase;        /* erases before drawing (decided at capture) */
+   Vdp1 regs;
+   u8 *ram;          /* snapshot of VDP1 RAM at capture */
+   u32 stale[4];     /* pages of ram older than Vdp1Ram */
+} Vdp1Job;
+static Vdp1Job vdp1_job[2];               /* per vdp1framebuffer[] index */
+static u32 vdp1_ctx_stale[4];             /* the same for vidsoft_vdp1_thread_context.ram */
+static int vdp1_lazy = -1;                /* YAB_VDP1_LAZY */
+static int vdp1_lazy_active;              /* this frame: skipping with exact VDP1 */
+static int vdp1_lazy_defer;               /* this frame's draws are deferred */
+static int vdp1_lazy_next_shown;          /* the next frame is shown */
+static int vdp1_swap_gap = 1, vdp1_since_swap; /* frames between frame changes */
+static unsigned long vdp1_st_eager, vdp1_st_captured, vdp1_st_replaced, vdp1_st_run, vdp1_st_sync, vdp1_st_backoffs;
+static int vdp1_lazy_shown, vdp1_lazy_misses, vdp1_lazy_backoff;
+
+/* With less VDP1 work than this per frame a second thread costs more than
+ * it saves (Princess Crown's sprites take about 3.5 ms on the Miyoo Mini) */
+#define VDP1_SPLIT_MIN_NS 5000000ull
+
+static void VidsoftWaitForLayerThreads(void);
 
 typedef struct { s16 x; s16 y; } vdp1vertex;
 
@@ -196,9 +318,9 @@ typedef struct
 
 //////////////////////////////////////////////////////////////////////////////
 
-static INLINE u32 FASTCALL Vdp2ColorRamGetColor(u32 addr, u8* vdp2_color_ram)
+static INLINE u32 FASTCALL Vdp2ColorRamGetColorCM(int colormode, u32 addr, u8* vdp2_color_ram)
 {
-   switch(Vdp2Internal.ColorMode)
+   switch(colormode)
    {
       case 0:
       {
@@ -225,6 +347,11 @@ static INLINE u32 FASTCALL Vdp2ColorRamGetColor(u32 addr, u8* vdp2_color_ram)
    }
 
    return 0;
+}
+
+static INLINE u32 FASTCALL Vdp2ColorRamGetColor(u32 addr, u8* vdp2_color_ram)
+{
+   return Vdp2ColorRamGetColorCM(Vdp2Internal.ColorMode, addr, vdp2_color_ram);
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -375,9 +502,9 @@ static INLINE void ReadVdp2ColorOffset(Vdp2 * regs, vdp2draw_struct *info, int c
 
 //////////////////////////////////////////////////////////////////////////////
 
-static INLINE int Vdp2FetchPixel(vdp2draw_struct *info, int x, int y, u32 *color, u32 *dot, u8 * ram, int charaddr, int paladdr, u8* vdp2_color_ram)
+static INLINE int Vdp2FetchPixelCN(int colornumber, int colormode, vdp2draw_struct *info, int x, int y, u32 *color, u32 *dot, u8 * ram, int charaddr, int paladdr, u8* vdp2_color_ram)
 {
-   switch(info->colornumber)
+   switch(colornumber)
    {
       case 0: // 4 BPP
          *dot = T1ReadByte(ram, ((charaddr + ((y * info->cellw) + x) / 2) & 0x7FFFF));
@@ -385,7 +512,7 @@ static INLINE int Vdp2FetchPixel(vdp2draw_struct *info, int x, int y, u32 *color
          if (!(*dot & 0xF) && info->transparencyenable) return 0;
          else
          {
-            *color = Vdp2ColorRamGetColor(info->coloroffset + (paladdr | (*dot & 0xF)),vdp2_color_ram);
+            *color = Vdp2ColorRamGetColorCM(colormode, info->coloroffset + (paladdr | (*dot & 0xF)),vdp2_color_ram);
             return 1;
          }
       case 1: // 8 BPP
@@ -393,7 +520,7 @@ static INLINE int Vdp2FetchPixel(vdp2draw_struct *info, int x, int y, u32 *color
          if (!(*dot & 0xFF) && info->transparencyenable) return 0;
          else
          {
-            *color = Vdp2ColorRamGetColor(info->coloroffset + (paladdr | (*dot & 0xFF)), vdp2_color_ram);
+            *color = Vdp2ColorRamGetColorCM(colormode, info->coloroffset + (paladdr | (*dot & 0xFF)), vdp2_color_ram);
             return 1;
          }
       case 2: // 16 BPP(palette)
@@ -401,7 +528,7 @@ static INLINE int Vdp2FetchPixel(vdp2draw_struct *info, int x, int y, u32 *color
          if ((*dot == 0) && info->transparencyenable) return 0;
          else
          {
-            *color = Vdp2ColorRamGetColor(info->coloroffset + *dot, vdp2_color_ram);
+            *color = Vdp2ColorRamGetColorCM(colormode, info->coloroffset + *dot, vdp2_color_ram);
             return 1;
          }
       case 3: // 16 BPP(RGB)      
@@ -423,6 +550,11 @@ static INLINE int Vdp2FetchPixel(vdp2draw_struct *info, int x, int y, u32 *color
       default:
          return 0;
    }
+}
+
+static INLINE int Vdp2FetchPixel(vdp2draw_struct *info, int x, int y, u32 *color, u32 *dot, u8 * ram, int charaddr, int paladdr, u8* vdp2_color_ram)
+{
+   return Vdp2FetchPixelCN(info->colornumber, Vdp2Internal.ColorMode, info, x, y, color, dot, ram, charaddr, paladdr, vdp2_color_ram);
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -500,9 +632,7 @@ int WindowLogic(int wctl, int w0, int w1)
 
 static INLINE int TestBothWindow(int wctl, clipping_struct *clip, int x, int y)
 {
-    int w0 = TestWindow(wctl, 0x2, 0x1, &clip[0], x, y);
-    int w1 = TestWindow(wctl, 0x8, 0x4, &clip[1], x, y);
-    int spr = TestSpriteWindow(wctl, x,y);
+    int w0, w1, spr;
 
     //all windows disabled
     if ((wctl & 0x2a) == 0)
@@ -512,6 +642,12 @@ static INLINE int TestBothWindow(int wctl, clipping_struct *clip, int x, int y)
        else
           return 1;
     }
+
+    // Only evaluate the windows that are enabled; a disabled window reports 3
+    // (disabled | inactive), same as TestWindow/TestSpriteWindow would.
+    w0 = (wctl & 0x2) ? TestWindow(wctl, 0x2, 0x1, &clip[0], x, y) : 3;
+    w1 = (wctl & 0x8) ? TestWindow(wctl, 0x8, 0x4, &clip[1], x, y) : 3;
+    spr = (wctl & 0x20) ? TestSpriteWindow(wctl, x, y) : 3;
 
     //if only window 0 is enabled
     if ((w1 & 2) && (spr & 2)) return w0 & 1;
@@ -545,6 +681,53 @@ static INLINE int TestBothWindow(int wctl, clipping_struct *clip, int x, int y)
     return 1;
 
 }
+
+//////////////////////////////////////////////////////////////////////////////
+
+/* TestBothWindow(wctl, clip, x, y) for x = 0..width-1 of line y, into out[].
+ * Without the sprite window the result depends on x only through
+ * comparisons with the windows' xstart/xend, so it is constant between
+ * those points: evaluate it once per run. */
+static void VidsoftWindowLine(int wctl, clipping_struct *clip, int y, int width, u8 *out)
+{
+   int bp[6], n = 0, k, j;
+   bp[n++] = 0;
+   if (wctl & 0x2) { bp[n++] = clip[0].xstart; bp[n++] = clip[0].xend + 1; }
+   if (wctl & 0x8) { bp[n++] = clip[1].xstart; bp[n++] = clip[1].xend + 1; }
+   for (k = 1; k < n; k++)          /* sort */
+      for (j = k; j > 0 && bp[j - 1] > bp[j]; j--)
+      {
+         int t = bp[j]; bp[j] = bp[j - 1]; bp[j - 1] = t;
+      }
+   for (k = 0; k < n; k++)
+   {
+      int a = bp[k] < 0 ? 0 : bp[k];
+      int b = k + 1 < n ? bp[k + 1] : width;
+      if (b > width) b = width;
+      if (a < b)
+         memset(out + a, TestBothWindow(wctl, clip, a, y) ? 1 : 0, b - a);
+   }
+}
+
+/* The same as a lookup table when it can be one: NULL when the sprite
+ * window takes part (its test reads a per-pixel mask), so callers fall back
+ * to TestBothWindow() per pixel */
+static const u8 *VidsoftWinTable(int wctl, clipping_struct *clip, int y, int width, u8 *buf)
+{
+   if (wctl & 0x20)
+      return NULL;
+   VidsoftWindowLine(wctl, clip, y, width, buf);
+   return buf;
+}
+/* With no window enabled the answer is fixed: tested here, so it stays free
+ * per pixel even where the compiler doesn't inline TestBothWindow() (an
+ * out-of-line call per pixel made Sega Rally's RBG0, which has no window,
+ * 7% slower) */
+#define WIN_AT(tab, wctl, clip, x, y) ((tab) ? (tab)[x] : ((wctl) & 0x2a) == 0 ? !((wctl) & 0x80) : TestBothWindow(wctl, clip, x, y))
+/* Their buffers, one pair per Titan layer (a layer is drawn by one thread
+ * at a time). Not on the stack: 2 KB more locals in the big drawing
+ * functions are best avoided. */
+static u8 vidsoft_win_buf[6][2][1024];
 
 //////////////////////////////////////////////////////////////////////////////
 
@@ -609,6 +792,112 @@ static INLINE void FASTCALL Vdp2MapCalcXY(vdp2draw_struct *info, int *x, int *y,
    {
       flipfunction = info->flipfunction;
    }
+
+   // Figure out which pixel in the tile we want
+   if (info->patternwh == 1)
+   {
+      x[0] &= 8-1;
+      y[0] &= 8-1;
+
+	  switch(flipfunction & 0x3)
+	  {
+	  case 0: //none
+		  break;
+	  case 1: //horizontal flip
+		  x[0] = 8 - 1 - x[0];
+		  break;
+	  case 2: // vertical flip
+         y[0] = 8 - 1 - y[0];
+		 break;
+	  case 3: //flip both
+         x[0] = 8 - 1 - x[0];
+		 y[0] = 8 - 1 - y[0];
+		 break;
+	  }
+   }
+   else
+   {
+      if (flipfunction)
+      {
+         y[0] &= 16 - 1;
+         if (flipfunction & 0x2)
+         {
+            if (!(y[0] & 8))
+               y[0] = 8 - 1 - y[0] + 16;
+            else
+               y[0] = 16 - 1 - y[0];
+         }
+         else if (y[0] & 8)
+            y[0] += 8;
+
+         if (flipfunction & 0x1)
+         {
+            if (!(x[0] & 8))
+               y[0] += 8;
+
+            x[0] &= 8-1;
+            x[0] = 8 - 1 - x[0];
+         }
+         else if (x[0] & 8)
+         {
+            y[0] += 8;
+            x[0] &= 8-1;
+         }
+         else
+            x[0] &= 8-1;
+      }
+      else
+      {
+         y[0] &= 16 - 1;
+
+         if (y[0] & 8)
+            y[0] += 8;
+         if (x[0] & 8)
+            y[0] += 8;
+         x[0] &= 8-1;
+      }
+   }
+}
+
+/* Vdp2MapCalcXY() for the fast path of Vdp2DrawScroll(), inlined into its
+ * per-format line loops. That path is only taken without bad cycle
+ * emulation, so the tile pipeline (info->pipe), which only bad cycle
+ * emulation reads, is not maintained. */
+static INLINE __attribute__((always_inline)) void Vdp2MapCalcXYFast(vdp2draw_struct *info, int *x, int *y,
+                                 screeninfo_struct *sinfo, Vdp2* regs, u8 * ram)
+{
+   int planenum;
+   int flipfunction;
+   const int pagesize_bits=info->pagewh_bits*2;
+   const int cellwh=(2 + info->patternwh);
+
+   const int check = ((y[0] >> cellwh) << 16) | (x[0] >> cellwh);
+   //if ((x[0] >> cellwh) != sinfo->oldcellx || (y[0] >> cellwh) != sinfo->oldcelly)
+   if(check != sinfo->oldcellcheck)
+   {
+      sinfo->oldcellx = x[0] >> cellwh;
+      sinfo->oldcelly = y[0] >> cellwh;
+	  sinfo->oldcellcheck = (sinfo->oldcelly << 16) | sinfo->oldcellx;
+
+      // Calculate which plane we're dealing with
+      planenum = ((y[0] >> sinfo->planepixelheight_bits) * info->mapwh) + (x[0] >> sinfo->planepixelwidth_bits);
+      x[0] = (x[0] & sinfo->planepixelwidth_mask);
+      y[0] = (y[0] & sinfo->planepixelheight_mask);
+
+      // Fetch and decode pattern name data
+      info->addr = sinfo->planetbl[planenum];
+
+      // Figure out which page it's on(if plane size is not 1x1)
+      info->addr += ((  ((y[0] >> sinfo->pagepixelwh_bits) << pagesize_bits) << info->planew_bits) +
+                     (   (x[0] >> sinfo->pagepixelwh_bits) << pagesize_bits) +
+                     (((y[0] & sinfo->pagepixelwh_mask) >> cellwh) << info->pagewh_bits) +
+                     ((x[0] & sinfo->pagepixelwh_mask) >> cellwh)) << (info->patterndatasize_bits+1);
+
+      Vdp2PatternAddr(info, regs, ram); // Heh, this could be optimized
+
+   }
+
+   flipfunction = info->flipfunction;
 
    // Figure out which pixel in the tile we want
    if (info->patternwh == 1)
@@ -819,6 +1108,122 @@ void Vdp2GetInterlaceInfo(int * start_line, int * line_increment)
 
 //////////////////////////////////////////////////////////////////////////////
 
+/* Draws a run of pixels that all lie in the same 8-pixel block of the same
+ * tile row, so the tile data, tile row (yf) and flip are fixed and the in-tile
+ * column steps by dir per pixel. Same per-pixel steps as the general loop in
+ * Vdp2DrawScroll(); colornumber/colormode are constants at each call site so
+ * the fetch is specialised per colour format. */
+static INLINE __attribute__((always_inline)) void Vdp2DrawScrollRun(const int colornumber, const int colormode,
+   vdp2draw_struct *info, Vdp2 *regs, u8 *ram, u8 *color_ram, struct PixelData *titan_line,
+   int i, int run, int xf, int dir, int yf, int j, int fresh, u32 meta_base, int post_calc,
+   int cc_win_fixed, int cc_win_pass, int cc_wctl, clipping_struct *colorcalcwindow, const u8 *cc_tab)
+{
+   const int charaddr = info->charaddr;
+   const int paladdr = info->paladdr;
+   int k;
+
+   for (k = 0; k < run; k++, xf += dir)
+   {
+      const int px = i + k;
+      u32 color, dot, pixel;
+      int priority;
+
+      if (!Vdp2FetchPixelCN(colornumber, colormode, info, xf, yf, &color, &dot, ram, charaddr, paladdr, color_ram))
+         goto transparent;
+
+      priority = info->priority;
+
+      //per-pixel priority is on
+      if (info->specialprimode == 2)
+      {
+         priority = info->priority & 0xE;
+
+         if (info->specialfunction & 1)
+         {
+            if (PixelIsSpecialPriority(info->specialcode,dot))
+               priority |= 1;
+         }
+      }
+
+      if (priority == 0)
+         goto transparent;
+
+      {
+         u8 alpha;
+         if (cc_win_fixed ? !cc_win_pass : !WIN_AT(cc_tab, cc_wctl, colorcalcwindow, px, j))
+            alpha = 0x3F;
+         else
+            alpha = GetAlpha(info, color, dot);
+
+         pixel = COLSAT2YAB32(alpha, color);
+         if (post_calc == 1)
+            pixel = DoColorOffset(info, pixel);
+         else if (post_calc == 2)
+            pixel = info->PostPixelFetchCalc(info, pixel);
+
+         titan_line[px].pixel = pixel;
+         titan_line[px].meta = meta_base | TitanPackMeta(priority, 0, 0, 0);
+         continue;
+      }
+
+transparent:
+      if (fresh)
+      {
+         titan_line[px].pixel = 0;
+         titan_line[px].meta = 0;
+      }
+   }
+}
+
+/* One line of the fast path in Vdp2DrawScroll(), for one colour format: the
+ * line splits into runs inside one 8-pixel block (split further where x
+ * wraps) that share tile data, row and flip. Kept as one function per format
+ * so the run body is inlined once instead of being called for every run. */
+static INLINE __attribute__((always_inline)) void Vdp2DrawScrollLineFast(const int colornumber, const int colormode,
+   vdp2draw_struct *info, screeninfo_struct *sinfo, Vdp2 *regs, u8 *ram, u8 *color_ram,
+   struct PixelData *titan_line, int linescrollx, int Y, int j, int fresh, u32 meta_base, int post_calc,
+   int cc_win_fixed, int cc_win_pass, int cc_wctl, clipping_struct *colorcalcwindow, const u8 *cc_tab, int start, int end)
+{
+   int i = start;
+   while (i < end)
+   {
+      const int base = (info->x + i) & sinfo->xmask;
+      int run, dir, x, y;
+
+      x = base;
+      if (linescrollx)
+         x = (x + linescrollx) & 0x3FF;
+
+      run = 8 - (x & 7);
+      if (run > sinfo->xmask + 1 - base)
+         run = sinfo->xmask + 1 - base;
+      if (run > end - i)
+         run = end - i;
+
+      y = Y;
+      Vdp2MapCalcXYFast(info, &x, &y, sinfo, regs, ram);
+      dir = (info->flipfunction & 1) ? -1 : 1;
+
+      Vdp2DrawScrollRun(colornumber, colormode, info, regs, ram, color_ram, titan_line, i, run, x, dir, y, j, fresh, meta_base, post_calc, cc_win_fixed, cc_win_pass, cc_wctl, colorcalcwindow, cc_tab);
+      i += run;
+   }
+}
+
+/* one out-of-line copy of the line loop per colour format */
+#define SCROLL_LINE_FN(NAME, CN) \
+static void NAME(const int colormode, vdp2draw_struct *info, screeninfo_struct *sinfo, Vdp2 *regs, u8 *ram, u8 *color_ram, \
+   struct PixelData *titan_line, int linescrollx, int Y, int j, int fresh, u32 meta_base, int post_calc, \
+   int cc_win_fixed, int cc_win_pass, int cc_wctl, clipping_struct *colorcalcwindow, const u8 *cc_tab, int start, int end) \
+{ \
+   Vdp2DrawScrollLineFast(CN, colormode, info, sinfo, regs, ram, color_ram, titan_line, linescrollx, Y, j, fresh, meta_base, post_calc, cc_win_fixed, cc_win_pass, cc_wctl, colorcalcwindow, cc_tab, start, end); \
+}
+SCROLL_LINE_FN(Vdp2DrawScrollLine4bpp, 0)
+SCROLL_LINE_FN(Vdp2DrawScrollLine8bpp, 1)
+SCROLL_LINE_FN(Vdp2DrawScrollLine16bppPal, 2)
+SCROLL_LINE_FN(Vdp2DrawScrollLine16bppRGB, 3)
+SCROLL_LINE_FN(Vdp2DrawScrollLine32bpp, 4)
+#undef SCROLL_LINE_FN
+
 static void FASTCALL Vdp2DrawScroll(vdp2draw_struct *info, Vdp2* lines, Vdp2* regs, u8* ram, u8* color_ram, struct CellScrollData * cell_data)
 {
    int i, j;
@@ -995,84 +1400,180 @@ static void FASTCALL Vdp2DrawScroll(vdp2draw_struct *info, Vdp2* lines, Vdp2* re
       if (!info->enable)
          continue;
 
-      for (i = 0; i < vdp2width; i++)
       {
-         u32 color, dot;
-         /* I'm really not sure about this... but I think the way we handle
-         high resolution gets in the way with window process. I may be wrong...
-         This was added for Cotton Boomerang */
-			int priority;
+         /* Loop invariants for this line, hoisted out of the pixel loop. With
+          * no window enabled TestBothWindow() gives the same answer for every
+          * pixel, and with no horizontal zoom the float x step is exact. */
+         const int layer_win_fixed = (info->wctl & 0x2a) == 0;
+         const int layer_win_pass = !(info->wctl & 0x80);
+         const int cc_wctl = regs->WCTLD >> 8;
+         const int cc_win_fixed = (cc_wctl & 0x2a) == 0;
+         const int cc_win_pass = !(cc_wctl & 0x80);
+         /* window tests per line instead of per pixel (where they can be) */
+         const u8 *win_tab = layer_win_fixed ? NULL : VidsoftWinTable(info->wctl, clip, j, vdp2width, vidsoft_win_buf[info->titan_which_layer][0]);
+         const u8 *cc_tab = cc_win_fixed ? NULL : VidsoftWinTable(cc_wctl, colorcalcwindow, j, vdp2width, vidsoft_win_buf[info->titan_which_layer][1]);
+         const int zoom_x = info->coordincx != 1.0f;
+         const int post_calc = info->PostPixelFetchCalc == &DoNothing ? 0 :
+                               info->PostPixelFetchCalc == &DoColorOffset ? 1 : 2;
+         const int layer = info->titan_which_layer;
+         const u32 meta_base = TitanPackMeta(0, info->linescreen, info->titan_shadow_type, info->titan_shadow_enabled);
+         struct PixelData *titan_line = TitanGetLayerLine(layer, output_y);
+         const int skip_line = layer_win_fixed && !layer_win_pass;
+         /* A line that is still stale from an earlier frame gets every pixel
+          * written (zero where nothing is drawn) instead of being cleared first */
+         const int fresh = skip_line ? 0 : TitanClaimLayerLine(layer, output_y);
+         /* Fast path: without zoom, mosaic or bad cycle emulation, x advances
+          * by one per pixel, so the line splits into runs inside one 8-pixel
+          * block (split further where x wraps) that share tile data, row and
+          * flip. Vdp2MapCalcXY() is still called at the start of each run,
+          * keeping its tile state exactly as before. A layer window only
+          * selects which spans of the line are drawn. */
+         const int fast = !info->isbitmap && !zoom_x && info->mosaicxmask == 1 && !bad_cycle &&
+                          ((sinfo.xmask & (sinfo.xmask + 1)) == 0);
 
-         // See if screen position is clipped, if it isn't, continue
-         if (!TestBothWindow(info->wctl, clip, i, j))
+         if (fast && !skip_line)
          {
-            continue;
-         }
-
-         //x = info->x+((int)(info->coordincx*(float)((info->mosaicxmask > 1) ? (i / info->mosaicxmask * info->mosaicxmask) : i)));
-		 x = info->x + mosaic_x[i]*info->coordincx;
-         x &= sinfo.xmask;
-		 
-         if (linescrollx) {
-            x += linescrollx;
-            x &= 0x3FF;
-         }
-
-         // Fetch Pixel, if it isn't transparent, continue
-         if (!info->isbitmap)
-         {
-            // Tile
-            y=Y;
-            Vdp2MapCalcXY(info, &x, &y, &sinfo, regs, ram, bad_cycle);
-         }
-
-         if (!bad_cycle)
-         {
-            charaddr = info->charaddr;
-            paladdr = info->paladdr;
+            const int colormode = Vdp2Internal.ColorMode;
+            int start = 0, end = vdp2width;
+            for (;;)
+            {
+               if (!layer_win_fixed)
+               {
+                  /* the next span the window lets through; pixels it hides
+                   * are transparent, as in the per-pixel path */
+                  while (start < vdp2width && !WIN_AT(win_tab, info->wctl, clip, start, j))
+                  {
+                     if (fresh)
+                     {
+                        titan_line[start].pixel = 0;
+                        titan_line[start].meta = 0;
+                     }
+                     start++;
+                  }
+                  if (start >= vdp2width)
+                     break;
+                  end = start + 1;
+                  while (end < vdp2width && WIN_AT(win_tab, info->wctl, clip, end, j))
+                     end++;
+               }
+#define SCROLL_LINE(FN) FN(colormode, info, &sinfo, regs, ram, color_ram, titan_line, linescrollx, Y, j, fresh, meta_base, post_calc, cc_win_fixed, cc_win_pass, cc_wctl, colorcalcwindow, cc_tab, start, end)
+               switch (info->colornumber)
+               {
+               case 0: SCROLL_LINE(Vdp2DrawScrollLine4bpp); break;
+               case 1: SCROLL_LINE(Vdp2DrawScrollLine8bpp); break;
+               case 2: SCROLL_LINE(Vdp2DrawScrollLine16bppPal); break;
+               case 3: SCROLL_LINE(Vdp2DrawScrollLine16bppRGB); break;
+               case 4: SCROLL_LINE(Vdp2DrawScrollLine32bpp); break;
+               default: // other formats draw nothing, but the line still has to be walked
+                  Vdp2DrawScrollLineFast(info->colornumber, colormode, info, &sinfo, regs, ram, color_ram, titan_line, linescrollx, Y, j, fresh, meta_base, post_calc, cc_win_fixed, cc_win_pass, cc_wctl, colorcalcwindow, cc_tab, start, end);
+                  break;
+               }
+#undef SCROLL_LINE
+               if (end >= vdp2width)
+                  break;
+               start = end;
+            }
          }
          else
+         for (i = skip_line ? vdp2width : 0; i < vdp2width; i++)
          {
-            charaddr = info->pipe[0].charaddr;
-            paladdr = info->pipe[0].paladdr;
-         }
+            u32 color, dot, pixel;
+            int priority;
 
-         if (!Vdp2FetchPixel(info, x, y, &color, &dot, ram, charaddr, paladdr,color_ram))
-         {
-            continue;
-         }
+            // See if screen position is clipped, if it isn't, continue
+            if (!layer_win_fixed && !WIN_AT(win_tab, info->wctl, clip, i, j))
+               goto transparent;
 
-         priority = info->priority;
+            if (zoom_x)
+               x = info->x + mosaic_x[i]*info->coordincx;
+            else
+               x = info->x + mosaic_x[i];
+            x &= sinfo.xmask;
 
-         //per-pixel priority is on
-         if (info->specialprimode == 2)
-         {
-            priority = info->priority & 0xE;
+            if (linescrollx) {
+               x += linescrollx;
+               x &= 0x3FF;
+            }
 
-            if (info->specialfunction & 1)
+            // Fetch Pixel, if it isn't transparent, continue
+            if (!info->isbitmap)
             {
-               if (PixelIsSpecialPriority(info->specialcode,dot))
+               // Tile
+               y=Y;
+               Vdp2MapCalcXY(info, &x, &y, &sinfo, regs, ram, bad_cycle);
+            }
+
+            if (!bad_cycle)
+            {
+               charaddr = info->charaddr;
+               paladdr = info->paladdr;
+            }
+            else
+            {
+               charaddr = info->pipe[0].charaddr;
+               paladdr = info->pipe[0].paladdr;
+            }
+
+            if (!Vdp2FetchPixel(info, x, y, &color, &dot, ram, charaddr, paladdr,color_ram))
+               goto transparent;
+
+            priority = info->priority;
+
+            //per-pixel priority is on
+            if (info->specialprimode == 2)
+            {
+               priority = info->priority & 0xE;
+
+               if (info->specialfunction & 1)
                {
-                  priority |= 1;
+                  if (PixelIsSpecialPriority(info->specialcode,dot))
+                  {
+                     priority |= 1;
+                  }
                }
+            }
+
+            if (priority == 0)
+               goto transparent;
+
+            // Apply color offset and color calculation/special color calculation
+            // and then continue.
+            // We almost need to know well ahead of time what the top
+            // and second pixel is in order to work this.
+            {
+               u8 alpha;
+               /* if we're in the valid area of the color calculation window, don't do color calculation */
+               if (cc_win_fixed ? !cc_win_pass : !WIN_AT(cc_tab, cc_wctl, colorcalcwindow, i, j))
+                  alpha = 0x3F;
+               else
+                  alpha = GetAlpha(info, color, dot);
+
+               pixel = COLSAT2YAB32(alpha, color);
+               if (post_calc == 1)
+                  pixel = DoColorOffset(info, pixel);
+               else if (post_calc == 2)
+                  pixel = info->PostPixelFetchCalc(info, pixel);
+
+               // same as TitanPutPixel()
+               titan_line[i].pixel = pixel;
+               titan_line[i].meta = meta_base | TitanPackMeta(priority, 0, 0, 0);
+               continue;
+            }
+
+transparent:
+            if (fresh)
+            {
+               titan_line[i].pixel = 0;
+               titan_line[i].meta = 0;
             }
          }
 
-         // Apply color offset and color calculation/special color calculation
-         // and then continue.
-         // We almost need to know well ahead of time what the top
-         // and second pixel is in order to work this.
-
-         {
-            u8 alpha;
-            /* if we're in the valid area of the color calculation window, don't do color calculation */
-            if (!TestBothWindow(regs->WCTLD >> 8, colorcalcwindow, i, j))
-               alpha = 0x3F;
-            else
-               alpha = GetAlpha(info, color, dot);
-
-            TitanPutPixel(priority, i, output_y, info->PostPixelFetchCalc(info, COLSAT2YAB32(alpha, color)), info->linescreen, info);
-         }
+         /* This line holds only this layer's pixels, so tell the compositor
+          * the highest priority it can contain: the layer priority, or with
+          * special priority per tile/pixel, that with the low bit set */
+         if (fresh)
+            TitanSetLineMaxPriority(layer, output_y, info->specialprimode == 0 ? info->priority :
+                                                     info->specialprimode <= 2 ? (info->priority | 1) : 7);
       }
       output_y++;
    }    
@@ -1129,9 +1630,205 @@ int Rbg0CheckRam(Vdp2* regs)
    return 0;
 }
 
+/* The coefficient read of Vdp2ReadCoefficientFP() (vidshared.h), inlined:
+ * the rotation loop below does it for every dot */
+static INLINE __attribute__((always_inline)) void Vdp2ReadCoefficientFPInline(vdp2rotationparameterfp_struct *parameter, u32 addr, u8 *ram)
+{
+   fixed32 k;
+   if (parameter->coefmode == 3)
+   {
+      Vdp2ReadCoefficientFP(parameter, addr, ram);
+      return;
+   }
+   if (parameter->coefdatasize == 2)
+   {
+      s32 i;
+      addr &= 0x7FFFE;
+      i = T1ReadWord(ram, addr);
+      parameter->msb = (i >> 15) & 0x1;
+      k = (signed) ((i & 0x7FFF) | (i & 0x4000 ? 0xFFFFC000 : 0x00000000)) * 64;
+   }
+   else
+   {
+      s32 i;
+      addr &= 0x7FFFC;
+      i = T1ReadLong(ram, addr);
+      parameter->linescreen = (i >> 24) & 0x7F;
+      parameter->msb = (i >> 31) & 0x1;
+      k = (signed) ((i & 0x00FFFFFF) | (i & 0x00800000 ? 0xFF800000 : 0x00000000));
+   }
+   switch (parameter->coefmode)
+   {
+      case 0: parameter->kx = parameter->ky = k; break;
+      case 1: parameter->kx = k; break;
+      default: parameter->ky = k; break;
+   }
+}
+
+/* State of one line of Vdp2DrawRotationFP()'s coefficient loop */
+struct RotCoefLine
+{
+   vdp2draw_struct *info;
+   vdp2rotationparameterfp_struct *p, *p2;
+   screeninfo_struct *sinfo, *sinfo2;
+   Vdp2 *regs;
+   u8 *ram, *color_ram;
+   clipping_struct *clip, *rpwindow;
+   const u8 *wintab, *rptab;        /* per-line window tables, or NULL (see VidsoftWinTable) */
+   int userpwindow;
+   fixed32 Xsp, Ysp, Xsp2, Ysp2;   /* the per-line part of the rotated position */
+   u32 coefy, rcoefy, coefy2, rcoefy2;
+   u32 *dotlc;
+   int dotlc_en, dotlc_en2;
+   u32 dotlc_word, dotlc_last, dotlc_color;
+   int j;
+};
+
+/* One line of the coefficient loop of Vdp2DrawRotationFP(), for one colour
+ * format (not hi-res). Same steps and results as the generic loop, with the
+ * per-line terms hoisted (A*xmul + B*ymul + C, and dX*i kept as a running
+ * sum, which is the same value modulo 2^32), the coefficient read, tile
+ * lookup and pixel fetch inlined, and the pixel written straight into the
+ * Titan line, claimed once, instead of through Rbg0PutPixel(). */
+static INLINE __attribute__((always_inline)) void Vdp2DrawRotationCoefLine(const int colornumber, struct RotCoefLine *L)
+{
+   vdp2draw_struct *const info = L->info;
+   vdp2rotationparameterfp_struct *const p = L->p, *const p2 = L->p2;
+   u8 *const ram = L->ram, *const color_ram = L->color_ram;
+   const int j = L->j;
+   const int colormode = Vdp2Internal.ColorMode;
+   const int win_fixed = (info->wctl & 0x2a) == 0, win_pass = !(info->wctl & 0x80);
+   const int p2_coef = p2 != NULL && p2->coefenab;
+   const int priority = info->priority;
+   const int post_calc = info->PostPixelFetchCalc == &DoNothing ? 0 :
+                         info->PostPixelFetchCalc == &DoColorOffset ? 1 : 2;
+   const int layer = info->titan_which_layer;
+   const u32 meta = TitanPackMeta(priority, info->linescreen, info->titan_shadow_type, info->titan_shadow_enabled);
+   struct PixelData *line = NULL;
+   u32 coefx = 0, rcoefx = 0, coefx2 = 0, rcoefx2 = 0;
+   u32 dxi = 0, dyi = 0, dxi2 = 0, dyi2 = 0;
+   int i;
+
+   for (i = 0; i < rbg0width; i++)
+   {
+      u32 color, dot;
+      int x, y;
+      const u32 cdx = dxi, cdy = dyi, cdx2 = dxi2, cdy2 = dyi2;
+      dxi += (u32)p->dX;
+      dyi += (u32)p->dY;
+      if (p2 != NULL)
+      {
+         dxi2 += (u32)p2->dX;
+         dyi2 += (u32)p2->dY;
+      }
+
+      if (p->deltaKAx != 0)
+      {
+         Vdp2ReadCoefficientFPInline(p, p->coeftbladdr + (L->coefy + coefx + toint(rcoefx + L->rcoefy)) * p->coefdatasize, ram);
+         coefx += toint(p->deltaKAx);
+         rcoefx += decipart(p->deltaKAx);
+      }
+      if (p2_coef && (p2->deltaKAx != 0))
+      {
+         Vdp2ReadCoefficientFPInline(p2, p2->coeftbladdr + (L->coefy2 + coefx2 + toint(rcoefx2 + L->rcoefy2)) * p2->coefdatasize, ram);
+         coefx2 += toint(p2->deltaKAx);
+         rcoefx2 += decipart(p2->deltaKAx);
+      }
+
+      if (win_fixed ? !win_pass : !WIN_AT(L->wintab, info->wctl, L->clip, i, j))
+         continue;
+
+      if (((! L->userpwindow) && p->msb) || (L->userpwindow && (! WIN_AT(L->rptab, L->regs->WCTLD, L->rpwindow, i, j))))
+      {
+         if ((p2 == NULL) || (p2->coefenab && p2->msb)) continue;
+
+         x = touint(mulfixed(p2->kx, (fixed32)((u32)L->Xsp2 + cdx2)) + p2->Xp);
+         y = touint(mulfixed(p2->ky, (fixed32)((u32)L->Ysp2 + cdy2)) + p2->Yp);
+
+         switch(p2->screenover) {
+            case 0:
+            case 1:
+               x &= L->sinfo2->xmask;
+               y &= L->sinfo2->ymask;
+               break;
+            case 2:
+               if ((x > L->sinfo2->xmask) || (y > L->sinfo2->ymask)) continue;
+               break;
+            case 3:
+               if ((x > 512) || (y > 512)) continue;
+         }
+
+         if (!info->isbitmap)
+            Vdp2MapCalcXYFast(info, &x, &y, L->sinfo2, L->regs, ram);
+      }
+      else if (p->msb) continue;
+      else
+      {
+         x = touint(mulfixed(p->kx, (fixed32)((u32)L->Xsp + cdx)) + p->Xp);
+         y = touint(mulfixed(p->ky, (fixed32)((u32)L->Ysp + cdy)) + p->Yp);
+
+         switch(p->screenover) {
+            case 0:
+            case 1:
+               x &= L->sinfo->xmask;
+               y &= L->sinfo->ymask;
+               break;
+            case 2:
+               if ((x > L->sinfo->xmask) || (y > L->sinfo->ymask)) continue;
+               break;
+            case 3:
+               if ((x > 512) || (y > 512)) continue;
+         }
+
+         if (!info->isbitmap)
+            Vdp2MapCalcXYFast(info, &x, &y, L->sinfo, L->regs, ram);
+      }
+
+      if (!Vdp2FetchPixelCN(colornumber, colormode, info, x, y, &color, &dot, ram, info->charaddr, info->paladdr, color_ram))
+         continue;
+
+      if (L->dotlc)
+      {
+         /* which parameter drew this pixel: the same test as above */
+         const int use2 = ((! L->userpwindow) && p->msb) || (L->userpwindow && (! WIN_AT(L->rptab, L->regs->WCTLD, L->rpwindow, i, j)));
+         u32 addr = L->dotlc_word;
+         if (use2 ? L->dotlc_en2 : L->dotlc_en)
+            addr = (L->dotlc_word & 0x780) | (use2 ? p2->linescreen : p->linescreen);
+         if (addr != L->dotlc_last)
+         {
+            L->dotlc_last = addr;
+            L->dotlc_color = COLSAT2YAB32(0x3F, Vdp2ColorRamGetColor(addr, color_ram));
+         }
+         L->dotlc[j * vdp2width + i] = L->dotlc_color;
+      }
+
+      if (priority == 0)
+         continue;
+      if (!line)
+      {
+         /* TitanPutPixel() clears a line that is stale from an earlier frame
+          * on its first write */
+         line = TitanGetLayerLine(layer, j);
+         if (TitanClaimLayerLine(layer, j))
+            memset(line, 0, sizeof(struct PixelData) * vdp2width);
+      }
+      {
+         u32 pixel = COLSAT2YAB32(GetAlpha(info, color, dot), color);
+         if (post_calc == 1)
+            pixel = DoColorOffset(info, pixel);
+         else if (post_calc == 2)
+            pixel = info->PostPixelFetchCalc(info, pixel);
+         line[i].pixel = pixel;
+         line[i].meta = meta;
+      }
+   }
+}
+
 static void FASTCALL Vdp2DrawRotationFP(vdp2draw_struct *info, vdp2rotationparameterfp_struct *parameter, Vdp2* lines, Vdp2* regs, u8* ram, u8* color_ram, struct CellScrollData * cell_data)
 {
    int i, j;
+   u8 *const winbuf = vidsoft_win_buf[info->titan_which_layer][0], *const rpbuf = vidsoft_win_buf[info->titan_which_layer][1];
+   const u8 *wintab = NULL, *rptab = NULL;
    int x, y;
    screeninfo_struct sinfo;
    vdp2rotationparameterfp_struct *p=&parameter[info->rotatenum];
@@ -1172,12 +1869,13 @@ static void FASTCALL Vdp2DrawRotationFP(vdp2draw_struct *info, vdp2rotationparam
          {
             info->LoadLineParams(info, &sinfo, j, lines);
             ReadLineWindowClip(info->islinewindow, clip, &linewnd0addr, &linewnd1addr, ram, regs);
+            wintab = (info->wctl & 0x2a) && rbg0width <= 1024 ? VidsoftWinTable(info->wctl, clip, j, rbg0width, winbuf) : NULL;
 
             for (i = 0; i < rbg0width; i++)
             {
                u32 color, dot;
 
-               if (!TestBothWindow(info->wctl, clip, i, j))
+               if (!WIN_AT(wintab, info->wctl, clip, i, j))
                   continue;
 
                x = GenerateRotatedXPosFP(p, i, xmul, ymul, C) & sinfo.xmask;
@@ -1221,6 +1919,9 @@ static void FASTCALL Vdp2DrawRotationFP(vdp2draw_struct *info, vdp2rotationparam
 
       clipping_struct rpwindow[2];
       int userpwindow = 0;
+      u32 *dotlc = NULL;          /* per-pixel line colours, see above */
+      int dotlc_en = 0, dotlc_en2 = 0;
+      u32 dotlc_word = 0, dotlc_last = 0xFFFFFFFF, dotlc_color = 0;
       int isrplinewindow = 0;
       u32 rplinewnd0addr, rplinewnd1addr;
 
@@ -1280,6 +1981,22 @@ static void FASTCALL Vdp2DrawRotationFP(vdp2draw_struct *info, vdp2rotationparam
             lineAddr = (regs->LCTA.all & 0x3FFFF) << 1;
 
          lineInc = regs->LCTA.part.U & 0x8000 ? 2 : 0;
+
+         /* the coefficient's line colour bits replace the low 7 bits of the
+            line colour table's address; with per-dot coefficients that is
+            per pixel */
+         if (info->linescreen > 1 && vidsoft_rotation_dot_linecolor &&
+             (p->deltaKAx != 0 || (p2 != NULL && p2->coefenab && p2->deltaKAx != 0)))
+         {
+            const int a_is_p = p == &parameter[0];
+            dotlc = TitanGetDotLineColors(info->rotatenum);
+            if (dotlc)
+            {
+               dotlc_en = (regs->KTCTL & (a_is_p ? 0x10 : 0x1000)) != 0;
+               dotlc_en2 = (regs->KTCTL & (a_is_p ? 0x1000 : 0x10)) != 0;
+               info->linescreen = TITAN_LINESCREEN_DOT + info->rotatenum;
+            }
+         }
       }
 
       for (j = 0; j < rbg0height; j++)
@@ -1299,7 +2016,12 @@ static void FASTCALL Vdp2DrawRotationFP(vdp2draw_struct *info, vdp2rotationparam
                                   p2->coefdatasize, ram);
          }
 
-         if (info->linescreen > 1)
+         if (dotlc)
+         {
+            dotlc_word = T1ReadWord(ram, lineAddr) & 0x7FF;
+            lineAddr += lineInc;
+         }
+         else if (info->linescreen > 1)
          {
             lineColorAddr = (T1ReadWord(ram, lineAddr) & 0x780) | p->linescreen;
             lineColor = Vdp2ColorRamGetColor(lineColorAddr, color_ram);
@@ -1313,6 +2035,40 @@ static void FASTCALL Vdp2DrawRotationFP(vdp2draw_struct *info, vdp2rotationparam
          if (userpwindow)
             ReadLineWindowClip(isrplinewindow, rpwindow, &rplinewnd0addr, &rplinewnd1addr, ram, regs);
 
+         wintab = (info->wctl & 0x2a) && rbg0width <= 1024 ? VidsoftWinTable(info->wctl, clip, j, rbg0width, winbuf) : NULL;
+         rptab = userpwindow && rbg0width <= 1024 ? VidsoftWinTable(regs->WCTLD, rpwindow, j, rbg0width, rpbuf) : NULL;
+
+         if (!vdp2_x_hires)
+         {
+            struct RotCoefLine L;
+            L.info = info; L.p = p; L.p2 = p2; L.sinfo = &sinfo; L.sinfo2 = &sinfo2;
+            L.regs = regs; L.ram = ram; L.color_ram = color_ram;
+            L.clip = clip; L.rpwindow = rpwindow; L.userpwindow = userpwindow;
+            L.wintab = wintab; L.rptab = rptab;
+            L.Xsp = mulfixed(p->A, xmul) + mulfixed(p->B, ymul) + C;
+            L.Ysp = mulfixed(p->D, xmul) + mulfixed(p->E, ymul) + F;
+            if (p2 != NULL)
+            {
+               L.Xsp2 = mulfixed(p2->A, xmul2) + mulfixed(p2->B, ymul2) + C2;
+               L.Ysp2 = mulfixed(p2->D, xmul2) + mulfixed(p2->E, ymul2) + F2;
+            }
+            L.coefy = coefy; L.rcoefy = rcoefy;
+            if (p2 != NULL) { L.coefy2 = coefy2; L.rcoefy2 = rcoefy2; }
+            L.dotlc = dotlc; L.dotlc_en = dotlc_en; L.dotlc_en2 = dotlc_en2;
+            L.dotlc_word = dotlc_word; L.dotlc_last = dotlc_last; L.dotlc_color = dotlc_color;
+            L.j = j;
+            switch (info->colornumber)
+            {
+               case 0: Vdp2DrawRotationCoefLine(0, &L); break;
+               case 1: Vdp2DrawRotationCoefLine(1, &L); break;
+               case 2: Vdp2DrawRotationCoefLine(2, &L); break;
+               case 3: Vdp2DrawRotationCoefLine(3, &L); break;
+               case 4: Vdp2DrawRotationCoefLine(4, &L); break;
+               default: Vdp2DrawRotationCoefLine(info->colornumber, &L); break;
+            }
+            dotlc_last = L.dotlc_last; dotlc_color = L.dotlc_color;
+         }
+         else
          for (i = 0; i < rbg0width; i++)
          {
             u32 color, dot;
@@ -1336,10 +2092,10 @@ static void FASTCALL Vdp2DrawRotationFP(vdp2draw_struct *info, vdp2rotationparam
                rcoefx2 += decipart(p2->deltaKAx);
             }
 
-            if (!TestBothWindow(info->wctl, clip, i, j))
+            if (!WIN_AT(wintab, info->wctl, clip, i, j))
                continue;
 
-            if (((! userpwindow) && p->msb) || (userpwindow && (! TestBothWindow(regs->WCTLD, rpwindow, i, j))))
+            if (((! userpwindow) && p->msb) || (userpwindow && (! WIN_AT(rptab, regs->WCTLD, rpwindow, i, j))))
             {
                if ((p2 == NULL) || (p2->coefenab && p2->msb)) continue;
 
@@ -1405,6 +2161,24 @@ static void FASTCALL Vdp2DrawRotationFP(vdp2draw_struct *info, vdp2rotationparam
             if (!Vdp2FetchPixel(info, x, y, &color, &dot, ram, info->charaddr, info->paladdr, color_ram))
             {
                continue;
+            }
+
+            if (dotlc)
+            {
+               /* which parameter drew this pixel: the same test as above */
+               const int use2 = ((! userpwindow) && p->msb) || (userpwindow && (! WIN_AT(rptab, regs->WCTLD, rpwindow, i, j)));
+               u32 addr = dotlc_word;
+               if (use2 ? dotlc_en2 : dotlc_en)
+                  addr = (dotlc_word & 0x780) | (use2 ? p2->linescreen : p->linescreen);
+               if (addr != dotlc_last)
+               {
+                  dotlc_last = addr;
+                  dotlc_color = COLSAT2YAB32(0x3F, Vdp2ColorRamGetColor(addr, color_ram));
+               }
+               if (vdp2_x_hires)
+                  dotlc[j * vdp2width + i * 2] = dotlc[j * vdp2width + i * 2 + 1] = dotlc_color;
+               else
+                  dotlc[j * vdp2width + i] = dotlc_color;
             }
 
             Rbg0PutPixel(info, color, dot, i, j);
@@ -1543,7 +2317,15 @@ static void LoadLineParamsNBG0(vdp2draw_struct * info, screeninfo_struct * sinfo
 
 //////////////////////////////////////////////////////////////////////////////
 
+#ifdef YAB_PROFILE
+static void Vdp2DrawNBG0Body(Vdp2* lines, Vdp2* regs, u8* ram, u8* color_ram, struct CellScrollData * cell_data);
+static void Vdp2DrawNBG0(Vdp2* lines, Vdp2* regs, u8* ram, u8* color_ram, struct CellScrollData * cell_data) { YAB_PROF_TBEGIN(PROF_L_NBG0); Vdp2DrawNBG0Body(lines, regs, ram, color_ram, cell_data); YAB_PROF_TEND(PROF_L_NBG0); }
+#define Vdp2DrawNBG0 Vdp2DrawNBG0Body
+#endif
 static void Vdp2DrawNBG0(Vdp2* lines, Vdp2* regs, u8* ram, u8* color_ram, struct CellScrollData * cell_data)
+#ifdef YAB_PROFILE
+#undef Vdp2DrawNBG0
+#endif
 {
    vdp2draw_struct info = { 0 };
    vdp2rotationparameterfp_struct parameter[2];
@@ -1693,7 +2475,15 @@ static void LoadLineParamsNBG1(vdp2draw_struct * info, screeninfo_struct * sinfo
 
 //////////////////////////////////////////////////////////////////////////////
 
+#ifdef YAB_PROFILE
+static void Vdp2DrawNBG1Body(Vdp2* lines, Vdp2* regs, u8* ram, u8* color_ram, struct CellScrollData * cell_data);
+static void Vdp2DrawNBG1(Vdp2* lines, Vdp2* regs, u8* ram, u8* color_ram, struct CellScrollData * cell_data) { YAB_PROF_TBEGIN(PROF_L_NBG1); Vdp2DrawNBG1Body(lines, regs, ram, color_ram, cell_data); YAB_PROF_TEND(PROF_L_NBG1); }
+#define Vdp2DrawNBG1 Vdp2DrawNBG1Body
+#endif
 static void Vdp2DrawNBG1(Vdp2* lines, Vdp2* regs, u8* ram, u8* color_ram, struct CellScrollData * cell_data)
+#ifdef YAB_PROFILE
+#undef Vdp2DrawNBG1
+#endif
 {
    vdp2draw_struct info = { 0 };
 
@@ -1799,7 +2589,15 @@ static void LoadLineParamsNBG2(vdp2draw_struct * info, screeninfo_struct * sinfo
 
 //////////////////////////////////////////////////////////////////////////////
 
+#ifdef YAB_PROFILE
+static void Vdp2DrawNBG2Body(Vdp2* lines, Vdp2* regs, u8* ram, u8* color_ram, struct CellScrollData * cell_data);
+static void Vdp2DrawNBG2(Vdp2* lines, Vdp2* regs, u8* ram, u8* color_ram, struct CellScrollData * cell_data) { YAB_PROF_TBEGIN(PROF_L_NBG2); Vdp2DrawNBG2Body(lines, regs, ram, color_ram, cell_data); YAB_PROF_TEND(PROF_L_NBG2); }
+#define Vdp2DrawNBG2 Vdp2DrawNBG2Body
+#endif
 static void Vdp2DrawNBG2(Vdp2* lines, Vdp2* regs, u8* ram, u8* color_ram, struct CellScrollData * cell_data)
+#ifdef YAB_PROFILE
+#undef Vdp2DrawNBG2
+#endif
 {
    vdp2draw_struct info = { 0 };
 
@@ -1871,7 +2669,15 @@ static void LoadLineParamsNBG3(vdp2draw_struct * info, screeninfo_struct * sinfo
 
 //////////////////////////////////////////////////////////////////////////////
 
+#ifdef YAB_PROFILE
+static void Vdp2DrawNBG3Body(Vdp2* lines, Vdp2* regs, u8* ram, u8* color_ram, struct CellScrollData * cell_data);
+static void Vdp2DrawNBG3(Vdp2* lines, Vdp2* regs, u8* ram, u8* color_ram, struct CellScrollData * cell_data) { YAB_PROF_TBEGIN(PROF_L_NBG3); Vdp2DrawNBG3Body(lines, regs, ram, color_ram, cell_data); YAB_PROF_TEND(PROF_L_NBG3); }
+#define Vdp2DrawNBG3 Vdp2DrawNBG3Body
+#endif
 static void Vdp2DrawNBG3(Vdp2* lines, Vdp2* regs, u8* ram, u8* color_ram, struct CellScrollData * cell_data)
+#ifdef YAB_PROFILE
+#undef Vdp2DrawNBG3
+#endif
 {
    vdp2draw_struct info = { 0 };
 
@@ -1943,7 +2749,15 @@ static void LoadLineParamsRBG0(vdp2draw_struct * info, screeninfo_struct * sinfo
 
 //////////////////////////////////////////////////////////////////////////////
 
+#ifdef YAB_PROFILE
+static void Vdp2DrawRBG0Body(Vdp2* lines, Vdp2* regs, u8* ram, u8* color_ram, struct CellScrollData * cell_data);
+static void Vdp2DrawRBG0(Vdp2* lines, Vdp2* regs, u8* ram, u8* color_ram, struct CellScrollData * cell_data) { YAB_PROF_TBEGIN(PROF_L_RBG0); Vdp2DrawRBG0Body(lines, regs, ram, color_ram, cell_data); YAB_PROF_TEND(PROF_L_RBG0); }
+#define Vdp2DrawRBG0 Vdp2DrawRBG0Body
+#endif
 static void Vdp2DrawRBG0(Vdp2* lines, Vdp2* regs, u8* ram, u8* color_ram, struct CellScrollData * cell_data)
+#ifdef YAB_PROFILE
+#undef Vdp2DrawRBG0
+#endif
 {
    vdp2draw_struct info = { 0 };
    vdp2rotationparameterfp_struct parameter[2];
@@ -2081,11 +2895,14 @@ void NAME(void * data) \
 { \
    for (;;) \
    { \
-      if (vidsoft_thread_context.need_draw[LAYER]) \
+      if (YabFlagGet(vidsoft_thread_context.need_draw[LAYER])) \
       { \
          vidsoft_thread_context.need_draw[LAYER] = 0; \
+         YAB_PROF_TBEGIN(PROF_T_LAYERS); \
          FUNC(vidsoft_thread_context.lines, &vidsoft_thread_context.regs, vidsoft_thread_context.ram, vidsoft_thread_context.color_ram, vidsoft_thread_context.cell_scroll_data); \
-         vidsoft_thread_context.draw_finished[LAYER] = 1; \
+         YAB_PROF_TEND(PROF_T_LAYERS); \
+         YabFlagSet(vidsoft_thread_context.draw_finished[LAYER], 1); \
+         YabFlagNotify(); \
       } \
       YabThreadSleep(); \
    } \
@@ -2106,16 +2923,55 @@ void VIDSoftSetNumLayerThreads(int num)
 
 //////////////////////////////////////////////////////////////////////////////
 
+static u64 VidsoftThreadCpuNs(void)
+{
+#ifdef CLOCK_THREAD_CPUTIME_ID
+   struct timespec ts;
+   if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) == 0)
+      return (u64)ts.tv_sec * 1000000000ull + ts.tv_nsec;
+#endif
+   return 0;
+}
+
 void VidsoftVdp1Thread(void* data)
 {
    for (;;)
    {
-      if (vidsoft_vdp1_thread_context.need_draw)
+      if (YabFlagGet(vidsoft_vdp1_thread_context.need_draw))
       {
+         u64 t0 = VidsoftThreadCpuNs();
          vidsoft_vdp1_thread_context.need_draw = 0;
-         Vdp1DrawCommands(vidsoft_vdp1_thread_context.ram, &vidsoft_vdp1_thread_context.regs, vidsoft_vdp1_thread_context.back_framebuffer);
-         memcpy(vdp1backframebuffer, vidsoft_vdp1_thread_context.back_framebuffer, 0x40000);
-         vidsoft_vdp1_thread_context.draw_finished = 1;
+         vdp1_row_lo = vidsoft_vdp1_thread_context.row_lo;
+         vdp1_row_hi = vidsoft_vdp1_thread_context.row_hi;
+         YAB_PROF_TBEGIN(PROF_T_VDP1);
+         Vdp1DrawCommands(vidsoft_vdp1_thread_context.ramp, &vidsoft_vdp1_thread_context.regs, vidsoft_vdp1_thread_context.back_framebuffer);
+         YAB_PROF_TEND(PROF_T_VDP1);
+         vidsoft_vdp1_thread_context.cpu_ns = VidsoftThreadCpuNs() - t0;
+         YabFlagSet(vidsoft_vdp1_thread_context.draw_finished, 1);
+         YabFlagNotify();
+      }
+
+      YabThreadSleep();
+   }
+}
+
+void VidsoftVdp1SplitThread(void* data)
+{
+   for (;;)
+   {
+      if (YabFlagGet(vidsoft_vdp1b_context.need_draw))
+      {
+         u64 t0 = VidsoftThreadCpuNs();
+         vidsoft_vdp1b_context.need_draw = 0;
+         vdp1_tid = 1;
+         vdp1_row_lo = vidsoft_vdp1b_context.row_lo;
+         vdp1_row_hi = vidsoft_vdp1b_context.row_hi;
+         YAB_PROF_TBEGIN(PROF_T_VDP1);
+         Vdp1DrawCommands(vidsoft_vdp1_thread_context.ramp, &vidsoft_vdp1b_context.regs, vidsoft_vdp1_thread_context.back_framebuffer);
+         YAB_PROF_TEND(PROF_T_VDP1);
+         vidsoft_vdp1b_context.cpu_ns = VidsoftThreadCpuNs() - t0;
+         YabFlagSet(vidsoft_vdp1b_context.draw_finished, 1);
+         YabFlagNotify();
       }
 
       YabThreadSleep();
@@ -2124,11 +2980,20 @@ void VidsoftVdp1Thread(void* data)
 
 //////////////////////////////////////////////////////////////////////////////
 
+#ifdef YAB_PROFILE
+void VidsoftWaitForVdp1ThreadBody(void);
+void VidsoftWaitForVdp1Thread(void) { YAB_PROF_BEGIN(PROF_WAIT_VDP1); VidsoftWaitForVdp1ThreadBody(); YAB_PROF_END(PROF_WAIT_VDP1); }
+#define VidsoftWaitForVdp1Thread VidsoftWaitForVdp1ThreadBody
+#endif
 void VidsoftWaitForVdp1Thread()
+#ifdef YAB_PROFILE
+#undef VidsoftWaitForVdp1Thread
+#endif
 {
    if (vidsoft_vdp1_thread_enabled)
    {
-      while (!vidsoft_vdp1_thread_context.draw_finished){}
+      YabFlagWait(&vidsoft_vdp1_thread_context.draw_finished);
+      YabFlagWait(&vidsoft_vdp1b_context.draw_finished);
    }
 }
 
@@ -2144,11 +3009,14 @@ void VidsoftSpriteThread(void * data)
 {
    for (;;)
    {
-      if (vidsoft_thread_context.need_draw[TITAN_SPRITE])
+      if (YabFlagGet(vidsoft_thread_context.need_draw[TITAN_SPRITE]))
       {
          vidsoft_thread_context.need_draw[TITAN_SPRITE] = 0;
+         YAB_PROF_TBEGIN(PROF_T_SPRITE);
          VidsoftDrawSprite(&vidsoft_thread_context.regs, sprite_window_mask, vdp1frontframebuffer, vidsoft_thread_context.ram, Vdp1Regs,vidsoft_thread_context.lines, vidsoft_thread_context.color_ram);
-         vidsoft_thread_context.draw_finished[TITAN_SPRITE] = 1;
+         YAB_PROF_TEND(PROF_T_SPRITE);
+         YabFlagSet(vidsoft_thread_context.draw_finished[TITAN_SPRITE], 1);
+         YabFlagNotify();
       }
       YabThreadSleep();
    }
@@ -2159,6 +3027,10 @@ void VidsoftSpriteThread(void * data)
 int VIDSoftInit(void)
 {
    int i;
+
+   /* the render threads' copies of VDP1/VDP2 RAM start out stale */
+   VDP1_RAM_MARK_ALL();
+   VDP2_RAM_MARK_ALL();
 
    if (TitanInit() == -1)
       return -1;
@@ -2176,6 +3048,18 @@ int VIDSoftInit(void)
 
    vdp1backframebuffer = vdp1framebuffer[0];
    vdp1frontframebuffer = vdp1framebuffer[1];
+   {
+      int i;
+      for (i = 0; i < 2; i++)
+      {
+         if (!vdp1_job[i].ram && (vdp1_job[i].ram = (u8 *)malloc(0x80000)) == NULL)
+            return -1;
+         vdp1_job[i].pending = 0;
+         memset(vdp1_job[i].stale, 0xFF, sizeof(vdp1_job[i].stale));
+      }
+      memset(vdp1_ctx_stale, 0xFF, sizeof(vdp1_ctx_stale));
+      vidsoft_vdp1_thread_context.ramp = vidsoft_vdp1_thread_context.ram;
+   }
    rbg0width = vdp2width = 320;
    vdp2height = 224;
 
@@ -2194,6 +3078,9 @@ int VIDSoftInit(void)
    vidsoft_vdp1_thread_context.need_draw = 0;
    vidsoft_vdp1_thread_context.draw_finished = 1;
    YabThreadStart(YAB_THREAD_VIDSOFT_VDP1, VidsoftVdp1Thread, 0);
+   vidsoft_vdp1b_context.need_draw = 0;
+   vidsoft_vdp1b_context.draw_finished = 1;
+   YabThreadStart(YAB_THREAD_VIDSOFT_VDP1B, VidsoftVdp1SplitThread, 0);
 
    YabThreadStart(YAB_THREAD_VIDSOFT_LAYER_RBG0, VidsoftRbg0Thread, 0);
    YabThreadStart(YAB_THREAD_VIDSOFT_LAYER_NBG0, VidsoftNbg0Thread, 0);
@@ -2329,6 +3216,20 @@ int VIDSoftSetupGL(void)
 
 void VIDSoftDeInit(void)
 {
+   // The render threads may still be drawing the last frame into the
+   // buffers freed below (e.g. when content is closed right after a frame)
+   VidsoftWaitForVdp1Thread();
+   VidsoftWaitForLayerThreads();
+
+   if (getenv("YAB_VDP1_STATS"))
+   {
+      fprintf(stderr, "VDP1 frames: %lu split, %lu one thread, last split row %d\n",
+              vdp1_frames_split, vdp1_frames_single, vdp1_split_row);
+      fprintf(stderr, "VDP1 lazy: %lu drawn at once, %lu deferred, %lu deferred drawn (%lu at a shown frame), %lu replaced unseen, %lu backoffs\n",
+              vdp1_st_eager, vdp1_st_captured, vdp1_st_run, vdp1_st_sync, vdp1_st_replaced, vdp1_st_backoffs);
+   }
+   vdp1_job[0].pending = vdp1_job[1].pending = 0;
+
    if (dispbuffer)
    {
       free(dispbuffer);
@@ -2337,9 +3238,11 @@ void VIDSoftDeInit(void)
 
    if (vdp1framebuffer[0])
       free(vdp1framebuffer[0]);
+   vdp1framebuffer[0] = NULL;
 
    if (vdp1framebuffer[1])
       free(vdp1framebuffer[1]);
+   vdp1framebuffer[1] = NULL;
 #ifdef USE_OPENGL
    if (VideoUseGL)
    {
@@ -2391,7 +3294,9 @@ int VIDSoftVdp1Reset(void)
 
 //////////////////////////////////////////////////////////////////////////////
 
-void VIDSoftVdp1DrawStartBody(Vdp1* regs, u8 * back_framebuffer)
+/* The framebuffer mode a draw sets up (TVMR/FBCR): interlace, size, pixel
+ * size. Also read by the sprite layer and the CPU framebuffer access. */
+static void VidsoftVdp1SetMode(const Vdp1 *regs)
 {
    if (regs->FBCR & 8)
       vdp1interlace = 2;
@@ -2421,7 +3326,11 @@ void VIDSoftVdp1DrawStartBody(Vdp1* regs, u8 * back_framebuffer)
       vdp1height = 256;
       vdp1pixelsize = 2;
    }
+}
 
+void VIDSoftVdp1DrawStartBody(Vdp1* regs, u8 * back_framebuffer)
+{
+   VidsoftVdp1SetMode(regs);
    VIDSoftVdp1EraseFrameBuffer(regs, back_framebuffer);
 
    //night warriors doesn't set clipping most frames and uses
@@ -2430,23 +3339,341 @@ void VIDSoftVdp1DrawStartBody(Vdp1* regs, u8 * back_framebuffer)
 }
 //////////////////////////////////////////////////////////////////////////////
 
+/* Does the command list use colour mode 7? Its getpixel() keeps the
+ * previous pixel's value, which depends on lines the other thread draws,
+ * so such a frame isn't split. Walks the list like Vdp1DrawCommands(). */
+static int Vdp1ListNeedsOneThread(u8 *ram, u32 addr)
+{
+   u16 command = T1ReadWord(ram, addr);
+   u32 commandCounter = 0;
+   u32 returnAddr = 0xffffffff;
+
+   while (!(command & 0x8000) && commandCounter < 2000) {
+      if (!(command & 0x4000)) {
+         switch (command & 0x000F) {
+         case 0: case 1: case 2: case 3: case 4: case 5: case 6: case 7:
+            if (((T1ReadWord(ram, addr + 4) >> 3) & 0x7) == 7)
+               return 1;
+            break;
+         case 8: case 9: case 10: case 11:
+            break;
+         default:
+            return 0;
+         }
+      }
+      switch ((command & 0x3000) >> 12) {
+      case 0:
+         addr += 0x20;
+         break;
+      case 1:
+         addr = T1ReadWord(ram, addr + 2) * 8;
+         break;
+      case 2:
+         if (returnAddr == 0xFFFFFFFF)
+            returnAddr = addr + 0x20;
+         addr = T1ReadWord(ram, addr + 2) * 8;
+         break;
+      case 3:
+         if (returnAddr != 0xFFFFFFFF) {
+            addr = returnAddr;
+            returnAddr = 0xFFFFFFFF;
+         }
+         else
+            addr += 0x20;
+         break;
+      }
+      command = T1ReadWord(ram, addr);
+      commandCounter++;
+   }
+   return 0;
+}
+
+/* Deferred VDP1 drawing under frameskip (with "Skip Polygon Drawing" off;
+ * YAB_VDP1_LAZY=0 draws every skipped frame's VDP1 at once instead, for
+ * tests). Without it every skipped frame draws VDP1 so the
+ * shown frames are exact, at the cost of drawing lists that are never
+ * shown. Here a draw in a frame that isn't shown is only captured: its
+ * command list (a snapshot of VDP1 RAM and registers) and whether it erases
+ * are kept per framebuffer, and drawn only when that buffer is about to be
+ * shown or another draw needs it as its base. The emulation side
+ * (Vdp1FakeDrawCommands, swaps, draw-end timing) runs as before. */
+static int VidsoftFbIndex(const u8 *fb) { return fb == vdp1framebuffer[1]; }
+
+/* Pages written since the last sync go stale in every copy */
+static void VidsoftVdp1FoldDirty(void)
+{
+   int w;
+   for (w = 0; w < 4; w++)
+   {
+      vdp1_ctx_stale[w] |= Vdp1RamDirty[w];
+      vdp1_job[0].stale[w] |= Vdp1RamDirty[w];
+      vdp1_job[1].stale[w] |= Vdp1RamDirty[w];
+      Vdp1RamDirty[w] = 0;
+   }
+}
+
+/* Start the VDP1 threads on a list (worker idle, caller waited): erase if
+ * asked, pick the split, wake them. */
+static void VidsoftVdp1Start(u8 *ram, const Vdp1 *regs, int erase, u8 *fb)
+{
+   int split;
+
+   vidsoft_vdp1_thread_context.ramp = ram;
+   memcpy(&vidsoft_vdp1_thread_context.regs, regs, sizeof(Vdp1));
+   vidsoft_vdp1_thread_context.back_framebuffer = fb;
+
+   {
+   YAB_PROF_BEGIN(PROF_VDP1_ERASE);
+   VidsoftVdp1SetMode(&vidsoft_vdp1_thread_context.regs);
+   if (erase)
+      VidsoftVdp1Erase(&vidsoft_vdp1_thread_context.regs, fb);
+   YAB_PROF_END(PROF_VDP1_ERASE);
+   }
+
+   if (vdp1_split_enabled < 0)
+   {
+      const char *env = getenv("YAB_VDP1_SPLIT");
+      vdp1_split_enabled = !env ? 1 : env[0] == '0' ? 0 : env[0] == '2' ? 2 : 1;
+   }
+   {
+      u64 last_ns = vidsoft_vdp1_thread_context.cpu_ns + (vdp1_last_split ? vidsoft_vdp1b_context.cpu_ns : 0);
+      YAB_PROF_BEGIN(PROF_VDP1_SCAN);
+      split = vdp1_split_enabled && (vdp1_split_enabled == 2 || last_ns >= VDP1_SPLIT_MIN_NS) &&
+              !Vdp1ListNeedsOneThread(ram, vidsoft_vdp1_thread_context.regs.addr);
+      YAB_PROF_END(PROF_VDP1_SCAN);
+   }
+   vdp1_last_split = split;
+
+   if (split)
+   {
+      /* Move the boundary towards the thread that had less work last
+       * frame. Where it lies doesn't change the picture. */
+      u64 a = vidsoft_vdp1_thread_context.cpu_ns, b = vidsoft_vdp1b_context.cpu_ns;
+      int rows = vdp1height > 0 ? vdp1height : 256;
+      if (a > b + b / 8)
+         vdp1_split_row -= 4;
+      else if (b > a + a / 8)
+         vdp1_split_row += 4;
+      if (vdp1_split_row < 8) vdp1_split_row = 8;
+      if (vdp1_split_row > rows - 8) vdp1_split_row = rows - 8;
+
+      vidsoft_vdp1_thread_context.row_lo = INT_MIN;
+      vidsoft_vdp1_thread_context.row_hi = vdp1_split_row;
+      memcpy(&vidsoft_vdp1b_context.regs, &vidsoft_vdp1_thread_context.regs, sizeof(Vdp1));
+      vidsoft_vdp1b_context.row_lo = vdp1_split_row;
+      vidsoft_vdp1b_context.row_hi = INT_MAX;
+      vdp1_frames_split++;
+   }
+   else
+   {
+      vidsoft_vdp1_thread_context.row_lo = INT_MIN;
+      vidsoft_vdp1_thread_context.row_hi = INT_MAX;
+      vdp1_frames_single++;
+   }
+
+   //start thread
+   vidsoft_vdp1_thread_context.draw_finished = 0;
+   YabFlagSet(vidsoft_vdp1_thread_context.need_draw, 1);
+   YabThreadWake(YAB_THREAD_VIDSOFT_VDP1);
+   if (split)
+   {
+      vidsoft_vdp1b_context.draw_finished = 0;
+      YabFlagSet(vidsoft_vdp1b_context.need_draw, 1);
+      YabThreadWake(YAB_THREAD_VIDSOFT_VDP1B);
+   }
+}
+
+/* Draw a framebuffer's deferred job (asynchronously, like any draw) */
+static void VidsoftVdp1RunJob(int idx)
+{
+   Vdp1Job *j = &vdp1_job[idx];
+   if (!j->pending)
+      return;
+   VidsoftWaitForVdp1Thread();
+   j->pending = 0;
+   VidsoftVdp1Start(j->ram, &j->regs, j->erase, vdp1framebuffer[idx]);
+   vdp1_st_run++;
+}
+
+static int VidsoftModeKey(const Vdp1 *regs)
+{
+   return (regs->TVMR & 3) | ((regs->FBCR & 8) << 4);
+}
+
+/* May a new erasing job replace the pending one without drawing it? Only
+ * if its erase window covers everything the old job could have changed:
+ * the old erase window and the old system clip rectangle. */
+static int VidsoftEraseCovers(const Vdp1 *nw, const Vdp1 *old, int old_erase)
+{
+   int nx0 = (nw->EWLR >> 6) & 0x1F8, ny0 = nw->EWLR & 0x1FF;
+   int nx1 = ((nw->EWRR >> 6) & 0x3F8) + 8, ny1 = (nw->EWRR & 0x1FF) + 1;
+   if (nx0 > 0 || ny0 > 0)
+      return 0;
+   if (nx1 < old->systemclipX2 + 1 || ny1 < old->systemclipY2 + 1)
+      return 0;
+   if (old_erase && (nx1 < ((old->EWRR >> 6) & 0x3F8) + 8 || ny1 < (old->EWRR & 0x1FF) + 1))
+      return 0;
+   return 1;
+}
+
+static void VidsoftVdp1Capture(int erase)
+{
+   int idx = VidsoftFbIndex(vdp1backframebuffer), other = !idx;
+   Vdp1Job *j = &vdp1_job[idx];
+
+   /* A mode change: everything pending draws in the old mode first */
+   if ((vdp1_job[other].pending && VidsoftModeKey(&vdp1_job[other].regs) != VidsoftModeKey(Vdp1Regs)))
+      VidsoftVdp1RunJob(other);
+   if (j->pending && (VidsoftModeKey(&j->regs) != VidsoftModeKey(Vdp1Regs) ||
+                      !erase || !VidsoftEraseCovers(Vdp1Regs, &j->regs, j->erase)))
+      VidsoftVdp1RunJob(idx);   /* the new draw goes on top of it */
+   else if (j->pending)
+      vdp1_st_replaced++;
+
+   /* the job's snapshot may be what the threads are drawing from */
+   if (vidsoft_vdp1_thread_context.ramp == j->ram)
+      VidsoftWaitForVdp1Thread();
+
+   YAB_PROF_BEGIN(PROF_VDP1_SNAPSHOT);
+   VidsoftVdp1FoldDirty();
+   VidsoftSyncRamCopy(j->ram, Vdp1Ram, j->stale, "VDP1 job");
+   memcpy(&j->regs, Vdp1Regs, sizeof(Vdp1));
+   YAB_PROF_END(PROF_VDP1_SNAPSHOT);
+   j->erase = erase;
+   j->pending = 1;
+   VidsoftVdp1SetMode(Vdp1Regs);
+   vdp1_st_captured++;
+}
+
+/* Called at every VBlank-OUT before the screens are drawn (vdp2.c): shown,
+ * is this frame shown; next_shown, the next one; active, skipping with
+ * exact VDP1 (lazy drawing applies). */
+void VIDSoftVdp1LazyFrame(int active, int shown, int next_shown, int draw_due)
+{
+   int front = VidsoftFbIndex(vdp1frontframebuffer), back = !front;
+
+   if (vdp1_lazy < 0)
+      vdp1_lazy = !(getenv("YAB_VDP1_LAZY") && getenv("YAB_VDP1_LAZY")[0] == '0');
+   active = active && vdp1_lazy && vidsoft_vdp1_thread_enabled;
+
+   /* Where the frame-change prediction keeps missing (Panzer Dragoon's
+    * changes come one or two frames after a draw, irregularly), each miss
+    * makes a shown frame wait for a whole VDP1 draw: drawing everything at
+    * once (exact mode) is cheaper there. More than 4 misses in 64 shown
+    * frames turns deferring off for 600 frames, then it is tried again. */
+   if (vdp1_lazy_backoff > 0)
+   {
+      vdp1_lazy_backoff--;
+      active = 0;
+   }
+   if (active && shown && ++vdp1_lazy_shown >= 64)
+   {
+      if (vdp1_lazy_misses > 4)
+      {
+         vdp1_lazy_backoff = 600;
+         vdp1_st_backoffs++;
+      }
+      vdp1_lazy_shown = vdp1_lazy_misses = 0;
+   }
+   vdp1_lazy_active = active;
+   vdp1_lazy_next_shown = next_shown;
+
+   if (!active)
+   {
+      VidsoftVdp1RunJob(back);
+      VidsoftVdp1RunJob(front);
+      vdp1_lazy_defer = 0;
+   }
+   else if (shown && vdp1_job[front].pending)
+   {
+      /* Safety net: the front buffer is about to be composited */
+      VidsoftVdp1RunJob(front);
+      vdp1_st_sync++;
+      vdp1_lazy_misses++;
+   }
+
+   /* A job drawn into the front buffer has no frame change after it to
+    * wait for it: the sprite layer reads that buffer from now on */
+   if (shown && vidsoft_vdp1_thread_context.back_framebuffer == vdp1frontframebuffer)
+      VidsoftWaitForVdp1Thread();
+
+   if (!active)
+      return;
+
+   if (next_shown)
+   {
+      /* The frame before a shown one. Will its end change frames? Then
+       * the shown frame gets the back buffer (this frame's draw, or what
+       * is pending there), else the front. */
+      int predict_swap = vdp1_since_swap + 1 >= vdp1_swap_gap;
+      if (!predict_swap)
+         VidsoftVdp1RunJob(front);
+      else if (!draw_due)
+         VidsoftVdp1RunJob(back);
+      vdp1_lazy_defer = !predict_swap;
+   }
+   else
+      vdp1_lazy_defer = 1;
+}
+
+/* At every frame change (VBlank-IN): keeps the change cadence for the
+ * prediction above */
+static void VidsoftVdp1NoteSwap(int swapped)
+{
+   if (swapped)
+   {
+      vdp1_swap_gap = vdp1_since_swap + 1;
+      vdp1_since_swap = 0;
+   }
+   else
+      vdp1_since_swap++;
+}
+
 void VIDSoftVdp1DrawStart()
 {
    if (vidsoft_vdp1_thread_enabled)
    {
-      VidsoftWaitForVdp1Thread();
+      int erase = ((Vdp1Regs->FBCR & 2) == 0) || Vdp1External.manualerase;
 
-      //take a snapshot of the vdp1 state, to be used by the thread
-      memcpy(vidsoft_vdp1_thread_context.ram, Vdp1Ram, 0x80000);
-      memcpy(&vidsoft_vdp1_thread_context.regs, Vdp1Regs, sizeof(Vdp1));
-      memcpy(vidsoft_vdp1_thread_context.back_framebuffer, vdp1backframebuffer, 0x40000);
+      /* Only a draw that erases first can later be dropped unseen (by the
+       * next erasing draw): one that draws over the buffer's old contents
+       * (Shining Force III) is needed by the next, so it is drawn now */
+      if (vdp1_lazy_active && vdp1_lazy_defer && erase)
+      {
+         VidsoftVdp1Capture(erase);
+      }
+      else
+      {
+         int idx = VidsoftFbIndex(vdp1backframebuffer);
+         /* a deferred draw the new one goes on top of */
+         if (vdp1_job[idx].pending)
+         {
+            if (erase && VidsoftModeKey(&vdp1_job[idx].regs) == VidsoftModeKey(Vdp1Regs) &&
+                VidsoftEraseCovers(Vdp1Regs, &vdp1_job[idx].regs, vdp1_job[idx].erase))
+            {
+               vdp1_job[idx].pending = 0;
+               vdp1_st_replaced++;
+            }
+            else
+               VidsoftVdp1RunJob(idx);
+         }
+         if (vdp1_job[!idx].pending && VidsoftModeKey(&vdp1_job[!idx].regs) != VidsoftModeKey(Vdp1Regs))
+            VidsoftVdp1RunJob(!idx);
 
-      VIDSoftVdp1DrawStartBody(&vidsoft_vdp1_thread_context.regs, vidsoft_vdp1_thread_context.back_framebuffer);
+         VidsoftWaitForVdp1Thread();
 
-      //start thread
-      vidsoft_vdp1_thread_context.draw_finished = 0;
-      vidsoft_vdp1_thread_context.need_draw = 1;
-      YabThreadWake(YAB_THREAD_VIDSOFT_VDP1);
+         //take a snapshot of the vdp1 state, to be used by the thread
+         {
+         YAB_PROF_BEGIN(PROF_VDP1_SNAPSHOT);
+         VidsoftVdp1FoldDirty();
+         VidsoftSyncRamCopy(vidsoft_vdp1_thread_context.ram, Vdp1Ram, vdp1_ctx_stale, "VDP1");
+         YAB_PROF_END(PROF_VDP1_SNAPSHOT);
+         }
+         VidsoftVdp1Start(vidsoft_vdp1_thread_context.ram, Vdp1Regs, erase, vdp1backframebuffer);
+         vdp1_st_eager++;
+      }
+      if (erase)
+         Vdp1External.manualerase = 0;   /* as the erase itself does */
 
       Vdp1FakeDrawCommands(Vdp1Ram, Vdp1Regs);
    }
@@ -2514,14 +3741,14 @@ typedef struct _COLOR_PARAMS
 	double r,g,b;
 } COLOR_PARAMS;
 
-COLOR_PARAMS leftColumnColor;
+VDP1_TLS COLOR_PARAMS leftColumnColor;
 
 
 
-int currentPixel;
-int currentPixelIsVisible;
-int characterWidth;
-int characterHeight;
+VDP1_TLS int currentPixel;
+VDP1_TLS int currentPixelIsVisible;
+VDP1_TLS int characterWidth;
+VDP1_TLS int characterHeight;
 
 static int getpixel(int linenumber, int currentlineindex, vdp1cmd_struct *cmd, u8 * ram) {
 
@@ -2720,6 +3947,9 @@ static void putpixel8(int x, int y, Vdp1 * regs, vdp1cmd_struct *cmd, u8 * back_
     int mesh = cmd->CMDPMOD & 0x0100;
     int SPD = ((cmd->CMDPMOD & 0x40) != 0);//show the actual color of transparent pixels if 1 (they won't be drawn transparent)
 
+    if (y2 < vdp1_row_lo || y2 >= vdp1_row_hi)
+        return;
+
     if (iPix >= (back_framebuffer + 0x40000))
         return;
 
@@ -2759,6 +3989,8 @@ static void putpixel(int x, int y, Vdp1* regs, vdp1cmd_struct * cmd, u8 * back_f
       return;
 
 	y /= vdp1interlace;
+   if (y < vdp1_row_lo || y >= vdp1_row_hi)
+      return;
    iPix = &((u16 *)back_framebuffer)[(y * vdp1width) + x];
 
    if (iPix >= (u16*)(back_framebuffer + 0x40000))
@@ -2788,14 +4020,14 @@ static void putpixel(int x, int y, Vdp1* regs, vdp1cmd_struct * cmd, u8 * back_f
 			break;
 		case 1: // shadow
 			if (*(iPix) & (1 << 15)) // only if MSB of framebuffer data is set
-				*(iPix) = alphablend16(*(iPix), 0, (1 << 7)) | (1 << 15);
+				*(iPix) = ((*iPix & 0x7BDE) >> 1) | 0x8000;
 			break;
 		case 2: // half luminance
 			*(iPix) = ((currentPixel & ~0x8421) >> 1) | (1 << 15);
 			break;
 		case 3: // half transparent
 			if ( *(iPix) & (1 << 15) )//only if MSB of framebuffer data is set 
-				*(iPix) = alphablend16( *(iPix), currentPixel, (1 << 7) ) | (1 << 15);
+				*(iPix) = (((*iPix & currentPixel & 0x7FFF) + (((*iPix ^ currentPixel) & 0x7BDE) >> 1))) | 0x8000;
 			else
 				*(iPix) = currentPixel;
 			break;
@@ -2955,7 +4187,8 @@ static int DrawLineCallback(int x, int y, int i, void *data, Vdp1* regs, vdp1cmd
 	return 0;
 }
 
-static int DrawLine(int x1, int y1, int x2, int y2, int greedy, double linenumber, double texturestep, double xredstep, double xgreenstep, double xbluestep, Vdp1* regs, vdp1cmd_struct *cmd, u8 * ram, u8* back_framebuffer)
+/* not inlined: drawQuad() only falls back to it for rare modes */
+static __attribute__((noinline)) int DrawLine(int x1, int y1, int x2, int y2, int greedy, double linenumber, double texturestep, double xredstep, double xgreenstep, double xbluestep, Vdp1* regs, vdp1cmd_struct *cmd, u8 * ram, u8* back_framebuffer)
 {
 	DrawLineData data;
 
@@ -2968,6 +4201,585 @@ static int DrawLine(int x1, int y1, int x2, int y2, int greedy, double linenumbe
 	data.previousStep = 123456789;
 
    return iterateOverLine(x1, y1, x2, y2, greedy, &data, DrawLineCallback, regs, cmd, ram, back_framebuffer);
+}
+
+/* Quad drawing without the per-pixel overhead of DrawLine(): the command's
+ * settings are decoded once (Vdp1QuadSetup), the line walk calls the pixel
+ * code directly, and clipping is only tested per pixel when a line is not
+ * entirely inside the clip area. Everything else follows getpixel() and
+ * putpixel() exactly, including the floating point steps, so the output is
+ * the same. Only for a 16-bit framebuffer and colour modes 0-6. */
+typedef struct {
+   u32 characterAddress;
+   u16 colorbank;
+   u32 colorlut;
+   int SPD, endcodesEnabled, flip, colormode, isTextured, untexturedColor;
+   int mesh, drawmode, msbon;
+   int dil_skip;     /* y parity that CheckDil() rejects, or -1 */
+   int user_clip;    /* user clipping: 0 off, 1 inside, 2 outside */
+} Vdp1QuadState;
+
+static int Vdp1QuadSetup(Vdp1QuadState *st, Vdp1 *regs, vdp1cmd_struct *cmd)
+{
+   int shape = cmd->CMDCTRL & 0x7;
+
+   st->colormode = (cmd->CMDPMOD >> 3) & 0x7;
+   if (vdp1pixelsize != 2 || st->colormode == 7)
+      return 0;
+   st->characterAddress = cmd->CMDSRCA << 3;
+   st->colorbank = cmd->CMDCOLR;
+   st->colorlut = (u32)st->colorbank << 3;
+   st->SPD = ((cmd->CMDPMOD & 0x40) != 0);
+   st->endcodesEnabled = ((cmd->CMDPMOD & 0x80) == 0) ? 1 : 0;
+   st->flip = (cmd->CMDCTRL & 0x30) >> 4;
+   st->isTextured = !(shape == 4 || shape == 5 || shape == 6);
+   st->untexturedColor = st->isTextured ? 0 : cmd->CMDCOLR;
+   st->mesh = cmd->CMDPMOD & 0x0100;
+   st->drawmode = cmd->CMDPMOD & 0x7;
+   st->msbon = cmd->CMDPMOD & (1 << 15);
+   st->dil_skip = -1;
+   if (vdp1interlace == 2)
+      st->dil_skip = ((regs->FBCR >> 2) & 1) ? 0 : 1;
+   st->user_clip = 0;
+   if (cmd->CMDPMOD & 0x0400)
+      st->user_clip = (((cmd->CMDPMOD >> 9) & 0x3) == 0x3) ? 2 : 1;
+   return 1;
+}
+
+/* the drawing modes of putpixel() */
+static INLINE __attribute__((always_inline)) int Vdp1QuadPut(const int drawmode, const int colormode, const int SPD,
+   u16 *iPix, int cp, double lr, double lg, double lb)
+{
+   switch (drawmode)
+   {
+   case 0: // replace
+      if (!((cp == 0) && !SPD))
+         *iPix = cp;
+      break;
+   case 1: // shadow
+      if (*iPix & (1 << 15))
+         *iPix = ((*iPix & 0x7BDE) >> 1) | 0x8000;
+      break;
+   case 2: // half luminance
+      *iPix = ((cp & ~0x8421) >> 1) | (1 << 15);
+      break;
+   case 3: // half transparent
+      if (*iPix & (1 << 15))
+         *iPix = (((*iPix & cp & 0x7FFF) + (((*iPix ^ cp) & 0x7BDE) >> 1))) | 0x8000;
+      else
+         *iPix = cp;
+      break;
+   case 4: // gouraud
+      if (colormode != 5 && colormode != 1 && (int)lg == 16 && (int)lb == 16)
+      {
+         int c = (int)(lr - 0x10);
+         if (c < 0) c = 0;
+         cp = cp + c;
+         *iPix = cp;
+         break;
+      }
+      *iPix = COLOR(gouraudAdjust(cp & 0x001F, (int)lr),
+                    gouraudAdjust((cp & 0x03e0) >> 5, (int)lg),
+                    gouraudAdjust((cp & 0x7c00) >> 10, (int)lb));
+      break;
+   default:
+      *iPix = alphablend16(COLOR((int)lr, (int)lg, (int)lb), cp, (1 << 7)) | (1 << 15);
+      break;
+   }
+   return cp;
+}
+
+/* points of the line being drawn, in iterateOverLine() order, packed as
+ * x | y << 16 (both stay within +-2000) */
+static u32 quad_pt_buf[2][2048];
+#define QUAD_PT(X, Y) (((u32)(X) & 0xFFFF) | ((u32)(Y) << 16))
+
+/* per-line values for QuadPlotPoints(), passed by value so they stay in
+ * registers */
+typedef struct {
+   const u32 *pts;
+   u16 *fb;
+   u8 *ram;
+   Vdp1 *regs;
+   vdp1cmd_struct *cmd;
+   u32 rowaddr, colorbank, colorlut;
+   int colormode, drawmode, flip, SPD, endcodes, isTextured, untexturedColor;
+   int mesh, msbon, dil_skip, cw, interlace, width, noclip, n, user_clip;
+   int step_q, step_r, linelength, row_lo, row_hi;
+   double texturestep, xredstep, xgreenstep, xbluestep;
+} QuadLine;
+
+typedef struct {
+   int cp, vis;
+   double lr, lg, lb;
+} QuadPen;
+
+/* DrawLineCallback(), i.e. getpixel() then putpixel(), for each point of a
+ * line. CM and DM are a constant colour and drawing mode for a specialised
+ * copy, or -1 to read them from the line. */
+static INLINE __attribute__((always_inline)) QuadPen QuadPlotPoints(const int CM, const int DM, const QuadLine L, QuadPen pen)
+{
+   const int colormode = CM >= 0 ? CM : L.colormode;
+   const int drawmode = DM >= 0 ? DM : L.drawmode;
+   int k, cp = pen.cp, vis = pen.vis;
+   double lr = pen.lr, lg = pen.lg, lb = pen.lb;
+   int endcodesdetected = 0, previousStep = 123456789;
+   int quot = 0, rem = 0;
+
+   for (k = 0; k < L.n; k++)
+   {
+      const int px = (s16)L.pts[k], py = (s32)L.pts[k] >> 16;
+      int currentStep, endcode = 0;
+      u32 idx;
+
+      lr += L.xredstep; lg += L.xgreenstep; lb += L.xbluestep;
+      /* currentStep = (int)k * texturestep, see DrawLineQuad() */
+      if (rem == 0 && L.step_r != 0)
+         currentStep = (int)k * L.texturestep;
+      else
+         currentStep = quot;
+      quot += L.step_q;
+      rem += L.step_r;
+      if (rem >= L.linelength)
+      {
+         rem -= L.linelength;
+         quot++;
+      }
+      idx = (L.flip & 1) ? (u32)(L.cw - currentStep - 1) : (u32)currentStep;
+
+      /* Without end codes the texel only matters if the point is plotted,
+       * so check that first (the same tests as below, IsClipped() inlined) */
+      if (!L.endcodes)
+      {
+         int yy, pos, clipped;
+         if ((py & 1) == L.dil_skip)
+            continue;
+         yy = L.interlace == 2 ? py / 2 : py;
+         pos = (yy * L.width) + px;
+         if (!(yy >= L.row_lo && yy < L.row_hi && pos < 0x20000) || (L.mesh && ((px ^ yy) & 1)))
+            continue;
+         if (!L.noclip)
+         {
+            clipped = !(px >= 0 && px <= L.regs->systemclipX2 && py >= 0 && py <= L.regs->systemclipY2);
+            if (L.user_clip)
+            {
+               int uc = !(px >= L.regs->userclipX1 && px <= L.regs->userclipX2 &&
+                          py >= L.regs->userclipY1 && py <= L.regs->userclipY2);
+               if (L.user_clip == 2)
+                  uc = !uc;
+               clipped = clipped || uc;
+            }
+            if (clipped)
+               continue;
+         }
+      }
+
+      switch (colormode)
+      {
+      case 0:
+         cp = Vdp1ReadPattern16(L.rowaddr, idx, L.ram);
+         if (L.endcodes && cp == 0xf) { endcode = 1; break; }
+         if (!((cp == 0) && !L.SPD)) cp = (L.colorbank & 0xfff0) | cp;
+         vis = 0xf;
+         break;
+      case 1:
+         cp = Vdp1ReadPattern16(L.rowaddr, idx, L.ram);
+         if (L.endcodes && cp == 0xf) { endcode = 1; break; }
+         if (!(cp == 0 && !L.SPD)) cp = T1ReadWord(L.ram, (cp * 2 + L.colorlut) & 0x7FFFF);
+         vis = 0xffff;
+         break;
+      case 2:
+         cp = Vdp1ReadPattern64(L.rowaddr, idx, L.ram);
+         if (L.endcodes && cp == 63) cp = 0;
+         if (!((cp == 0) && !L.SPD)) cp = (L.colorbank & 0xffc0) | cp;
+         vis = 0x3f;
+         break;
+      case 3:
+         cp = Vdp1ReadPattern128(L.rowaddr, idx, L.ram);
+         if (L.endcodes && cp == 0xff) { endcode = 1; break; }
+         if (!((cp == 0) && !L.SPD)) cp = (L.colorbank & 0xff80) | cp;
+         vis = 0x7f;
+         break;
+      case 4:
+         cp = Vdp1ReadPattern256(L.rowaddr, idx, L.ram);
+         if (L.endcodes && cp == 0xff) { endcode = 1; break; }
+         vis = 0xff;
+         if (!((cp == 0) && !L.SPD)) cp = (L.colorbank & 0xff00) | cp;
+         break;
+      default:
+         cp = Vdp1ReadPattern64k(L.rowaddr, idx, L.ram);
+         if (L.endcodes && cp == 0x7fff) { endcode = 1; break; }
+         if (!(cp & 0x8000) && !L.SPD) cp = 0;
+         vis = 0xffff;
+         break;
+      }
+
+      if (endcode)
+      {
+         if (currentStep != previousStep)
+         {
+            previousStep = currentStep;
+            endcodesdetected++;
+         }
+      }
+      else
+      {
+         if (!L.isTextured) cp = L.untexturedColor;
+         if ((py & 1) != L.dil_skip) /* CheckDil() */
+         {
+            int yy = L.interlace == 2 ? py / 2 : py; /* py / vdp1interlace without a divide */
+            int pos = (yy * L.width) + px;
+            if (yy >= L.row_lo && yy < L.row_hi && pos < 0x20000 && !(L.mesh && ((px ^ yy) & 1)) &&
+                (L.noclip || !IsClipped(px, py, L.regs, L.cmd)))
+            {
+               if (L.msbon && cp)
+                  L.fb[pos] |= 0x8000;
+               else if (L.SPD || (cp & vis))
+                  cp = Vdp1QuadPut(drawmode, colormode, L.SPD, &L.fb[pos], cp, lr, lg, lb);
+            }
+         }
+      }
+      /* the last point is plotted after iterateOverLine()'s loop, where
+       * DrawLineCallback()'s result no longer matters */
+      if (endcodesdetected == 2 && k < L.n - 1)
+         break;
+   }
+
+   pen.cp = cp;
+   pen.vis = vis;
+   pen.lr = lr;
+   pen.lg = lg;
+   pen.lb = lb;
+   return pen;
+}
+
+/* The common case of 3D games (NiGHTS: 92% of the points drawn): a 16-colour
+ * texture through a colour lookup table, Gouraud shaded, the whole line
+ * inside the clip window, no mesh, end codes, MSB-on or double interlace.
+ * Gives exactly what QuadPlotPoints(1, 4, ...) gives; that copy keeps the
+ * tests for all the other cases and runs out of registers (about 15 values
+ * reloaded from the stack per point, ~130 cycles a point on the Miyoo). */
+static QuadPen QuadPlotCM1Gouraud(const QuadLine *Lp, QuadPen pen)
+{
+   const u32 *const pts = Lp->pts;
+   u16 *const fb = Lp->fb;
+   const u8 *const ram = Lp->ram;
+   const u32 rowaddr = Lp->rowaddr, colorlut = Lp->colorlut;
+   const int SPD = Lp->SPD, width = Lp->width, row_lo = Lp->row_lo, row_hi = Lp->row_hi;
+   const int flip = Lp->flip & 1, cwm1 = Lp->cw - 1;
+   const int step_q = Lp->step_q, step_r = Lp->step_r, linelength = Lp->linelength, n = Lp->n;
+   const double texturestep = Lp->texturestep;
+   const double rs = Lp->xredstep, gs = Lp->xgreenstep, bs = Lp->xbluestep;
+   double lr = pen.lr, lg = pen.lg, lb = pen.lb;
+   int cp = pen.cp, k, quot = 0, rem = 0;
+
+   for (k = 0; k < n; k++)
+   {
+      const u32 pt = pts[k];
+      const int px = (s16)pt, py = (s32)pt >> 16;
+      int cs, pos;
+      u32 idx, dots;
+
+      lr += rs; lg += gs; lb += bs;
+      /* currentStep = (int)k * texturestep, see DrawLineQuad() */
+      if (rem == 0 && step_r != 0)
+         cs = (int)k * texturestep;
+      else
+         cs = quot;
+      quot += step_q;
+      rem += step_r;
+      if (rem >= linelength)
+      {
+         rem -= linelength;
+         quot++;
+      }
+      pos = py * width + px;
+      if (py < row_lo || py >= row_hi || pos >= 0x20000)
+         continue;
+      idx = flip ? (u32)(cwm1 - cs) : (u32)cs;
+      dots = ram[(rowaddr + (idx >> 1)) & 0x7FFFF];
+      cp = (idx & 1) ? (dots & 0xF) : (dots >> 4);
+      if (cp == 0 && !SPD)
+         continue;                                     /* transparent */
+      cp = T1ReadWord((u8 *)ram, (cp * 2 + colorlut) & 0x7FFFF);
+      if (SPD || cp)
+         fb[pos] = COLOR(gouraudAdjust(cp & 0x001F, (int)lr),
+                         gouraudAdjust((cp & 0x03e0) >> 5, (int)lg),
+                         gouraudAdjust((cp & 0x7c00) >> 10, (int)lb));
+   }
+
+   pen.cp = cp;
+   pen.vis = 0xffff;
+   pen.lr = lr;
+   pen.lg = lg;
+   pen.lb = lb;
+   return pen;
+}
+
+/* Replace mode (and CM1 Gouraud) without end codes, mesh, MSB-on, double
+ * interlace or user clipping, on lines that may cross the clip window: the
+ * walk is monotonic in x and y, so the points inside the system clip
+ * rectangle and this thread's rows are one run [k0, k1]: only those points
+ * are plotted, with the texture step at k0 computed directly. Gives exactly what
+ * QuadPlotPoints() gives; Panzer Dragoon's large 256-colour walls are
+ * mostly such lines. */
+static INLINE __attribute__((always_inline)) QuadPen QuadPlotLeanBody(const int CM, const int DM, const QuadLine *Lp, QuadPen pen)
+{
+   const u32 *const pts = Lp->pts;
+   u16 *const fb = Lp->fb;
+   const u8 *const ram = Lp->ram;
+   const u32 rowaddr = Lp->rowaddr, colorlut = Lp->colorlut, colorbank = Lp->colorbank;
+   const int SPD = Lp->SPD, width = Lp->width, n = Lp->n;
+   const int flip = Lp->flip & 1, cwm1 = Lp->cw - 1;
+   const int step_q = Lp->step_q, step_r = Lp->step_r, linelength = Lp->linelength;
+   const double texturestep = Lp->texturestep;
+   const double rs = Lp->xredstep, gs = Lp->xgreenstep, bs = Lp->xbluestep;
+   double lr = pen.lr, lg = pen.lg, lb = pen.lb;
+   int cp = pen.cp, k, k0 = 0, k1 = n - 1, quot, rem, read = 0;
+   int ylo = Lp->row_lo, yhi = Lp->row_hi - 1;
+   const int xhi = Lp->regs->systemclipX2;
+
+   if (Lp->regs->systemclipY2 < yhi)
+      yhi = Lp->regs->systemclipY2;
+   if (ylo < 0)
+      ylo = 0;
+#define LEAN_IN(pt) ((s16)(pt) >= 0 && (s16)(pt) <= xhi && ((s32)(pt) >> 16) >= ylo && ((s32)(pt) >> 16) <= yhi)
+   while (k0 < n && !LEAN_IN(pts[k0]))
+      k0++;
+   while (k1 >= k0 && !LEAN_IN(pts[k1]))
+      k1--;
+#undef LEAN_IN
+   if (k0 > k1)
+      k1 = k0 - 1;     /* nothing plotted; still advance the colours */
+
+   /* the texture step at k0, as the full loop would have counted it */
+   quot = k0 * step_q + (k0 * step_r) / (linelength > 0 ? linelength : 1);
+   rem = (k0 * step_r) % (linelength > 0 ? linelength : 1);
+
+   /* Replace mode has no Gouraud steps (they are 0, the colours stay as
+    * they are). With Gouraud the colours are summed in one loop over every
+    * point, as QuadPlotPoints() does: the core is built with -ffast-math, and
+    * split loops get summed in a different order (different low bits, and
+    * (int)lr can land on the other side of an integer). */
+   for (k = DM == 4 ? 0 : k0; k <= (DM == 4 ? n - 1 : k1); k++)
+   {
+      u32 pt;
+      int px, py;
+      int cs, pos;
+      u32 idx;
+
+      if (DM == 4)
+      {
+         lr += rs; lg += gs; lb += bs;
+         if (k < k0 || k > k1)
+            continue;
+      }
+      pt = pts[k];
+      px = (s16)pt;
+      py = (s32)pt >> 16;
+      if (rem == 0 && step_r != 0)
+         cs = (int)k * texturestep;
+      else
+         cs = quot;
+      quot += step_q;
+      rem += step_r;
+      if (rem >= linelength)
+      {
+         rem -= linelength;
+         quot++;
+      }
+      pos = py * width + px;
+      if (pos >= 0x20000)
+         continue;
+      idx = flip ? (u32)(cwm1 - cs) : (u32)cs;
+      read = 1;
+      if (CM == 0 || CM == 1)
+      {
+         u32 dots = ram[(rowaddr + (idx >> 1)) & 0x7FFFF];
+         cp = (idx & 1) ? (dots & 0xF) : (dots >> 4);
+         if (cp == 0 && !SPD)
+            continue;
+         if (CM == 0)
+            cp = (colorbank & 0xfff0) | cp;
+         else
+            cp = T1ReadWord((u8 *)ram, (cp * 2 + colorlut) & 0x7FFFF);
+         if (!(SPD || (cp & (CM == 0 ? 0xf : 0xffff))))
+            continue;
+      }
+      else /* CM == 4 */
+      {
+         cp = ram[(rowaddr + idx) & 0x7FFFF];
+         if (cp == 0 && !SPD)
+            continue;
+         cp = (colorbank & 0xff00) | cp;
+         if (!(SPD || (cp & 0xff)))
+            continue;
+      }
+      if (DM == 0)
+         fb[pos] = cp;
+      else
+         fb[pos] = COLOR(gouraudAdjust(cp & 0x001F, (int)lr),
+                         gouraudAdjust((cp & 0x03e0) >> 5, (int)lg),
+                         gouraudAdjust((cp & 0x7c00) >> 10, (int)lb));
+   }
+   pen.cp = cp;
+   if (read)  /* as QuadPlotPoints(): set by the texel reads only */
+      pen.vis = CM == 0 ? 0xf : CM == 4 ? 0xff : 0xffff;
+   pen.lr = lr;
+   pen.lg = lg;
+   pen.lb = lb;
+   return pen;
+}
+
+static QuadPen QuadPlotLeanCM0(const QuadLine *Lp, QuadPen pen) { return QuadPlotLeanBody(0, 0, Lp, pen); }
+static QuadPen QuadPlotLeanCM1(const QuadLine *Lp, QuadPen pen) { return QuadPlotLeanBody(1, 0, Lp, pen); }
+static QuadPen QuadPlotLeanCM4(const QuadLine *Lp, QuadPen pen) { return QuadPlotLeanBody(4, 0, Lp, pen); }
+static QuadPen QuadPlotLeanCM1G(const QuadLine *Lp, QuadPen pen) { return QuadPlotLeanBody(1, 4, Lp, pen); }
+
+static void DrawLineQuad(const Vdp1QuadState *st, int x1, int y1, int x2, int y2, double linenumber, double texturestep,
+   int linelength, double xredstep, double xgreenstep, double xbluestep, Vdp1 *regs, vdp1cmd_struct *cmd, u8 *ram, u8 *back_framebuffer)
+{
+   /* Everything used per pixel is a local: the texture reads go through a
+    * u8 pointer, after which the compiler would otherwise have to reload
+    * every global and struct field */
+   u16 *const fb = (u16 *)back_framebuffer;
+   u32 *const quad_pt = quad_pt_buf[vdp1_tid];
+   const int colormode = st->colormode, flip = st->flip, SPD = st->SPD;
+   const int endcodes = st->isTextured && st->endcodesEnabled;
+   const int isTextured = st->isTextured, untexturedColor = st->untexturedColor;
+   const int mesh = st->mesh, msbon = st->msbon, dil_skip = st->dil_skip;
+   const u32 colorbank = st->colorbank, colorlut = st->colorlut;
+   const int cw = characterWidth, interlace = vdp1interlace, width = vdp1width;
+   int line = (int)linenumber;
+   u32 rowaddr;
+   int a, ax, ay, dx, dy, n;
+   int noclip;
+   /* currentStep = (int)k * texturestep without floating point: when
+    * texturestep is cw / linelength, k * cw / linelength is tracked as
+    * quotient and remainder. The double product can only land on the other
+    * side of an integer when the exact value is one (remainder 0), so only
+    * then is it computed as before. */
+   const int int_step = linelength > 0 && texturestep == (double)cw / linelength;
+   const int step_q = int_step ? cw / linelength : 0, step_r = int_step ? cw % linelength : 0;
+
+   if (flip & 2)
+      line = characterHeight - line - 1;
+   switch (colormode)
+   {
+   case 0: case 1: rowaddr = st->characterAddress + (line * (cw >> 1)); break;
+   case 2: case 3: case 4: rowaddr = st->characterAddress + (line * cw); break;
+   default: rowaddr = st->characterAddress + (line * cw * 2); break;
+   }
+
+   {
+      /* every point the walk visits lies within the endpoints' box */
+      int minx = x1 < x2 ? x1 : x2, maxx = x1 < x2 ? x2 : x1;
+      int miny = y1 < y2 ? y1 : y2, maxy = y1 < y2 ? y2 : y1;
+      noclip = minx >= 0 && maxx <= regs->systemclipX2 && miny >= 0 && maxy <= regs->systemclipY2;
+      if (st->user_clip == 1)
+         noclip = noclip && minx >= regs->userclipX1 && maxx <= regs->userclipX2 &&
+                  miny >= regs->userclipY1 && maxy <= regs->userclipY2;
+      else if (st->user_clip == 2)
+         noclip = 0;
+   }
+
+   /* the walk of iterateOverLine() with greedy set; point k is plotted with i == k */
+   dx = x2 - x1;
+   dy = y2 - y1;
+   ax = (dx >= 0) ? 1 : -1;
+   ay = (dy >= 0) ? 1 : -1;
+   a = 0;
+   n = 0;
+
+   if (abs(dx) > 999 || abs(dy) > 999)
+      return;
+
+   if (abs(dx) > abs(dy)) {
+      if (ax != ay) dx = -dx;
+      for (; x1 != x2; x1 += ax) {
+         quad_pt[n++] = QUAD_PT(x1, y1);
+         a += dy;
+         if (abs(a) >= abs(dx)) {
+            a -= dx;
+            y1 += ay;
+            if (ax == ay) { quad_pt[n++] = QUAD_PT(x1 + ax, y1 - ay); }
+            else { quad_pt[n++] = QUAD_PT(x1, y1); }
+         }
+      }
+   } else {
+      if (ax != ay) dy = -dy;
+      for (; y1 != y2; y1 += ay) {
+         quad_pt[n++] = QUAD_PT(x1, y1);
+         a += dx;
+         if (abs(a) >= abs(dy)) {
+            a -= dy;
+            x1 += ax;
+            if (ay == ax) { quad_pt[n++] = QUAD_PT(x1, y1); }
+            else { quad_pt[n++] = QUAD_PT(x1 - ax, y1 + ay); }
+         }
+      }
+   }
+   quad_pt[n++] = QUAD_PT(x2, y2);
+
+   {
+      QuadLine L;
+      QuadPen pen;
+      int lean;
+
+      if (!int_step)
+      {
+         DrawLine(x1, y1, x2, y2, 1, linenumber, texturestep, xredstep, xgreenstep, xbluestep, regs, cmd, ram, back_framebuffer);
+         return;
+      }
+      L.pts = quad_pt; L.fb = fb; L.ram = ram; L.regs = regs; L.cmd = cmd;
+      L.rowaddr = rowaddr; L.colorbank = colorbank; L.colorlut = colorlut;
+      L.colormode = colormode; L.drawmode = st->drawmode; L.flip = flip; L.SPD = SPD;
+      L.endcodes = endcodes; L.isTextured = isTextured; L.untexturedColor = untexturedColor;
+      L.mesh = mesh; L.msbon = msbon; L.dil_skip = dil_skip; L.cw = cw;
+      L.interlace = interlace; L.width = width; L.noclip = noclip; L.n = n; L.user_clip = st->user_clip;
+      L.step_q = step_q; L.step_r = step_r; L.linelength = linelength;
+      L.row_lo = vdp1_row_lo; L.row_hi = vdp1_row_hi;
+      L.texturestep = texturestep; L.xredstep = xredstep; L.xgreenstep = xgreenstep; L.xbluestep = xbluestep;
+      pen.cp = currentPixel; pen.vis = currentPixelIsVisible;
+      pen.lr = leftColumnColor.r; pen.lg = leftColumnColor.g; pen.lb = leftColumnColor.b;
+
+      /* the lean copies: no end codes, mesh, MSB-on or double interlace, and
+       * user clipping only when the whole line is inside it */
+      lean = !L.endcodes && !L.mesh && !L.msbon && L.dil_skip < 0 && L.isTextured &&
+             (L.noclip || !L.user_clip);
+
+      /* specialised copies for the common colour and drawing modes */
+      switch (colormode * 8 + L.drawmode)
+      {
+      case 0 * 8 + 0:
+         pen = lean ? QuadPlotLeanCM0(&L, pen) : QuadPlotPoints(0, 0, L, pen);
+         break;
+      case 0 * 8 + 4: pen = QuadPlotPoints(0, 4, L, pen); break;
+      case 1 * 8 + 0:
+         pen = lean ? QuadPlotLeanCM1(&L, pen) : QuadPlotPoints(1, 0, L, pen);
+         break;
+      case 1 * 8 + 4:
+         if (lean && L.noclip)
+            pen = QuadPlotCM1Gouraud(&L, pen);
+         else if (lean)
+            pen = QuadPlotLeanCM1G(&L, pen);
+         else
+            pen = QuadPlotPoints(1, 4, L, pen);
+         break;
+      case 4 * 8 + 0:
+         pen = lean ? QuadPlotLeanCM4(&L, pen) : QuadPlotPoints(4, 0, L, pen);
+         break;
+      case 5 * 8 + 0: pen = QuadPlotPoints(5, 0, L, pen); break;
+      case 5 * 8 + 4: pen = QuadPlotPoints(5, 4, L, pen); break;
+      default:        pen = QuadPlotPoints(-1, -1, L, pen); break;
+      }
+
+      currentPixel = pen.cp;
+      currentPixelIsVisible = pen.vis;
+      leftColumnColor.r = pen.lr;
+      leftColumnColor.g = pen.lg;
+      leftColumnColor.b = pen.lb;
+   }
 }
 
 static INLINE double interpolate(double start, double end, int numberofsteps) {
@@ -2999,10 +4811,10 @@ typedef union _COLOR { // xbgr x555
 	u16 value;
 } COLOR;
 
-COLOR gouraudA;
-COLOR gouraudB;
-COLOR gouraudC;
-COLOR gouraudD;
+VDP1_TLS COLOR gouraudA;
+VDP1_TLS COLOR gouraudB;
+VDP1_TLS COLOR gouraudC;
+VDP1_TLS COLOR gouraudD;
 
 static void gouraudTable(u8* ram, Vdp1* regs, vdp1cmd_struct * cmd)
 {
@@ -3018,10 +4830,7 @@ static void gouraudTable(u8* ram, Vdp1* regs, vdp1cmd_struct * cmd)
    gouraudD.value = T1ReadWord(ram, gouraudTableAddress + 6);
 }
 
-int xleft[1000];
-int yleft[1000];
-int xright[1000];
-int yright[1000];
+static int xleft_buf[2][1000], yleft_buf[2][1000], xright_buf[2][1000], yright_buf[2][1000];
 
 static int
 storeLineCoords(int x, int y, int i, void *arrays, Vdp1* regs, vdp1cmd_struct * cmd, u8* ram, u8* back_framebuffer) {
@@ -3083,6 +4892,8 @@ static void drawQuad(s16 tl_x, s16 tl_y, s16 bl_x, s16 bl_y, s16 tr_x, s16 tr_y,
 	int total;
 	int i;
 	int *intarrays[2];
+	int *const xleft = xleft_buf[vdp1_tid], *const yleft = yleft_buf[vdp1_tid];
+	int *const xright = xright_buf[vdp1_tid], *const yright = yright_buf[vdp1_tid];
 
 	COLOR_PARAMS topLeftToBottomLeftColorStep = {0,0,0}, topRightToBottomRightColorStep = {0,0,0};
 		
@@ -3093,11 +4904,39 @@ static void drawQuad(s16 tl_x, s16 tl_y, s16 bl_x, s16 bl_y, s16 tr_x, s16 tr_y,
 	//a lookup table for the gouraud colors
 	COLOR colors[4];
 
+	Vdp1QuadState quad_state;
+	int quad_fast;
+
    if (is_pre_clipped(tl_x, tl_y, bl_x, bl_y, tr_x, tr_y, br_x, br_y, regs))
       return;
 
+   {
+      /* every point drawn lies within the corners' box: nothing to do if
+       * that is all in rows another thread draws */
+      int miny = tl_y, maxy = tl_y;
+      if (bl_y < miny) miny = bl_y; if (bl_y > maxy) maxy = bl_y;
+      if (tr_y < miny) miny = tr_y; if (tr_y > maxy) maxy = tr_y;
+      if (br_y < miny) miny = br_y; if (br_y > maxy) maxy = br_y;
+      if (VDP1_ROW(maxy) < vdp1_row_lo || VDP1_ROW(miny) >= vdp1_row_hi)
+      {
+         /* Line and polyline commands take their first Gouraud colours
+          * from the table the previous command loaded (gouraudLineSetup()'s
+          * arguments are read before it loads its own). Load it here too, as
+          * a thread that draws all rows would, or the colours depend on
+          * where the VDP1 split row lies (it moves with timing: Panzer
+          * Dragoon's reticle lines changed colour now and then). */
+         characterWidth = ((cmd->CMDSIZE >> 8) & 0x3F) * 8;
+         characterHeight = cmd->CMDSIZE & 0xFF;
+         if ((cmd->CMDPMOD & (1 << 2)) &&   /* drawQuad() returns before it for huge shapes */
+             !(abs(bl_x - tl_x) > 999 || abs(bl_y - tl_y) > 999 || abs(br_x - tr_x) > 999 || abs(br_y - tr_y) > 999))
+            gouraudTable(ram, regs, cmd);
+         return;
+      }
+   }
+
 	characterWidth = ((cmd->CMDSIZE >> 8) & 0x3F) * 8;
    characterHeight = cmd->CMDSIZE & 0xFF;
+   quad_fast = Vdp1QuadSetup(&quad_state, regs, cmd);
 
 	intarrays[0] = xleft; intarrays[1] = yleft;
    totalleft = iterateOverLine(tl_x, tl_y, bl_x, bl_y, 0, intarrays, storeLineCoords, regs, cmd, ram, back_framebuffer);
@@ -3150,13 +4989,33 @@ static void drawQuad(s16 tl_x, s16 tl_y, s16 bl_x, s16 bl_y, s16 tr_x, s16 tr_y,
 
 		COLOR_PARAMS leftToRightStep = {0,0,0};
 
-		//get the length of the line we are about to draw
-		xlinelength = iterateOverLine(
-			xleft[(int)(i*leftLineStep)],
-			yleft[(int)(i*leftLineStep)],
-			xright[(int)(i*rightLineStep)],
-			yright[(int)(i*rightLineStep)],
-         1, NULL, NULL, regs, cmd, ram, back_framebuffer);
+		{
+			/* skip lines that are all in rows another thread draws */
+			int ya = yleft[(int)(i*leftLineStep)], yb = yright[(int)(i*rightLineStep)];
+			int miny = ya < yb ? ya : yb, maxy = ya < yb ? yb : ya;
+			if (VDP1_ROW(maxy) < vdp1_row_lo || VDP1_ROW(miny) >= vdp1_row_hi)
+				continue;
+			/* and, on the fast path, lines that lie outside the system
+			 * clipping area: every point of the walk is within the
+			 * endpoints' box, so none would be plotted, and nothing a line
+			 * computes carries over to the next one there */
+			if (quad_fast)
+			{
+				int xa = xleft[(int)(i*leftLineStep)], xb = xright[(int)(i*rightLineStep)];
+				int minx = xa < xb ? xa : xb, maxx = xa < xb ? xb : xa;
+				if (maxx < 0 || minx > regs->systemclipX2 || maxy < 0 || miny > regs->systemclipY2)
+					continue;
+			}
+		}
+
+		/* the length of the line: the number of points iterateOverLine()
+		 * visits with greedy set, which is |dx| + |dy| + 1 (it steps along
+		 * the major axis and adds a point for every minor step) */
+		{
+			int ldx = abs(xright[(int)(i*rightLineStep)] - xleft[(int)(i*leftLineStep)]);
+			int ldy = abs(yright[(int)(i*rightLineStep)] - yleft[(int)(i*leftLineStep)]);
+			xlinelength = (ldx > 999 || ldy > 999) ? INT_MAX : ldx + ldy + 1;
+		}
 
 		//so from 0 to the width of the texture / the length of the line is how far we need to step
 		xtexturestep=interpolate(0,characterWidth,xlinelength);
@@ -3185,6 +5044,20 @@ static void drawQuad(s16 tl_x, s16 tl_y, s16 bl_x, s16 bl_y, s16 tr_x, s16 tr_y,
 			leftToRightStep.b = interpolate(leftColumnColor.b,rightColumnColor.b,xlinelength);
 		}
 
+		if (quad_fast)
+			DrawLineQuad(&quad_state,
+				xleft[(int)(i*leftLineStep)],
+				yleft[(int)(i*leftLineStep)],
+				xright[(int)(i*rightLineStep)],
+				yright[(int)(i*rightLineStep)],
+				ytexturestep*i,
+				xtexturestep,
+				xlinelength,
+				leftToRightStep.r,
+				leftToRightStep.g,
+				leftToRightStep.b,
+				regs, cmd, ram, back_framebuffer);
+		else
 		DrawLine(
 			xleft[(int)(i*leftLineStep)],
 			yleft[(int)(i*leftLineStep)],
@@ -3448,6 +5321,7 @@ void VIDSoftVdp1ReadFrameBuffer(u32 type, u32 addr, void * out)
 {
    u32 val;
 
+   VidsoftVdp1RunJob(VidsoftFbIndex(vdp1backframebuffer));
    VidsoftWaitForVdp1Thread();
 
    switch (type)
@@ -3484,6 +5358,7 @@ void VIDSoftVdp1ReadFrameBuffer(u32 type, u32 addr, void * out)
 
 void VIDSoftVdp1WriteFrameBuffer(u32 type, u32 addr, u32 val)
 {
+   VidsoftVdp1RunJob(VidsoftFbIndex(vdp1backframebuffer));
    VidsoftWaitForVdp1Thread();
 
    switch (type)
@@ -3521,6 +5396,7 @@ int VIDSoftVdp2Reset(void)
 void VIDSoftVdp2DrawStart(void)
 {
    int titanblendmode = TITAN_BLEND_TOP;
+   if (vdp2_skip_draw) return;
    if (Vdp2Regs->CCCTL & 0x100) titanblendmode = TITAN_BLEND_ADD;
    else if (Vdp2Regs->CCCTL & 0x200) titanblendmode = TITAN_BLEND_BOTTOM;
    TitanSetBlendingMode(titanblendmode);
@@ -3547,6 +5423,24 @@ void VIDSoftVdp2DrawStart(void)
 //////////////////////////////////////////////////////////////////////////////
 
 
+/* TitanPutPixel() for the sprite layer, writing through a per-line pointer
+ * that is claimed (and cleared if stale) on the first pixel of the line */
+static INLINE void VidsoftSpritePut(struct PixelData **line, int priority, s32 x, s32 y, u32 color, int linescreen, vdp2draw_struct *info)
+{
+   if (priority == 0)
+      return;
+
+   if (!*line)
+   {
+      *line = TitanGetLayerLine(TITAN_SPRITE, y);
+      if (TitanClaimLayerLine(TITAN_SPRITE, y))
+         memset(*line, 0, sizeof(struct PixelData) * vdp2width);
+   }
+
+   (*line)[x].pixel = color;
+   (*line)[x].meta = TitanPackMeta(priority, linescreen, info->titan_shadow_type, info->titan_shadow_enabled);
+}
+
 void VidsoftDrawSprite(Vdp2 * vdp2_regs, u8 * spr_window_mask, u8* vdp1_front_framebuffer, u8 * vdp2_ram, Vdp1* vdp1_regs, Vdp2* vdp2_lines, u8*color_ram)
 {
    int i, i2;
@@ -3564,6 +5458,10 @@ void VidsoftDrawSprite(Vdp2 * vdp2_regs, u8 * spr_window_mask, u8* vdp1_front_fr
    int start_line = 0, line_increment = 0;
    int sprite_window_enabled = vdp2_regs->SPCTL & 0x10;
    int vdp1spritetype = 0;
+   int post_calc = 0;
+   int fast = 0, xmode = 0, ccwin_on = 0;
+   u8 winline[704], ccwin[704], ccline[704];
+#define SPRITE_POST(v) (post_calc == 0 ? (v) : post_calc == 1 ? DoColorOffset(&info, (v)) : info.PostPixelFetchCalc(&info, (v)))
 
    if (sprite_window_enabled)
    {
@@ -3602,6 +5500,8 @@ void VidsoftDrawSprite(Vdp2 * vdp2_regs, u8 * spr_window_mask, u8* vdp1_front_fr
       vdp1spritetype = vdp2_regs->SPCTL & 0xF;
 
       ReadVdp2ColorOffset(vdp2_regs, &info, 0x40, 0x40);
+      post_calc = info.PostPixelFetchCalc == &DoNothing ? 0 :
+                  info.PostPixelFetchCalc == &DoColorOffset ? 1 : 2;
 
       wctl = vdp2_regs->WCTLC >> 8;
       clip[0].xstart = clip[0].ystart = clip[0].xend = clip[0].yend = 0;
@@ -3622,9 +5522,33 @@ void VidsoftDrawSprite(Vdp2 * vdp2_regs, u8 * spr_window_mask, u8* vdp1_front_fr
 
       Vdp2GetInterlaceInfo(&start_line, &line_increment);
 
+      /* The common case gets a lean loop (identical output): 16-bit
+       * framebuffer, not rotated, no sprite window anywhere. The window
+       * tests become per-line tables, the framebuffer readout step is fixed
+       * per frame, and empty pixels cost a load and a compare. */
+      fast = vdp1pixelsize == 2 && !(vdp1_regs->TVMR & 2) && !sprite_window_enabled &&
+             !(wctl & 0x20) && !((vdp2_regs->WCTLD >> 8) & 0x20) && vdp2width <= 704;
+      if (fast)
+      {
+         if (vdp1width == 512 && vdp2_x_hires)
+            xmode = 1;                  /* x = i / 2 */
+         else if (vdp1width == 1024 && !vdp2_x_hires)
+            xmode = 2;                  /* x = i * 2 */
+         else
+            xmode = 0;                  /* x = i */
+         /* except for a 512-wide framebuffer on a low-res screen (x = i),
+            the generic loop advances its readout position only for pixels
+            that pass the window test: with a window that isn't the same */
+         if (!(vdp1width == 512 && !vdp2_x_hires) && (wctl & 0x2a))
+            fast = 0;
+         ccwin_on = (vdp2_regs->CCCTL & 0x40) != 0;
+         VidsoftWindowLine(vdp2_regs->WCTLD >> 8, colorcalcwindow, 0, vdp2width, ccwin);
+      }
+
       for (i2 = start_line; i2 < vdp2height; i2 += line_increment)
       {
          float framebuffer_readout_pos = 0;
+         struct PixelData *sprite_line = NULL; // claimed on the first pixel written
 
          ReadLineWindowClip(islinewindow, clip, &linewnd0addr, &linewnd1addr, vdp2_ram, vdp2_regs);
 
@@ -3641,6 +5565,96 @@ void VidsoftDrawSprite(Vdp2 * vdp2_regs, u8 * spr_window_mask, u8* vdp1_front_fr
          else
          {
             y = i2;
+         }
+
+         if (fast)
+         {
+            const u16 *row = (const u16 *)vdp1_front_framebuffer + y * vdp1width;
+            const u8 *cc = ccwin;
+            int wall = (wctl & 0x2a) == 0, wval = !((wctl & 0x80) == 0x80);
+            if (!wall)
+               VidsoftWindowLine(wctl, clip, i2, vdp2width, winline);
+            /* the colour calc window: rectangles only (no line window), but its
+               y range matters, so it is per line too when enabled */
+            if ((vdp2_regs->WCTLD >> 8) & 0x0a)
+            {
+               VidsoftWindowLine(vdp2_regs->WCTLD >> 8, colorcalcwindow, i2, vdp2width, ccline);
+               cc = ccline;
+            }
+            if (wall && !wval)
+            {
+               output_y++;
+               continue;
+            }
+            for (i = 0; i < vdp2width; i++)
+            {
+               x = xmode == 0 ? i : xmode == 1 ? i >> 1 : i << 1;
+               pixel = row[x];
+               if (pixel == 0 || (!wall && !winline[i]))
+                  continue;
+               info.titan_shadow_type = 0;
+               if (pixel & 0x8000 && colormode)
+               {
+                  u8 alpha = 0x3F;
+                  if (cc[i] && ccwin_on)
+                  {
+                     switch (SPCCCS) {
+                     case 0: if (prioritytable[0] <= SPCCN) { alpha = colorcalctable[0]; if (vdp2_regs->CCCTL & 0x300) alpha |= 0x80; } break;
+                     case 1: if (prioritytable[0] == SPCCN) { alpha = colorcalctable[0]; if (vdp2_regs->CCCTL & 0x300) alpha |= 0x80; } break;
+                     case 2: if (prioritytable[0] >= SPCCN) { alpha = colorcalctable[0]; if (vdp2_regs->CCCTL & 0x300) alpha |= 0x80; } break;
+                     case 3: alpha = colorcalctable[0]; if (vdp2_regs->CCCTL & 0x300) alpha |= 0x80; break;
+                     }
+                  }
+                  /* (sprite window off: 0x8000 is drawn for sprite types below 8) */
+                  if (pixel != 0x8000 || vdp1spritetype < 8)
+                     VidsoftSpritePut(&sprite_line, prioritytable[0], i, output_y, SPRITE_POST(COLSAT2YAB16(alpha, pixel)), info.linescreen, &info);
+               }
+               else
+               {
+                  spritepixelinfo_struct spi;
+                  u8 alpha = 0x3F;
+                  u32 dot;
+
+                  Vdp1GetSpritePixelInfo(vdp1spritetype, &pixel, &spi);
+                  if (spi.normalshadow)
+                  {
+                     info.titan_shadow_type = TITAN_NORMAL_SHADOW;
+                     VidsoftSpritePut(&sprite_line, prioritytable[spi.priority], i, output_y, COLSAT2YAB16(0x3f, 0), info.linescreen, &info);
+                     continue;
+                  }
+                  dot = Vdp2ColorRamGetColor(vdp1coloroffset + pixel, color_ram);
+                  if (cc[i] && ccwin_on)
+                  {
+                     int transparent = 0;
+                     switch (SPCCCS) {
+                     case 0: if (prioritytable[spi.priority] <= SPCCN) transparent = 1; break;
+                     case 1: if (prioritytable[spi.priority] == SPCCN) transparent = 1; break;
+                     case 2: if (prioritytable[spi.priority] >= SPCCN) transparent = 1; break;
+                     case 3: if (dot & 0x80000000) transparent = 1; break;
+                     }
+                     if (vdp2_regs->CCCTL & 0x200) {
+                        alpha = colorcalctable[spi.colorcalc];
+                        if (transparent) alpha |= 0x80;
+                     }
+                     else if (transparent) {
+                        alpha = colorcalctable[spi.colorcalc];
+                        if (vdp2_regs->CCCTL & 0x100) alpha |= 0x80;
+                     }
+                  }
+                  if (spi.msbshadow)
+                  {
+                     info.titan_shadow_type = TITAN_MSB_SHADOW;
+                     if (pixel == 0)
+                     {
+                        VidsoftSpritePut(&sprite_line, prioritytable[spi.priority], i, output_y, SPRITE_POST(COLSAT2YAB32(alpha, 0)), info.linescreen, &info);
+                        continue;
+                     }
+                  }
+                  VidsoftSpritePut(&sprite_line, prioritytable[spi.priority], i, output_y, SPRITE_POST(COLSAT2YAB32(alpha, dot)), info.linescreen, &info);
+               }
+            }
+            output_y++;
+            continue;
          }
 
          for (i = 0; i < vdp2width; i++)
@@ -3735,7 +5749,7 @@ void VidsoftDrawSprite(Vdp2 * vdp2_regs, u8 * spr_window_mask, u8* vdp1_front_fr
                   // -always- drawn and sprite types 8-F are always
                   // transparent.
                   if (pixel != 0x8000 || vdp1spritetype < 2 || (vdp1spritetype < 8 && !(vdp2_regs->SPCTL & 0x10)))
-                     TitanPutPixel(prioritytable[0], i, output_y, info.PostPixelFetchCalc(&info, COLSAT2YAB16(alpha, pixel)), info.linescreen, &info);
+                     VidsoftSpritePut(&sprite_line, prioritytable[0], i, output_y, SPRITE_POST(COLSAT2YAB16(alpha, pixel)), info.linescreen, &info);
                }
                else
                {
@@ -3748,7 +5762,7 @@ void VidsoftDrawSprite(Vdp2 * vdp2_regs, u8 * spr_window_mask, u8* vdp1_front_fr
                   if (spi.normalshadow)
                   {
                      info.titan_shadow_type = TITAN_NORMAL_SHADOW;
-                     TitanPutPixel(prioritytable[spi.priority], i, output_y, COLSAT2YAB16(0x3f, 0), info.linescreen, &info);
+                     VidsoftSpritePut(&sprite_line, prioritytable[spi.priority], i, output_y, COLSAT2YAB16(0x3f, 0), info.linescreen, &info);
                      continue;
                   }
 
@@ -3805,7 +5819,7 @@ void VidsoftDrawSprite(Vdp2 * vdp2_regs, u8 * spr_window_mask, u8* vdp1_front_fr
 
                      if (pixel == 0)
                      {
-                        TitanPutPixel(prioritytable[spi.priority], i, output_y, info.PostPixelFetchCalc(&info, COLSAT2YAB32(alpha, 0)), info.linescreen, &info);
+                        VidsoftSpritePut(&sprite_line, prioritytable[spi.priority], i, output_y, SPRITE_POST(COLSAT2YAB32(alpha, 0)), info.linescreen, &info);
                         continue;
                      }
                   }
@@ -3818,7 +5832,7 @@ void VidsoftDrawSprite(Vdp2 * vdp2_regs, u8 * spr_window_mask, u8* vdp1_front_fr
                      }
                   }
 
-                  TitanPutPixel(prioritytable[spi.priority], i, output_y, info.PostPixelFetchCalc(&info, COLSAT2YAB32(alpha, dot)), info.linescreen, &info);
+                  VidsoftSpritePut(&sprite_line, prioritytable[spi.priority], i, output_y, SPRITE_POST(COLSAT2YAB32(alpha, dot)), info.linescreen, &info);
                }
             }
             else
@@ -3837,7 +5851,7 @@ void VidsoftDrawSprite(Vdp2 * vdp2_regs, u8 * spr_window_mask, u8* vdp1_front_fr
                   if (spi.normalshadow)
                   {
                      info.titan_shadow_type = TITAN_NORMAL_SHADOW;
-                     TitanPutPixel(prioritytable[spi.priority], i, output_y, COLSAT2YAB16(0x3f, 0), info.linescreen, &info);
+                     VidsoftSpritePut(&sprite_line, prioritytable[spi.priority], i, output_y, COLSAT2YAB16(0x3f, 0), info.linescreen, &info);
                      continue;
                   }
 
@@ -3882,7 +5896,7 @@ void VidsoftDrawSprite(Vdp2 * vdp2_regs, u8 * spr_window_mask, u8* vdp1_front_fr
                      }
                   }
 
-                  TitanPutPixel(prioritytable[spi.priority], i, output_y, info.PostPixelFetchCalc(&info, COLSAT2YAB32(alpha, dot)), info.linescreen, &info);
+                  VidsoftSpritePut(&sprite_line, prioritytable[spi.priority], i, output_y, SPRITE_POST(COLSAT2YAB32(alpha, dot)), info.linescreen, &info);
                }
             }
          }
@@ -3891,20 +5905,55 @@ void VidsoftDrawSprite(Vdp2 * vdp2_regs, u8 * spr_window_mask, u8* vdp1_front_fr
       }
    }
 }
+#undef SPRITE_POST
+
+
+static void VidsoftWaitForLayerThreads(void)
+{
+   YAB_PROF_BEGIN(PROF_WAIT_LAYERS);
+   if (vidsoft_num_layer_threads > 0)
+   {
+      int layer;
+      for (layer = 0; layer < 6; layer++)
+         YabFlagWait(&vidsoft_thread_context.draw_finished[layer]);
+   }
+   YAB_PROF_END(PROF_WAIT_LAYERS);
+}
 
 void VIDSoftVdp2DrawEnd(void)
 {
-   if (vidsoft_num_layer_threads > 0)
+   if (vdp2_skip_draw)
    {
-      while (!vidsoft_thread_context.draw_finished[TITAN_NBG0]){}
-      while (!vidsoft_thread_context.draw_finished[TITAN_NBG1]){}
-      while (!vidsoft_thread_context.draw_finished[TITAN_NBG2]){}
-      while (!vidsoft_thread_context.draw_finished[TITAN_NBG3]){}
-      while (!vidsoft_thread_context.draw_finished[TITAN_RBG0]){}
-      while (!vidsoft_thread_context.draw_finished[TITAN_SPRITE]){}
+      // frameskip: VDP1 still ran this frame, only publish its framebuffer
+      VIDSoftVdp1SwapFrameBuffer();
+      return;
    }
 
+   VidsoftWaitForLayerThreads();
+
    TitanRender(dispbuffer);
+
+   /* An interlaced frame only draws its own field's lines; the other field
+    * keeps the previous frame's. When frameskip skipped that frame, those
+    * lines are older (with every other frame skipped, they are never drawn
+    * again: half the picture was frozen or black). Repeat this field's
+    * lines over them instead. */
+   {
+      static u32 last_drawn_frame;
+      if (vdp2_interlace && vdp2_frame_number - last_drawn_frame != 1)
+      {
+         int start_line, line_increment, y;
+         Vdp2GetInterlaceInfo(&start_line, &line_increment);
+         for (y = start_line; y < vdp2height; y += 2)
+         {
+            const int other = y ^ 1;
+            if (other < vdp2height)
+               memcpy(dispbuffer + other * vdp2width, dispbuffer + y * vdp2width,
+                      vdp2width * sizeof(pixel_t));
+         }
+      }
+      last_drawn_frame = vdp2_frame_number;
+   }
 
    VIDSoftVdp1SwapFrameBuffer();
 
@@ -3935,8 +5984,8 @@ void VidsoftStartLayerThread(int * layer_priority, int * draw_priority_0, int * 
    {
       if (*num_threads_dispatched < vidsoft_num_layer_threads)
       {
-         vidsoft_thread_context.need_draw[which_layer] = 1;
          vidsoft_thread_context.draw_finished[which_layer] = 0;
+         YabFlagSet(vidsoft_thread_context.need_draw[which_layer], 1);
          YabThreadWake(YAB_THREAD_VIDSOFT_LAYER_NBG3 + which_layer);
          *num_threads_dispatched = *num_threads_dispatched + 1;
       }
@@ -3977,11 +6026,21 @@ int CanUseSpriteThread()
    return 1;
 }
 
+#ifdef YAB_PROFILE
+void VIDSoftVdp2DrawScreensBody(void);
+void VIDSoftVdp2DrawScreens(void) { YAB_PROF_BEGIN(PROF_DRAWSCREENS); VIDSoftVdp2DrawScreensBody(); YAB_PROF_END(PROF_DRAWSCREENS); }
+#define VIDSoftVdp2DrawScreens VIDSoftVdp2DrawScreensBody
+#endif
 void VIDSoftVdp2DrawScreens(void)
+#ifdef YAB_PROFILE
+#undef VIDSoftVdp2DrawScreens
+#endif
 {
    int draw_priority_0[6] = { 0 };
    int layer_priority[6] = { 0 };
    int num_threads_dispatched = 0;
+
+   if (vdp2_skip_draw) return;
 
    VIDSoftVdp2SetResolution(Vdp2Regs->TVMD);
    layer_priority[TITAN_NBG0] = Vdp2Regs->PRINA & 0x7;
@@ -4003,18 +6062,20 @@ void VIDSoftVdp2DrawScreens(void)
 
    if (vidsoft_num_layer_threads > 0)
    {
+      YAB_PROF_BEGIN(PROF_SNAPSHOT);
       memcpy(vidsoft_thread_context.lines, Vdp2Lines, sizeof(Vdp2) * 270);
       memcpy(&vidsoft_thread_context.regs, Vdp2Regs, sizeof(Vdp2));
-      memcpy(vidsoft_thread_context.ram, Vdp2Ram, 0x80000);
+      VidsoftSyncRamCopy(vidsoft_thread_context.ram, Vdp2Ram, Vdp2RamDirty, "VDP2");
       memcpy(vidsoft_thread_context.color_ram, Vdp2ColorRam, 0x1000);
       memcpy(vidsoft_thread_context.cell_scroll_data, cell_scroll_data, sizeof(struct CellScrollData) * 270);
+      YAB_PROF_END(PROF_SNAPSHOT);
    }
 
    //draw vdp2 sprite layer on a thread if sprite window is not enabled
    if (CanUseSpriteThread() && vidsoft_num_layer_threads > 0)
    {
-      vidsoft_thread_context.need_draw[TITAN_SPRITE] = 1;
       vidsoft_thread_context.draw_finished[TITAN_SPRITE] = 0;
+      YabFlagSet(vidsoft_thread_context.need_draw[TITAN_SPRITE], 1);
       YabThreadWake(YAB_THREAD_VIDSOFT_LAYER_SPRITE);
       num_threads_dispatched++;
    }
@@ -4147,6 +6208,7 @@ void VIDSoftVdp2SetResolution(u16 TVMD)
 
 void VIDSoftVdp1SwapFrameBuffer(void)
 {
+   VidsoftVdp1NoteSwap(((Vdp1Regs->FBCR & 2) == 0) || Vdp1External.manualchange);
    if (((Vdp1Regs->FBCR & 2) == 0) || Vdp1External.manualchange)
    {
 		u8 *temp;
@@ -4165,11 +6227,19 @@ void VIDSoftVdp1SwapFrameBuffer(void)
 //////////////////////////////////////////////////////////////////////////////
 
 void VIDSoftVdp1EraseFrameBuffer(Vdp1* regs, u8 * back_framebuffer)
-{   
+{
+   if (((regs->FBCR & 2) == 0) || Vdp1External.manualerase)
+   {
+      VidsoftVdp1Erase(regs, back_framebuffer);
+      Vdp1External.manualerase = 0;
+   }
+}
+
+static void VidsoftVdp1Erase(const Vdp1* regs, u8 * back_framebuffer)
+{
    int i,i2;
    int w,h;
 
-   if (((regs->FBCR & 2) == 0) || Vdp1External.manualerase)
    {
       h = (regs->EWRR & 0x1FF) + 1;
       if (h > vdp1height) h = vdp1height;
@@ -4200,7 +6270,6 @@ void VIDSoftVdp1EraseFrameBuffer(Vdp1* regs, u8 * back_framebuffer)
             }
          }
       }
-      Vdp1External.manualerase = 0;
    }
 }
 
@@ -4236,5 +6305,6 @@ void VIDSoftGetNativeResolution(int *width, int *height, int* interlace)
 
 void VIDSoftVdp2DispOff()
 {
+   if (vdp2_skip_draw) return;
    TitanErase();
 }

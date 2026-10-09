@@ -33,12 +33,14 @@
 // Note: FP is set to &dynarec_local when executing generated code.
 // Thus the local variables are actually global and not on the stack.
 
-extern u8 sh2_dynarec_target[16777216];
+extern u8 sh2_dynarec_target[8388608];
 extern u32 memory_map[1048576]; // 32-bit
 
 //#define BASE_ADDR 0x6000000 // Code generator target address
 #define BASE_ADDR ((u32)&sh2_dynarec_target) // Code generator target address
-#define TARGET_SIZE_2 24 // 2^24 = 16 megabytes
+#define TARGET_SIZE_2 23 // 2^23 = 8 megabytes (the cache is in .bss and is
+                          // all touched once it wraps: 16 MB cost the Miyoo
+                          // 8 MB of RAM for no measurable speed)
 //#define TARGET_SIZE_2 25 // 2^25 = 32 megabytes
 
 #ifdef ANDROID

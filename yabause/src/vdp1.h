@@ -93,6 +93,12 @@ extern VideoInterface_struct *VIDCore;
 extern VideoInterface_struct VIDDummy;
 
 extern u8 * Vdp1Ram;
+/* 4 KB pages of VDP1 RAM written since the render threads' copy was last
+   brought up to date (one bit a page; see VidsoftSyncRamCopy) */
+extern u32 Vdp1RamDirty[4];
+extern int Vdp1ListIncomplete;
+#define VDP1_RAM_MARK(addr) (Vdp1RamDirty[((addr) >> 17) & 3] |= 1u << (((addr) >> 12) & 31))
+#define VDP1_RAM_MARK_ALL() memset(Vdp1RamDirty, 0xFF, sizeof(Vdp1RamDirty))
 
 u8 FASTCALL	Vdp1RamReadByte(u32);
 u16 FASTCALL	Vdp1RamReadWord(u32);
@@ -130,6 +136,7 @@ typedef struct {
    int disptoggle;
    int manualerase;
    int manualchange;
+   int changerequest;  // FBCR asked for a frame change since the last VBlank-IN
 } Vdp1External_struct;
 
 extern Vdp1External_struct Vdp1External;

@@ -24,4 +24,9 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
 
 extern M68K_struct M68KMusashi;
 
+/* sound CPU idle-loop skipping (m68kmusashi.c) */
+extern int m68k_idle_skip;
+void M68KMusashiIdleReset(void);
+void M68KMusashiIdleSync(void);
+
 #endif
