@@ -183,57 +183,58 @@ void TitanRenderLinesSimplified(pixel_t * dispbuffer, int start_line, int end_li
       int layer_pos = layer_y * tt_context.vdp2width;
       struct PixelData *rows[6];
 
+      /* The layers in priority order (srow), and for each sprite priority how
+       * many of them come before the sprite (kfor): a layer at or below the
+       * sprite's priority is never reached, even where the sprite pixel is
+       * transparent (that pixel then goes straight to the back screen), so a
+       * pixel takes the first opaque one of its first kfor[] layers, else the
+       * sprite pixel if opaque, else the back screen; the same as walking
+       * sorted_layers. The next layer's pixel is loaded before the current
+       * one is tested (the in-order Cortex-A7 stalled on each test right
+       * after its load); srow[nbg] is an empty row so that stays in bounds. */
+      struct PixelData *srow[8];
+      int kfor[8];
+      const int nbg = num_layers - 1;
+      struct PixelData *sprite_row;
+
       for (layer = 0; layer < 6; layer++)
          rows[layer] = TitanReadLine(layer, layer_y);
+      for (j = 0; j < nbg; j++)
+         srow[j] = rows[sorted_layers[j]];
+      srow[nbg] = titan_empty_line;
+      for (i = 0; i < 8; i++)
+      {
+         for (j = 0; j < nbg && i < tt_context.layer_priority[sorted_layers[j]]; j++)
+            ;
+         kfor[i] = j;
+      }
+      sprite_row = rows[TITAN_SPRITE];
 
       for (x = 0; x < tt_context.vdp2width; x++, layer_pos++)
       {
          u32 out_pixel = 0;
-         struct PixelData sprite = rows[TITAN_SPRITE][x];
+         const struct PixelData sprite = sprite_row[x];
+         const int k = sprite.priority > 7 ? 0 : kfor[sprite.priority];
+         u32 next = srow[0][x].pixel;
 
-         for (j = 0; j < num_layers; j++)
+         for (j = 0; j < k; j++)
          {
-            int bg_layer = sorted_layers[j];
-
-            //if the top layer is the back screen
-            if (bg_layer == TITAN_BACK)
+            const u32 bg_px = next;
+            next = srow[j + 1][x].pixel;
+            if (bg_px)
             {
-               //use a sprite pixel if it is not transparent
-               if (sprite.pixel)
-               {
-                  out_pixel = TitanFixAlpha(sprite.pixel);
-                  break;
-               }
-               else
-               {
-                  //otherwise use the back screen pixel
-                  u32 back_px = back_buf[layer_pos].pixel ? back_buf[layer_pos].pixel : back_buf[y].pixel;
-                  if (back_px) out_pixel = TitanFixAlpha(back_px);
-                  break;
-               }
-            }
-            //if the top layer is a sprite pixel
-            else if (sprite.priority >= tt_context.layer_priority[bg_layer])
-            {
-               //use the sprite pixel if it is not transparent
-               if (sprite.pixel)
-               {
-                  out_pixel = TitanFixAlpha(sprite.pixel);
-                  break;
-               }
-            }
-            else
-            {
-               //use the bg layer if it is not covered with a sprite pixel and not transparent
-               u32 bg_px = rows[bg_layer][x].pixel;
-               if (bg_px)
-               {
-                  out_pixel = TitanFixAlpha(bg_px);
-                  break;
-               }
+               out_pixel = TitanFixAlpha(bg_px);
+               goto done;
             }
          }
-
+         if (sprite.pixel)
+            out_pixel = TitanFixAlpha(sprite.pixel);
+         else
+         {
+            u32 back_px = back_buf[layer_pos].pixel ? back_buf[layer_pos].pixel : back_buf[y].pixel;
+            if (back_px) out_pixel = TitanFixAlpha(back_px);
+         }
+done:
          disp_row[x] = out_pixel;
       }
       layer_y++;
