@@ -3122,6 +3122,12 @@ void address_generation(int i,struct regstat *i_regs,signed char entry[])
           if(!entry||entry[ra]!=rs2[i])
             emit_loadreg(rs2[i],ra);
         }
+        if(itype[i]==RMW) {
+          // TAS.B @Rn with Rn not kept in a register (not needed again):
+          // without this load the address was whatever the temp held
+          if(!entry||entry[ra]!=rs1[i])
+            emit_loadreg(rs1[i],ra);
+        }
         //if(!entry||entry[ra]!=rs1[i])
         //  printf("poor load scheduling!\n");
       }
