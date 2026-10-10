@@ -12,6 +12,7 @@ void devsession_init(retro_environment_t env);
 void devsession_config(int mode, int stats, const char *game, int at_boot, const char *extra);
 void devsession_deinit(void);
 retro_input_state_t devsession_wrap_input(retro_input_state_t cb);
+void devsession_picture(const uint16_t *fb, unsigned w, unsigned h);
 int devsession_stats_text(const char **l1, const char **l2);
 void devsession_load_state_once(void);
 void devsession_poll_start(int frameskip_idle);

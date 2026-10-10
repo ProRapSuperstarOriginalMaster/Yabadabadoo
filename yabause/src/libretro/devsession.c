@@ -27,7 +27,8 @@
  *   'F' frame record, see struct ds_frame, then n_inputs struct ds_input
  *   'T' u32 call, s64 value: SMPC clock read during call
  *   'C' u32 call, u32 hash: work RAM hash at the end of call
- *   'V' u32 call, u32 hash: hash of the last picture sent to the frontend, every 60 calls
+ *   'V' u32 call, u32 hash: hash of a picture (the first drawn at or after every 60th call,
+ *       taken before the on-screen statistics are drawn into it)
  *       (sessions started from a snapshot: save states don't restore every timing
  *       detail exactly, so work RAM can drift while the pictures stay the same)
  *   'X' text: the session was stopped (reason)
@@ -110,6 +111,7 @@ static uint64_t st_t0, st_main, st_proc;
 static unsigned st_runs, st_drawn, st_skips;
 static unsigned st_occ_min = 100;
 static char st_line1[48], st_line2[48];   /* drawn into the picture by libretro.c */
+static uint32_t ds_pic_hash; static int ds_pic_due, ds_pic_valid;   /* picture hash, before the statistics text */
 
 static uint64_t now_us(clockid_t id)
 {
@@ -299,6 +301,7 @@ static void ds_start(int mode, const char *game, int at_boot, const char *extra)
    ds_invalid = 0;
    ds_unserialize_burst = 0;
    ds_start_call = ds_call;
+   ds_pic_due = ds_pic_valid = 0;
    ds_cur.call = 0;   /* started inside a call (option change): it is the session's first */
    ds_bytes = 0;
    snprintf(hdr, sizeof(hdr), "game=%s\nmode=%s\nstart_time=%lld\nstart_call=%u\n%s",
@@ -420,6 +423,8 @@ void devsession_run_begin(void)
    ds_in_run = 1;
    memset(&ds_cur, 0, sizeof(ds_cur));
    ds_cur.call = DS_REL;
+   if (ds_mode == DS_FULL && DS_REL % 60 == 59)
+      ds_pic_due = 1;
    ds_cur.gap_us = ds_prev_start_us ? (uint32_t)(t - ds_prev_start_us) : 0;
    ds_prev_start_us = ds_run_start_us = t;
    ds_main_cpu0 = now_us(CLOCK_THREAD_CPUTIME_ID);
@@ -427,6 +432,17 @@ void devsession_run_begin(void)
       uint64_t p = now_us(CLOCK_PROCESS_CPUTIME_ID);
       ds_cur.proc_cpu_us = ds_proc_cpu_prev ? (uint32_t)(p - ds_proc_cpu_prev) : 0;
       ds_proc_cpu_prev = p;
+   }
+}
+
+/* libretro.c, for every picture it sends, before drawing the statistics into it: every 60
+   calls the next drawn picture is hashed (so the hash doesn't depend on the statistics) */
+void devsession_picture(const uint16_t *fb, unsigned w, unsigned h)
+{
+   if (ds_mode == DS_FULL && ds_pic_due && fb && w && h)
+   {
+      ds_pic_hash = ds_hash((const uint8_t *)fb, (size_t)w * h * 2, 0x811C9DC5u);
+      ds_pic_valid = 1;
    }
 }
 
@@ -470,6 +486,7 @@ static void ds_show_stats(uint64_t t)
 
 void devsession_run_end(int rendered, const uint16_t *fb, unsigned w, unsigned h)
 {
+   (void)fb; (void)w; (void)h;   /* pictures are hashed in devsession_picture() */
    uint64_t t = now_us(CLOCK_MONOTONIC);
    ds_in_run = 0;
    ds_cur.run_us = (uint32_t)(t - ds_run_start_us);
@@ -479,10 +496,11 @@ void devsession_run_end(int rendered, const uint16_t *fb, unsigned w, unsigned h
    if (ds_file)
    {
       ds_record('F', &ds_cur, sizeof(ds_cur), ds_inputs, ds_cur.n_inputs * sizeof(*ds_inputs));
-      if (ds_mode == DS_FULL && DS_REL % 60 == 59 && !ds_invalid && fb && w && h)
+      if (ds_pic_valid && !ds_invalid)
       {
-         uint32_t rec[2] = { DS_REL, ds_hash((const uint8_t *)fb, (size_t)w * h * 2, 0x811C9DC5u) };
+         uint32_t rec[2] = { DS_REL, ds_pic_hash };
          ds_record('V', rec, sizeof(rec), NULL, 0);
+         ds_pic_due = ds_pic_valid = 0;
       }
       if (ds_mode == DS_FULL && DS_REL % 120 == 119 && !ds_invalid)
       {

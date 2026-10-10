@@ -713,6 +713,7 @@ void YuiSwapBuffers(void)
       /* on-screen statistics (dev option), drawn into the picture: RetroArch's own
          notifications may be switched off */
       const char *l1, *l2;
+      devsession_picture((const uint16_t *)dispbuffer, current_width, current_height);
       if (devsession_stats_text(&l1, &l2))
       {
          /* above the bottom line, where RetroArch shows its own FPS counter */
