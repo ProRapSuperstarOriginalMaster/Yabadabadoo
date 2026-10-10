@@ -110,6 +110,7 @@ static int ds_quit;
 static uint64_t st_t0, st_main, st_proc;
 static unsigned st_runs, st_drawn, st_skips;
 static unsigned st_occ_min = 100;
+static int st_occ_seen;   /* the frontend reported the audio buffer this second */
 static char st_line1[48], st_line2[48];   /* drawn into the picture by libretro.c */
 static uint32_t ds_pic_hash; static int ds_pic_due, ds_pic_valid;   /* picture hash, before the statistics text */
 
@@ -468,11 +469,19 @@ static void ds_show_stats(uint64_t t)
    double secs = (t - st_t0) / 1e6;
    if (st_t0 && secs >= 1.0)
    {
-      snprintf(st_line1, sizeof(st_line1), "DRAWN %2.0f  EMU %2.0f  SKIP %u", st_drawn / secs,
-               st_runs / secs, st_skips);
-      /* CPU: percent of one core (emulation thread; whole process); AUDIO: lowest buffer level, percent */
-      snprintf(st_line2, sizeof(st_line2), "CPU %3.0f  ALL %3.0f  AUDIO %u", st_main / (secs * 1e4),
-               st_proc / (secs * 1e4), st_occ_min);
+      /* REC: session log being written ("REC T" timing only, "REC.." Full waiting to start) */
+      const char *rec = ds_file ? (ds_mode == DS_FULL ? "  REC" : "  REC T") : ds_pending ? "  REC.." : "";
+      char occ[8];
+      snprintf(st_line1, sizeof(st_line1), "DRAWN %2.0f  EMU %2.0f  SKIP %u%s", st_drawn / secs,
+               st_runs / secs, st_skips, rec);
+      /* CPU: percent of one core (emulation thread; whole process); AUDIO: lowest buffer level,
+         percent; "--" when the frontend wasn't asked (frameskip off or fixed interval) */
+      if (st_occ_seen)
+         snprintf(occ, sizeof(occ), "%u", st_occ_min);
+      else
+         snprintf(occ, sizeof(occ), "--");
+      snprintf(st_line2, sizeof(st_line2), "CPU %3.0f  ALL %3.0f  AUDIO %s", st_main / (secs * 1e4),
+               st_proc / (secs * 1e4), occ);
       st_t0 = 0;
    }
    if (!st_t0)
@@ -481,6 +490,7 @@ static void ds_show_stats(uint64_t t)
       st_runs = st_drawn = st_skips = 0;
       st_main = st_proc = 0;
       st_occ_min = 100;
+      st_occ_seen = 0;
    }
 }
 
@@ -525,8 +535,12 @@ void devsession_run_end(int rendered, const uint16_t *fb, unsigned w, unsigned h
       st_skips += (ds_cur.flags & DS_SKIPNEXT) != 0;
       st_main += ds_cur.main_cpu_us;
       st_proc += ds_cur.proc_cpu_us;
-      if ((ds_cur.flags & DS_AUDIOACT) && ds_cur.occupancy < st_occ_min)
-         st_occ_min = ds_cur.occupancy;
+      if (ds_cur.flags & DS_AUDIOACT)
+      {
+         st_occ_seen = 1;
+         if (ds_cur.occupancy < st_occ_min)
+            st_occ_min = ds_cur.occupancy;
+      }
       ds_show_stats(t);
    }
    ds_call++;
