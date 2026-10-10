@@ -680,9 +680,75 @@ void TitanPutHLine(int priority, s32 x, s32 y, s32 width, u32 color)
    }
 }
 
+/* One line of TitanRenderLinesM() for N rows (N constant per copy): find the
+ * top pixel, stopping once no remaining row can beat it, with the next row's
+ * priority loaded before the current one is compared. On the Miyoo's
+ * in-order Cortex-A7 a compare right after its load stalled for the load;
+ * now the load overlaps the previous compare. sorted[N] is an empty row, so
+ * reading one row ahead is always valid. */
+static INLINE __attribute__((always_inline)) void TitanLineM(const int mode, const int N, pixel_t *disp_row,
+   struct PixelData *const *sorted_in, const int *sorted_tie_in, const int *sorted_max_in, struct PixelData **rows, int num_rows,
+   int layer_pos, int y, int sprite_window, int width)
+{
+   struct PixelData *sorted[7];
+   int tie[6], smax[6];
+   int i, x;
+
+   for (i = 0; i < N; i++)
+   {
+      sorted[i] = sorted_in[i];
+      tie[i] = sorted_tie_in[i];
+      smax[i] = sorted_max_in[i];
+   }
+   sorted[N] = titan_empty_line;
+
+   for (x = 0; x < width; x++, layer_pos++)
+   {
+      struct PixelData *top = NULL;
+      u32 dot;
+
+      if (N > 0)
+      {
+         int best = 0;
+         int pn = sorted[0][x].priority;
+         for (i = 0; i < N && best < smax[i]; i++)
+         {
+            const int p = pn;
+            pn = sorted[i + 1][x].priority;
+            if (p)
+            {
+               const int key = p * 8 + tie[i];
+               if (key > best)
+               {
+                  best = key;
+                  top = &sorted[i][x];
+               }
+            }
+         }
+      }
+
+      /* If the top pixel is opaque and has no shadow, nothing below it
+       * matters. Otherwise TitanDigPixel does the full job. */
+      if (top && !top->shadow_type)
+      {
+         u32 pixel = top->pixel;
+         if (top->linescreen)
+            pixel = TitanBlendM(mode, pixel, TitanLineColor(top, layer_pos, y));
+         if (!TitanTransM(mode, pixel))
+         {
+            disp_row[x] = pixel ? TitanFixAlpha(pixel) : 0;
+            continue;
+         }
+      }
+
+      dot = TitanDigPixel(mode, sprite_window, rows, num_rows, x, layer_pos, y);
+      disp_row[x] = dot ? TitanFixAlpha(dot) : 0;
+   }
+}
+
 static INLINE void TitanRenderLinesM(const int mode, pixel_t * dispbuffer, int start_line, int end_line)
 {
-   int x, y, layer_y;
+   int y, layer_y;
    int line_increment, interlace_line;
    const int sprite_window = (Vdp2Regs->SPCTL & 0x10) != 0;
 
@@ -722,45 +788,11 @@ static INLINE void TitanRenderLinesM(const int mode, pixel_t * dispbuffer, int s
          }
       }
 
-      for (x = 0; x < tt_context.vdp2width; x++, layer_pos++)
+      switch (num_rows)
       {
-         u32 dot;
-
-         /* Fast path: find the top pixel, stopping once no remaining row can
-          * beat it. If it is opaque and has no shadow, nothing below it
-          * matters. Otherwise TitanDigPixel does the full job. */
-         {
-            struct PixelData *top = NULL;
-            int best = 0;
-            for (i = 0; i < num_rows && best < sorted_max[i]; i++)
-            {
-               struct PixelData *pd = &sorted[i][x];
-               int p = pd->priority;
-               if (p)
-               {
-                  int key = p * 8 + sorted_tie[i];
-                  if (key > best)
-                  {
-                     best = key;
-                     top = pd;
-                  }
-               }
-            }
-            if (top && !top->shadow_type)
-            {
-               u32 pixel = top->pixel;
-               if (top->linescreen)
-                  pixel = TitanBlendM(mode, pixel, TitanLineColor(top, layer_pos, y));
-               if (!TitanTransM(mode, pixel))
-               {
-                  disp_row[x] = pixel ? TitanFixAlpha(pixel) : 0;
-                  continue;
-               }
-            }
-         }
-
-         dot = TitanDigPixel(mode, sprite_window, rows, num_rows, x, layer_pos, y);
-         disp_row[x] = dot ? TitanFixAlpha(dot) : 0;
+#define LINE_N(N) case N: TitanLineM(mode, N, disp_row, sorted, sorted_tie, sorted_max, rows, num_rows, layer_pos, y, sprite_window, tt_context.vdp2width); break;
+      LINE_N(0) LINE_N(1) LINE_N(2) LINE_N(3) LINE_N(4) LINE_N(5) LINE_N(6)
+#undef LINE_N
       }
 
       layer_y++;
