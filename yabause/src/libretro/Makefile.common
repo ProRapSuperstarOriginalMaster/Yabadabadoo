@@ -126,7 +126,8 @@ else
 		$(SOURCE_DIR)/vidsoft.c \
 		$(SOURCE_DIR)/titan/titan.c \
 		$(SOURCE_DIR)/yabause.c \
-		$(CORE_DIR)/libretro.c
+		$(CORE_DIR)/libretro.c \
+		$(CORE_DIR)/devsession.c
 	ifeq ($(HAVE_THREADS), 1)
 		SOURCES_C += $(SOURCE_DIR)/thr-rthreads.c
 	else

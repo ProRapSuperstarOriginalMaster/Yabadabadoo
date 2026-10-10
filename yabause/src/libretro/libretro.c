@@ -40,6 +40,7 @@
 #include "vidogl.h"
 #include "vidsoft.h"
 #include "libretro_core_options.h"
+#include "devsession.h"
 #ifdef HAVE_PLAY_JIT
 #include "sh2_jit.h"
 #endif
@@ -168,7 +169,14 @@ void retro_set_video_refresh(retro_video_refresh_t cb) { video_cb = cb; }
 void retro_set_audio_sample(retro_audio_sample_t cb) { (void)cb; }
 void retro_set_audio_sample_batch(retro_audio_sample_batch_t cb) { audio_batch_cb = cb; }
 void retro_set_input_poll(retro_input_poll_t cb) { input_poll_cb = cb; }
-void retro_set_input_state(retro_input_state_t cb) { input_state_cb = cb; }
+void retro_set_input_state(retro_input_state_t cb)
+{
+#ifdef YABADABADOO_DEV
+   input_state_cb = devsession_wrap_input(cb);
+#else
+   input_state_cb = cb;
+#endif
+}
 
 /* ---- No BIOS: a screen instead of the game -------------------------------
  * The recompiler needs a real BIOS and the interpreter (with the HLE BIOS) is
@@ -769,6 +777,9 @@ void retro_get_system_av_info(struct retro_system_av_info *info)
 
 void retro_set_controller_port_device(unsigned port, unsigned device)
 {
+#ifdef YABADABADOO_DEV
+   devsession_port_device(port, device);
+#endif
    if(pad_type[port] != device)
    {
       pad_type[port] = device;
@@ -820,6 +831,10 @@ bool retro_unserialize(const void *data, size_t size)
    ScspMuteAudio(SCSP_MUTE_SYSTEM);
    int error = YabLoadStateBuffer(data, size);
    ScspUnMuteAudio(SCSP_MUTE_SYSTEM);
+#ifdef YABADABADOO_DEV
+   if (!error)
+      devsession_unserialize(data, size);
+#endif
 
    return !error;
 }
@@ -946,6 +961,26 @@ static void apply_video_format(void)
    if (yabsys.IsPal != pal)
       YabauseSetVideoFormat(pal);
 }
+
+#ifdef YABADABADOO_DEV
+static int dev_game_loaded;
+/* development options: session log and on-screen statistics (devsession.c) */
+static void dev_apply_options(int at_boot)
+{
+   struct retro_variable var = { "yabadabadoo_dev_session", NULL };
+   int mode = DS_OFF, stats = 0;
+   char extra[512];
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+      mode = !strcmp(var.value, "full") ? DS_FULL : !strcmp(var.value, "timing") ? DS_TIMING : DS_OFF;
+   var.key = "yabadabadoo_dev_stats";
+   var.value = NULL;
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+      stats = !strcmp(var.value, "enabled");
+   snprintf(extra, sizeof(extra), "bios=%s\nbitmasks=%d\nport0=%u\nport1=%u\n",
+            bios_path, libretro_supports_bitmasks ? 1 : 0, pad_type[0], pad_type[1]);
+   devsession_config(mode, stats, game_basename, at_boot, extra);
+}
+#endif
 
 static void check_variables(void)
 {
@@ -1094,6 +1129,10 @@ static void check_variables(void)
                            strcmp(var.value, "normal") == 0) ? 0 : 10);
 #endif
 
+#ifdef YABADABADOO_DEV
+   if (dev_game_loaded)
+      dev_apply_options(0);
+#endif
 }
 
 static int does_file_exist(const char *filename)
@@ -1807,6 +1846,14 @@ bool retro_load_game(const struct retro_game_info *info)
    environ_cb(RETRO_ENVIRONMENT_SET_MEMORY_MAPS, &mmaps);
    environ_cb(RETRO_ENVIRONMENT_SET_SUPPORT_ACHIEVEMENTS, &cheevos_supported);
 
+#ifdef YABADABADOO_DEV
+   if (ret == 0)
+   {
+      devsession_init(environ_cb);
+      dev_game_loaded = 1;
+      dev_apply_options(1);
+   }
+#endif
    return !ret;
 }
 
@@ -1825,6 +1872,10 @@ void retro_unload_game(void)
       no_bios_screen = false;
       return;
    }
+#ifdef YABADABADOO_DEV
+   devsession_deinit();
+   dev_game_loaded = 0;
+#endif
 	YabauseDeInit();
 	crash_log_uninstall();
 }
@@ -1860,6 +1911,9 @@ void retro_reset(void)
 {
    if (no_bios_screen)
       return;
+#ifdef YABADABADOO_DEV
+   devsession_reset();
+#endif
    YabauseResetButton();
    YabauseInit(&yinit);
    YabauseSetDecilineMode(deciline_mode);
@@ -1875,6 +1929,9 @@ void retro_run(void)
       return;
    }
    one_frame_rendered = false;
+#ifdef YABADABADOO_DEV
+   devsession_run_begin();
+#endif
 #if defined(__linux__) && defined(__arm__)
    crash_in_run = 1;
 #endif
@@ -1927,6 +1984,10 @@ void retro_run(void)
    if (frameskip_type != FRAMESKIP_NONE)
    {
       bool skip_next = frameskip_should_skip();
+#ifdef YABADABADOO_DEV
+      devsession_skip_decision(retro_audio_buff_active, retro_audio_buff_occupancy,
+                               retro_audio_buff_underrun, skip_next);
+#endif
       Vdp2SetExternalFrameSkipNext(!skip_next, !frameskip_sprites);
       if (!frameskip_skip_current)
          Vdp2SetExternalFrameSkip(VDP2_FRAMESKIP_NONE);
@@ -1950,6 +2011,9 @@ void retro_run(void)
     * frame, which is what dispbuffer holds. */
    if(!one_frame_rendered)
       video_cb(NULL, game_width, game_height, game_width * 2);
+#ifdef YABADABADOO_DEV
+   devsession_run_end(one_frame_rendered);
+#endif
 #if defined(__linux__) && defined(__arm__)
    crash_in_run = 0;
 #endif

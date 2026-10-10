@@ -307,6 +307,37 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       "low"
    },
 #endif
+#ifdef YABADABADOO_DEV
+   {
+      "yabadabadoo_dev_session",
+      "Session Log (Dev)",
+      NULL,
+      "Write a log of this session to <saves>/yabadabadoo-sessions for analysis. 'Timing': how long every frame took. 'Full': also the inputs and everything else needed to replay the session exactly (started during play, it begins with a save state of the running game).",
+      NULL,
+      NULL,
+      {
+         { "disabled", NULL },
+         { "timing",   "Timing" },
+         { "full",     "Full (Replayable)" },
+         { NULL, NULL},
+      },
+      "disabled"
+   },
+   {
+      "yabadabadoo_dev_stats",
+      "On-Screen Statistics (Dev)",
+      NULL,
+      "Once a second: frames drawn per second, emulated frames per second, frames skipped, CPU use of the emulation thread and of the whole process (100% = one core), lowest audio buffer level.",
+      NULL,
+      NULL,
+      {
+         { "disabled", NULL },
+         { "enabled",  NULL },
+         { NULL, NULL},
+      },
+      "disabled"
+   },
+#endif
    { NULL, NULL, NULL, NULL, NULL, NULL, {{0}}, NULL },
 };
 

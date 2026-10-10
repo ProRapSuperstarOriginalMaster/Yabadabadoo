@@ -25,6 +25,9 @@
 #include <stdlib.h>
 #include <time.h>
 #include "smpc.h"
+#ifdef YABADABADOO_DEV
+time_t devsession_rtc(time_t v);
+#endif
 #include "yabprof.h"
 #include "cs2.h"
 #include "debug.h"
@@ -230,7 +233,11 @@ static void SmpcINTBACKStatus(void) {
    if (SmpcInternalVars->clocksync) {
       tmp = SmpcInternalVars->basetime + ((u64)framecounter * 1001 / 60000);
    } else {
+#ifdef YABADABADOO_DEV
+      tmp = devsession_rtc(time(NULL));   /* session log (libretro/devsession.c) */
+#else
       tmp = time(NULL);
+#endif
    }
 #ifdef WIN32
    memcpy(&times, localtime(&tmp), sizeof(times));
