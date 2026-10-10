@@ -1274,6 +1274,19 @@ SCROLL_ZOOM_FN(Vdp2DrawScrollZoom16bppRGB, 3)
 SCROLL_ZOOM_FN(Vdp2DrawScrollZoom32bpp, 4)
 #undef SCROLL_ZOOM_FN
 
+/* x and y after mosaic, per mosaic size: built once at init (it used to be
+   built by the first layer thread to draw, which set its "built" flag first,
+   so another layer thread could read a half-built table) */
+static int mosaic_table[16][1024];
+
+static void VidsoftInitMosaicTable(void)
+{
+   int i, j;
+   for (i = 0; i < 16; i++)
+      for (j = 0; j < 1024; j++)
+         mosaic_table[i][j] = j / (i + 1) * (i + 1);
+}
+
 static void FASTCALL Vdp2DrawScroll(vdp2draw_struct *info, Vdp2* lines, Vdp2* regs, u8* ram, u8* color_ram, struct CellScrollData * cell_data)
 {
    int i, j;
@@ -1307,22 +1320,8 @@ static void FASTCALL Vdp2DrawScroll(vdp2draw_struct *info, Vdp2* lines, Vdp2* re
    line_window_base[1] = linewnd1addr;
    /* color calculation window: in => no color calc, out => color calc */
    ReadWindowData(regs->WCTLD >> 8, colorcalcwindow, regs);
-   {
-	   static int tables_initialized = 0;
-	   static int mosaic_table[16][1024];
-	   if(!tables_initialized)
-	   {
-		   tables_initialized = 1;
-			for(i=0;i<16;i++)
-			{
-				int m = i+1;
-				for(j=0;j<1024;j++)
-					mosaic_table[i][j] = j/m*m;
-			}
-	   }
-	   mosaic_x = mosaic_table[info->mosaicxmask-1];
-	   mosaic_y = mosaic_table[info->mosaicymask-1];
-   }
+   mosaic_x = mosaic_table[info->mosaicxmask-1];
+   mosaic_y = mosaic_table[info->mosaicymask-1];
 
    Vdp2GetInterlaceInfo(&start_line, &line_increment);
 
@@ -3280,6 +3279,7 @@ void VidsoftSpriteThread(void * data)
 
 int VIDSoftInit(void)
 {
+   VidsoftInitMosaicTable();
    int i;
 
    /* the render threads' copies of VDP1/VDP2 RAM start out stale */
