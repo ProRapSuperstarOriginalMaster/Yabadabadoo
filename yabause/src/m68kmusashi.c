@@ -774,12 +774,15 @@ static void M68KMusashiSetMSP(u32 val) {
 static void M68KMusashiSetFetch(u32 low_adr, u32 high_adr, pointer fetch_adr) {
 }
 
+/* level 0: no interrupt pending any more (the SCSP drops its lines) */
 static void FASTCALL M68KMusashiSetIRQ(s32 level) {
    if (level > 0)
    {
       idle_resume_all();   /* the interrupt is taken now, from where it would be */
       m68k_set_irq(level);
    }
+   else
+      m68k_set_irq(0);
 }
 
 /* the SH2 wrote to sound RAM: forget the loops whose code it changed */

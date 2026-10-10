@@ -1723,20 +1723,28 @@ scsp_trigger_main_interrupt (u32 id)
   scsp.mintf ();
 }
 
-static INLINE void
-scsp_trigger_sound_interrupt (u32 id)
+/* The SCSP holds the sound CPU's interrupt lines at the highest level among
+   the pending, enabled interrupts (SCIPD & SCIEB, levels from SCILV0-2; bits
+   7-10 share bit 7's level), so this is re-checked whenever one of those
+   changes. Raising only the new interrupt's level could replace a higher one
+   still waiting, which was then never taken: Virtua Cop 2's sequencer timer
+   was lost that way and the game had no sound effects. Kronos does the same. */
+static void
+scsp_check_sound_interrupt (void)
 {
-   u32 level;
-   level = 0;
-   if (id > 0x80) id = 0x80;
+   u32 pend = scsp.scipd & scsp.scieb;
+   u32 level = 0;
+   int i;
 
-   if (scsp.scilv0 & id) level |= 1;
-   if (scsp.scilv1 & id) level |= 2;
-   if (scsp.scilv2 & id) level |= 4;
+   if (pend & ~0xFF) pend = (pend & 0xFF) | 0x80;
 
-#ifdef SCSP_DEBUG
-   if (id == 0x8) SCSPLOG ("scsp sound interrupt accepted %.2X lev=%d\n", id, level);
-#endif
+   for (i = 0; i < 8; i++)
+      if (pend & (1 << i))
+      {
+         u32 l = ((scsp.scilv0 >> i) & 1) | (((scsp.scilv1 >> i) & 1) << 1)
+               | (((scsp.scilv2 >> i) & 1) << 2);
+         if (l > level) level = l;
+      }
 
    scsp.sintf (level);
 }
@@ -1765,7 +1773,7 @@ scsp_sound_interrupt (u32 id)
   WRITE_THROUGH (scsp.scipd);
 
   if (scsp.scieb & id)
-    scsp_trigger_sound_interrupt (id);
+    scsp_check_sound_interrupt ();
 }
 
 ////////////////////////////////////////////////////////////////
@@ -2600,52 +2608,42 @@ scsp_set_b (u32 a, u8 d)
       return;
 
     case 0x1E: // SCIEB(high byte)
-    {
-      int i;
       scsp.scieb = (scsp.scieb & 0xFF) + (d << 8);
-
-      for (i = 0; i < 3; i++)
-        {
-          if (scsp.scieb & (1 << i) && scsp.scipd & (1 << i))
-            scsp_trigger_sound_interrupt ((1 << (i+8)));
-        }
-
+      scsp_check_sound_interrupt ();
       return;
-    }
+
     case 0x1F: // SCIEB(low byte)
-    {
-      int i;
       scsp.scieb = (scsp.scieb & 0x700) + d;
-
-      for (i = 0; i < 8; i++)
-        {
-          if (scsp.scieb & (1 << i) && scsp.scipd & (1 << i))
-            scsp_trigger_sound_interrupt ((1 << i));
-        }
+      scsp_check_sound_interrupt ();
       return;
-    }
+
     case 0x21: // SCIPD(low byte)
       if (d & 0x20) scsp_sound_interrupt (0x20);
       return;
 
     case 0x22: // SCIRE(high byte)
       scsp.scipd &= ~(d << 8);
+      scsp_check_sound_interrupt ();
       return;
 
     case 0x23: // SCIRE(low byte)
       scsp.scipd &= ~(u32)d;
+      scsp_check_sound_interrupt ();
       return;
 
     case 0x25: // SCILV0
       scsp.scilv0 = d;
+      scsp_check_sound_interrupt ();
       return;
 
     case 0x27: // SCILV1
       scsp.scilv1 = d;
+      scsp_check_sound_interrupt ();
       return;
 
     case 0x29: // SCILV2
       scsp.scilv2 = d;
+      scsp_check_sound_interrupt ();
       return;
 
     case 0x2A: // MCIEB(high byte)
@@ -2748,34 +2746,32 @@ scsp_set_w (u32 a, u16 d)
       return;
 
     case 0x1E: // SCIEB
-    {
-      int i;
       scsp.scieb = d;
-      for (i = 0; i < 11; i++)
-        {
-          if (scsp.scieb & (1 << i) && scsp.scipd & (1 << i))
-            scsp_trigger_sound_interrupt ((1 << i));
-        }
+      scsp_check_sound_interrupt ();
       return;
-    }
+
     case 0x20: // SCIPD
       if (d & 0x20) scsp_sound_interrupt (0x20);
       return;
 
     case 0x22: // SCIRE
       scsp.scipd &= ~d;
+      scsp_check_sound_interrupt ();
       return;
 
     case 0x24: // SCILV0
       scsp.scilv0 = d;
+      scsp_check_sound_interrupt ();
       return;
 
     case 0x26: // SCILV1
       scsp.scilv1 = d;
+      scsp_check_sound_interrupt ();
       return;
 
     case 0x28: // SCILV2
       scsp.scilv2 = d;
+      scsp_check_sound_interrupt ();
       return;
 
     case 0x2A: // MCIEB
