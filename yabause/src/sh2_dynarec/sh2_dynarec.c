@@ -3787,8 +3787,8 @@ void ujump_assemble(int i,struct regstat *i_regs)
   }
   #endif
   if(rt1[i]==PR) {
-    if(rt1[i+1]==PR||rt2[i+1]==PR) {
-      // Delay slot abuse, set PR before executing delay slot
+    // BSR: as for JSR in rjump_assemble, the slot sees the new PR
+    if(rt1[i+1]==PR||rt2[i+1]==PR||rs1[i+1]==PR||rs2[i+1]==PR||rs3[i+1]==PR) {
       int rt;
       unsigned int return_address;
       rt=get_reg(regs[i].regmap,PR);
@@ -3814,9 +3814,6 @@ void ujump_assemble(int i,struct regstat *i_regs)
   if(rt1[i]==PR) {
     int rt;
     unsigned int return_address;
-    assert(rs1[i+1]!=PR);
-    assert(rs2[i+1]!=PR);
-    assert(rs3[i+1]!=PR);
     rt=get_reg(branch_regs[i].regmap,PR);
     assem_debug("branch(%d): eax=%d ecx=%d edx=%d ebx=%d ebp=%d esi=%d edi=%d\n",i,branch_regs[i].regmap[0],branch_regs[i].regmap[1],branch_regs[i].regmap[2],branch_regs[i].regmap[3],branch_regs[i].regmap[5],branch_regs[i].regmap[6],branch_regs[i].regmap[7]);
     //assert(rt>=0);
@@ -3919,8 +3916,10 @@ void rjump_assemble(int i,struct regstat *i_regs)
   }
   #endif
   if(rt1[i]==PR) {
-    if(rt1[i+1]==PR||rt2[i+1]==PR) {
-      // Delay slot abuse, set PR before executing delay slot
+    // The delay slot sees the new PR (JSR/BSRF set PR first, as the
+    // interpreter does): set it before the slot when the slot reads or
+    // writes PR (Sonic Jam: "jsr @Rm; sts.l pr,@-r15")
+    if(rt1[i+1]==PR||rt2[i+1]==PR||rs1[i+1]==PR||rs2[i+1]==PR||rs3[i+1]==PR) {
       int rt,return_address;
       rt=get_reg(regs[i].regmap,rt1[i]);
       assert(rt>=0);
@@ -3945,9 +3944,6 @@ void rjump_assemble(int i,struct regstat *i_regs)
   load_regs(regs[i].regmap,branch_regs[i].regmap,rs1[i],CCREG,CCREG);
   if(rt1[i]==PR) {
     int rt,return_address;
-    assert(rs1[i+1]!=PR);
-    assert(rs2[i+1]!=PR);
-    assert(rs3[i+1]!=PR);
     rt=get_reg(branch_regs[i].regmap,rt1[i]);
     assem_debug("branch(%d): eax=%d ecx=%d edx=%d ebx=%d ebp=%d esi=%d edi=%d\n",i,branch_regs[i].regmap[0],branch_regs[i].regmap[1],branch_regs[i].regmap[2],branch_regs[i].regmap[3],branch_regs[i].regmap[5],branch_regs[i].regmap[6],branch_regs[i].regmap[7]);
     if(rt>=0&&rt1[i+1]!=PR&&rt2[i+1]!=PR) {
@@ -6728,7 +6724,6 @@ int sh2_recompile_block(int addr)
           if (rt1[i]==PR) {
             alloc_reg(&current,i,PR);
             dirty_reg(&current,PR);
-            assert(rs1[i+1]!=PR&&rs2[i+1]!=PR);
             #ifdef REG_PREFETCH
             alloc_reg(&current,i,PTEMP);
             #endif
@@ -6763,8 +6758,6 @@ int sh2_recompile_block(int addr)
             if (rt1[i]==PR) {
               alloc_reg(&current,i,rt1[i]);
               dirty_reg(&current,rt1[i]);
-              assert(rs1[i+1]!=PR&&rs2[i+1]!=PR);
-              if(rs1[i+1]==PR||rs2[i+1]==PR) {printf("OOPS\n");}
               #ifdef REG_PREFETCH
               alloc_reg(&current,i,PTEMP);
               #endif
