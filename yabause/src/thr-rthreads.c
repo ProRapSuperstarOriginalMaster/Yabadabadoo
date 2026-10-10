@@ -235,6 +235,11 @@ void YabThreadWait(unsigned int id)
 	thread_handle[id].running = 0;
 }
 
+int YabThreadSelfId(void)
+{
+	return yab_self_id;
+}
+
 void YabThreadYield(void)
 {
 #ifdef _WIN32

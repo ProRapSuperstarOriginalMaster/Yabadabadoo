@@ -80,13 +80,31 @@ static INLINE u64 YabProfNow(void)
    (1u << PROF_WAIT_VDP1) | (1u << PROF_OUTPUT))
 extern u64 yab_prof_cpu_ns[PROF_COUNT];
 static INLINE u64 YabProfThreadNs(void);
+/* Timeline trace (YAB_PROF_TRACE=file:first_frame:frames): sections in this
+   mask are also logged with start and end time and thread, and written as a
+   Chrome/Perfetto trace (open in ui.perfetto.dev) */
+#define PROF_TRACE_MASK ((1ull << PROF_FRAME) | (1ull << PROF_VBLANKOUT) | (1ull << PROF_DRAWSCREENS) | \
+   (1ull << PROF_VDP1DRAW) | (1ull << PROF_VBLANKIN) | (1ull << PROF_WAIT_LAYERS) | (1ull << PROF_TITAN) | \
+   (1ull << PROF_WAIT_VDP1) | (1ull << PROF_OUTPUT) | (1ull << PROF_SNAPSHOT) | (1ull << PROF_VDP1_SNAPSHOT) | \
+   (1ull << PROF_VDP1_ERASE) | (1ull << PROF_SH2_COMPILE) | (1ull << PROF_T_VDP1) | (1ull << PROF_T_LAYERS) | \
+   (1ull << PROF_T_SPRITE) | (1ull << PROF_T_PRIO) | (1ull << PROF_L_NBG0) | (1ull << PROF_L_NBG1) | \
+   (1ull << PROF_L_NBG2) | (1ull << PROF_L_NBG3) | (1ull << PROF_L_RBG0) | (1ull << PROF_W_M68K) | \
+   (1ull << PROF_T_M68K))
+extern volatile int yab_prof_tracing;
+void YabProfTraceEvent(int id, u64 t0, u64 t1);
+#define YAB_PROF_TRACE(id, t0, t1) do { \
+      if (yab_prof_tracing && ((1ull << (id)) & PROF_TRACE_MASK)) \
+         YabProfTraceEvent(id, t0, t1); \
+   } while (0)
 #define YAB_PROF_BEGIN(id) u64 yab_prof_start_##id = YabProfNow(); \
-   u64 yab_prof_cstart_##id = ((1u << (id)) & PROF_CPU_MASK) ? YabProfThreadNs() : 0
+   u64 yab_prof_cstart_##id = ((1ull << (id)) & PROF_CPU_MASK) ? YabProfThreadNs() : 0
 #define YAB_PROF_COUNT(id) (yab_prof_calls[id]++)
 #define YAB_PROF_END(id) do { \
-      yab_prof_ticks[id] += YabProfNow() - yab_prof_start_##id; \
+      u64 yab_prof_now_ = YabProfNow(); \
+      yab_prof_ticks[id] += yab_prof_now_ - yab_prof_start_##id; \
       yab_prof_calls[id]++; \
-      if ((1u << (id)) & PROF_CPU_MASK) \
+      YAB_PROF_TRACE(id, yab_prof_start_##id, yab_prof_now_); \
+      if ((1ull << (id)) & PROF_CPU_MASK) \
          yab_prof_cpu_ns[id] += YabProfThreadNs() - yab_prof_cstart_##id; \
    } while (0)
 /* Worker threads: CPU time of the calling thread (in ns), so time spent
@@ -98,10 +116,13 @@ static INLINE u64 YabProfThreadNs(void)
    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
    return (u64)ts.tv_sec * 1000000000ull + ts.tv_nsec;
 }
-#define YAB_PROF_TBEGIN(id) u64 yab_prof_tstart_##id = YabProfThreadNs()
+#define YAB_PROF_TBEGIN(id) u64 yab_prof_tstart_##id = YabProfThreadNs(); \
+   u64 yab_prof_twall_##id = yab_prof_tracing ? YabProfNow() : 0
 #define YAB_PROF_TEND(id) do { \
       __atomic_add_fetch(&yab_prof_thread_ns[id], YabProfThreadNs() - yab_prof_tstart_##id, __ATOMIC_RELAXED); \
       __atomic_add_fetch(&yab_prof_calls[id], 1, __ATOMIC_RELAXED); \
+      if (yab_prof_twall_##id) \
+         YAB_PROF_TRACE(id, yab_prof_twall_##id, YabProfNow()); \
    } while (0)
 
 void YabProfFrame(void);   // call once per emulated frame

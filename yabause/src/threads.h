@@ -68,6 +68,10 @@ int YabThreadStart(unsigned int id, void (*func)(void *), void *arg);
 // YAB_WORKER_NICE in the environment overrides it.
 void YabThreadSetWorkerNice(int nice);
 
+// YabThreadSelfId:  The calling thread's YAB_THREAD_* ID, or -1 (the
+// emulation thread, frontend threads).
+int YabThreadSelfId(void);
+
 // YabThreadWait:  Wait for the given ID's thread to terminate.  Returns
 // immediately if no thread has been started on the given ID.
 void YabThreadWait(unsigned int id);

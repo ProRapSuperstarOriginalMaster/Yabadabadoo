@@ -1289,6 +1289,7 @@ int YabauseQuickLoadGame(void)
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include "threads.h"
 u64 yab_prof_ticks[PROF_COUNT];
 u32 yab_prof_calls[PROF_COUNT];
 u64 yab_prof_thread_ns[PROF_COUNT];
@@ -1304,8 +1305,131 @@ static double YabProfWall(void)
    return ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
+/* YAB_PROF_TRACE=file:first:count -- timeline of frames [first, first+count):
+   every traced section with its thread, written as Chrome trace JSON */
+volatile int yab_prof_tracing;
+typedef struct { u64 t0, t1; s16 id, thread; } YabProfTraceEv;
+#define PROF_TRACE_MAX (1 << 18)
+static YabProfTraceEv *yab_trace;
+static u32 yab_trace_n;
+static u32 yab_trace_first, yab_trace_count;
+static char yab_trace_path[512];
+static u64 yab_trace_t0;
+static double yab_trace_wall0;
+
+void YabProfTraceEvent(int id, u64 t0, u64 t1)
+{
+   u32 i = __atomic_fetch_add(&yab_trace_n, 1, __ATOMIC_RELAXED);
+   if (i < PROF_TRACE_MAX)
+   {
+      yab_trace[i].t0 = t0;
+      yab_trace[i].t1 = t1;
+      yab_trace[i].id = id;
+      yab_trace[i].thread = YabThreadSelfId();
+   }
+}
+
+static const char *yab_prof_names[PROF_COUNT];
+
+static void YabProfTraceWrite(void)
+{
+   static const char *threads[YAB_NUM_THREADS] = {
+      [YAB_THREAD_SCSP] = "sound (68K)", [YAB_THREAD_VIDSOFT_LAYER_NBG3] = "layer NBG3",
+      [YAB_THREAD_VIDSOFT_LAYER_NBG2] = "layer NBG2", [YAB_THREAD_VIDSOFT_LAYER_NBG1] = "layer NBG1",
+      [YAB_THREAD_VIDSOFT_LAYER_NBG0] = "layer NBG0", [YAB_THREAD_VIDSOFT_LAYER_RBG0] = "layer RBG0",
+      [YAB_THREAD_VIDSOFT_VDP1] = "VDP1", [YAB_THREAD_VIDSOFT_PRIORITY_0] = "compositing 0",
+      [YAB_THREAD_VIDSOFT_PRIORITY_1] = "compositing 1", [YAB_THREAD_VIDSOFT_PRIORITY_2] = "compositing 2",
+      [YAB_THREAD_VIDSOFT_PRIORITY_3] = "compositing 3", [YAB_THREAD_VIDSOFT_PRIORITY_4] = "compositing 4",
+      [YAB_THREAD_VIDSOFT_LAYER_SPRITE] = "sprite layer", [YAB_THREAD_VIDSOFT_VDP1B] = "VDP1 (2nd half)",
+   };
+   double us_per_tick = (YabProfWall() - yab_trace_wall0) * 1e6 / (double)(YabProfNow() - yab_trace_t0);
+   u32 n = yab_trace_n < PROF_TRACE_MAX ? yab_trace_n : PROF_TRACE_MAX, i;
+   FILE *f = fopen(yab_trace_path, "w");
+   int t;
+   if (!f)
+      return;
+   fprintf(f, "{\"displayTimeUnit\":\"ms\",\"traceEvents\":[\n");
+   fprintf(f, "{\"name\":\"thread_name\",\"ph\":\"M\",\"pid\":1,\"tid\":0,\"args\":{\"name\":\"emulation\"}}");
+   for (t = 0; t < YAB_NUM_THREADS; t++)
+      if (threads[t])
+         fprintf(f, ",\n{\"name\":\"thread_name\",\"ph\":\"M\",\"pid\":1,\"tid\":%d,\"args\":{\"name\":\"%s\"}}", t + 1, threads[t]);
+   {
+      /* pieces of the same section on the same thread less than 20 us apart
+         (the sound worker runs thousands per frame) are merged into one */
+      static double pend_ts[YAB_NUM_THREADS + 1][PROF_COUNT], pend_end[YAB_NUM_THREADS + 1][PROF_COUNT];
+      int id;
+      memset(pend_end, 0, sizeof(pend_end));
+      for (i = 0; i < n; i++)
+      {
+         const YabProfTraceEv *e = &yab_trace[i];
+         double ts = (double)(s64)(e->t0 - yab_trace_t0) * us_per_tick;
+         double end = (double)(s64)(e->t1 - yab_trace_t0) * us_per_tick;
+         t = e->thread + 1;
+         id = e->id;
+         if (ts < 0 || t < 0 || t > YAB_NUM_THREADS)
+            continue;   /* section started before the window */
+         if (pend_end[t][id] > 0 && ts - pend_end[t][id] < 20)
+         {
+            if (end > pend_end[t][id])
+               pend_end[t][id] = end;
+            continue;
+         }
+         if (pend_end[t][id] > 0)
+            fprintf(f, ",\n{\"name\":\"%s\",\"ph\":\"X\",\"pid\":1,\"tid\":%d,\"ts\":%.1f,\"dur\":%.1f}",
+                    yab_prof_names[id], t, pend_ts[t][id], pend_end[t][id] - pend_ts[t][id]);
+         pend_ts[t][id] = ts;
+         pend_end[t][id] = end > ts ? end : ts + 0.1;
+      }
+      for (t = 0; t <= YAB_NUM_THREADS; t++)
+         for (id = 0; id < PROF_COUNT; id++)
+            if (pend_end[t][id] > 0)
+               fprintf(f, ",\n{\"name\":\"%s\",\"ph\":\"X\",\"pid\":1,\"tid\":%d,\"ts\":%.1f,\"dur\":%.1f}",
+                       yab_prof_names[id], t, pend_ts[t][id], pend_end[t][id] - pend_ts[t][id]);
+   }
+   fprintf(f, "\n]}\n");
+   fclose(f);
+   fprintf(stderr, "trace: %u events%s -> %s\n", n, yab_trace_n > PROF_TRACE_MAX ? " (buffer full)" : "", yab_trace_path);
+}
+
+static void YabProfTraceFrame(u32 frame)
+{
+   static int checked;
+   if (!checked)
+   {
+      const char *e = getenv("YAB_PROF_TRACE");
+      checked = 1;
+      if (e)
+      {
+         const char *c1 = strchr(e, ':'), *c2 = c1 ? strchr(c1 + 1, ':') : NULL;
+         size_t len = c1 ? (size_t)(c1 - e) : strlen(e);
+         if (len >= sizeof(yab_trace_path))
+            len = sizeof(yab_trace_path) - 1;
+         memcpy(yab_trace_path, e, len);
+         yab_trace_path[len] = 0;
+         yab_trace_first = c1 ? (u32)atoi(c1 + 1) : 300;
+         yab_trace_count = c2 ? (u32)atoi(c2 + 1) : 10;
+         yab_trace = calloc(PROF_TRACE_MAX, sizeof(*yab_trace));
+      }
+   }
+   if (!yab_trace)
+      return;
+   if (frame == yab_trace_first)
+   {
+      yab_trace_n = 0;
+      yab_trace_t0 = YabProfNow();
+      yab_trace_wall0 = YabProfWall();
+      yab_prof_tracing = 1;
+   }
+   else if (frame == yab_trace_first + yab_trace_count && yab_prof_tracing)
+   {
+      yab_prof_tracing = 0;
+      YabProfTraceWrite();
+   }
+}
+
 void YabProfFrame(void)
 {
+   YabProfTraceFrame(yab_prof_frames);
    if (yab_prof_skip == (u32)-1)
       yab_prof_skip = getenv("YAB_PROF_SKIP") ? (u32)atoi(getenv("YAB_PROF_SKIP")) : 0;
    if (yab_prof_frames == yab_prof_skip)
@@ -1358,9 +1482,7 @@ void YabProfFrame(void)
    yab_prof_frames++;
 }
 
-void YabProfReport(void)
-{
-   static const char *names[PROF_COUNT] = {
+static const char *yab_prof_names[PROF_COUNT] = {
       "frame (YabauseEmulate)", "SH2Exec (interpreter)", "SCU", "68K", "SCSP", "SMPC", "CD block",
       "HBlank IN/OUT", "VBlank-OUT", "  VDP2 DrawScreens", "  Vdp1Draw", "VBlank-IN",
       "  wait for layer threads", "  Titan compositing", "wait for VDP1 thread", "video output", "VDP2 state/VRAM snapshot", "VDP1 RAM snapshot", "VDP1 erase", "VDP1 list pre-scan",
@@ -1368,6 +1490,10 @@ void YabProfReport(void)
       "[thread CPU] VDP1", "[thread CPU] VDP2 layers", "[thread CPU] sprite layer", "[thread CPU] compositing", "[layer CPU] NBG0", "[layer CPU] NBG1", "[layer CPU] NBG2", "[layer CPU] NBG3", "[layer CPU] RBG0",
       "[main CPU] sound queue drains", "[any CPU] queued sound work",
    };
+
+void YabProfReport(void)
+{
+   const char **names = yab_prof_names;
    u32 frames = yab_prof_frames > yab_prof_skip ? yab_prof_frames - yab_prof_skip : 0;
    double wall = YabProfWall() - yab_prof_wall0;
    double ms_per_tick = wall * 1000.0 / (double)(YabProfNow() - yab_prof_t0);
