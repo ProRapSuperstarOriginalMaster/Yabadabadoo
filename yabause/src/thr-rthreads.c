@@ -33,6 +33,7 @@
 #include <sys/resource.h>
 #endif
 
+#include <stdlib.h>
 #include "core.h"
 #include "threads.h"
 #include "rthreads/rthreads.h"
@@ -46,6 +47,20 @@ struct thd_s {
 };
 
 static struct thd_s thread_handle[YAB_NUM_THREADS];
+
+/* The calling thread's YAB_THREAD_* id (-1: not started by YabThreadStart).
+   YabThreadSleep used to find it by scanning thread_handle, which raced
+   with starting and joining other threads (a joined thread's sthread is
+   freed while another thread's scan may be reading it). */
+static __thread int yab_self_id = -1;
+struct thd_id_start { void (*func)(void *); void *arg; int id; };
+static void IdTrampoline(void *data)
+{
+	struct thd_id_start st = *(struct thd_id_start *)data;
+	free(data);
+	yab_self_id = st.id;
+	st.func(st.arg);
+}
 
 /* YabFlagWait/YabFlagNotify: one condition for all flags, as only the
  * emulation thread waits */
@@ -67,7 +82,7 @@ static int WorkerNiced(unsigned int id)
 	return id >= YAB_THREAD_VIDSOFT_LAYER_NBG3 && id != YAB_THREAD_VIDSOFT_VDP1 &&
 	       id != YAB_THREAD_VIDSOFT_VDP1B && id != YAB_THREAD_VIDSOFT_LAYER_RBG0;
 }
-struct thd_start { void (*func)(void *); void *arg; int nice; int cpu; int batch; };
+struct thd_start { void (*func)(void *); void *arg; int nice; int cpu; int batch; int id; };
 static int worker_nice;
 
 /* Test knob YAB_AFFINITY (two-core devices): 1 = emulation thread on CPU 0,
@@ -114,6 +129,7 @@ static void ThreadTrampoline(void *data)
 {
 	struct thd_start st = *(struct thd_start *)data;
 	free(data);
+	yab_self_id = st.id;
 	if (st.batch)
 	{
 		struct sched_param sp = { 0 };
@@ -182,7 +198,7 @@ int YabThreadStart(unsigned int id, void (*func)(void *), void *arg)
 		if (nice || affinity_mode > 0 || batch)
 		{
 			struct thd_start *st = malloc(sizeof(*st));
-			st->func = func; st->arg = arg; st->nice = nice; st->cpu = cpu; st->batch = batch;
+			st->func = func; st->arg = arg; st->nice = nice; st->cpu = cpu; st->batch = batch; st->id = (int)id;
 			if ((thread_handle[id].thd = sthread_create(ThreadTrampoline, st)) == NULL)
 			{
 				free(st);
@@ -194,9 +210,14 @@ int YabThreadStart(unsigned int id, void (*func)(void *), void *arg)
 		}
 	}
 #endif
-	if ((thread_handle[id].thd = sthread_create((void *)func, arg)) == NULL)
 	{
-		return -1;
+		struct thd_id_start *st = malloc(sizeof(*st));
+		st->func = func; st->arg = arg; st->id = (int)id;
+		if ((thread_handle[id].thd = sthread_create(IdTrampoline, st)) == NULL)
+		{
+			free(st);
+			return -1;
+		}
 	}
 
 	thread_handle[id].running = 1;
@@ -225,18 +246,9 @@ void YabThreadYield(void)
 
 void YabThreadSleep(void)
 {
-	unsigned int i, id;
+	int id = yab_self_id;
 
-	id = YAB_NUM_THREADS;
-
-	for(i = 0;i < YAB_NUM_THREADS;i++)
-	{
-		if(sthread_isself(thread_handle[i].thd)) {
-			id = i;
-		}
-	}
-
-	if (id == YAB_NUM_THREADS) return;
+	if (id < 0 || id >= YAB_NUM_THREADS) return;
 
 	// Wait until woken; a wake that happened since the last sleep counts,
 	// otherwise it would be lost if it arrived before we got here.
