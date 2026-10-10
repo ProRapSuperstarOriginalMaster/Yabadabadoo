@@ -219,7 +219,7 @@ static const char *no_bios_glyph(char c)
    return NULL;
 }
 
-static void no_bios_text(u16 *fb, int x, int y, const char *str)
+static void draw_text(u16 *fb, int w, int h, int x, int y, const char *str)
 {
 #ifdef USE_RGB_565
    const u16 ink = 0xFFFF;
@@ -240,14 +240,19 @@ static void no_bios_text(u16 *fb, int x, int y, const char *str)
                c = font[*str * 10 + l][p];
             else
                c = ' ';
-            if (x + p < 0 || x + p >= 320 || y + l < 0 || y + l >= 240)
+            if (x + p < 0 || x + p >= w || y + l < 0 || y + l >= h)
                continue;
             if (c == '#')
-               fb[(y + l) * 320 + x + p] = ink;
+               fb[(y + l) * w + x + p] = ink;
             else if (c == '.')
-               fb[(y + l) * 320 + x + p] = 0;
+               fb[(y + l) * w + x + p] = 0;
          }
    }
+}
+
+static void no_bios_text(u16 *fb, int x, int y, const char *str)
+{
+   draw_text(fb, 320, 240, x, y, str);
 }
 
 static void no_bios_run(void)
@@ -703,6 +708,18 @@ void YuiSwapBuffers(void)
    game_width  = current_width;
    game_height = current_height;
 
+#ifdef YABADABADOO_DEV
+   {
+      /* on-screen statistics (dev option), drawn into the picture: RetroArch's own
+         notifications may be switched off */
+      const char *l1, *l2;
+      if (devsession_stats_text(&l1, &l2))
+      {
+         draw_text((u16 *)dispbuffer, game_width, game_height, 4, game_height - 24, l1);
+         draw_text((u16 *)dispbuffer, game_width, game_height, 4, game_height - 13, l2);
+      }
+   }
+#endif
    video_cb(dispbuffer, game_width, game_height, game_width * 2);
    one_frame_rendered = true;
 }

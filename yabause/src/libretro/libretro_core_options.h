@@ -327,7 +327,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       "yabadabadoo_dev_stats",
       "On-Screen Statistics (Dev)",
       NULL,
-      "Once a second: frames drawn per second, emulated frames per second, frames skipped, CPU use of the emulation thread and of the whole process (100% = one core), lowest audio buffer level.",
+      "Drawn into the picture (bottom left), updated once a second: frames drawn and emulated per second, frames skipped; CPU use of the emulation thread and of the whole process (100 = one core), lowest audio buffer level (percent).",
       NULL,
       NULL,
       {

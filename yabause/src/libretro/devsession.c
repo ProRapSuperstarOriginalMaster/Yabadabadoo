@@ -109,7 +109,7 @@ static int ds_quit;
 static uint64_t st_t0, st_main, st_proc;
 static unsigned st_runs, st_drawn, st_skips;
 static unsigned st_occ_min = 100;
-static unsigned ds_msg_version;
+static char st_line1[48], st_line2[48];   /* drawn into the picture by libretro.c */
 
 static uint64_t now_us(clockid_t id)
 {
@@ -344,8 +344,6 @@ retro_input_state_t devsession_wrap_input(retro_input_state_t cb)
 void devsession_init(retro_environment_t env)
 {
    ds_env = env;
-   if (!env(RETRO_ENVIRONMENT_GET_MESSAGE_INTERFACE_VERSION, &ds_msg_version))
-      ds_msg_version = 0;
 }
 
 /* called from check_variables() with the option values (and at load) */
@@ -432,6 +430,16 @@ void devsession_run_begin(void)
    }
 }
 
+/* the statistics lines (once a second), for libretro.c to draw into the picture */
+int devsession_stats_text(const char **l1, const char **l2)
+{
+   if (!ds_stats || !st_line1[0])
+      return 0;
+   *l1 = st_line1;
+   *l2 = st_line2;
+   return 1;
+}
+
 void devsession_skip_decision(int active, unsigned occupancy, int underrun, int skip_next)
 {
    ds_cur.flags |= DS_DECIDED | (active ? DS_AUDIOACT : 0) | (underrun ? DS_UNDERRUN : 0)
@@ -441,24 +449,14 @@ void devsession_skip_decision(int active, unsigned occupancy, int underrun, int 
 
 static void ds_show_stats(uint64_t t)
 {
-   char msg[160];
    double secs = (t - st_t0) / 1e6;
    if (st_t0 && secs >= 1.0)
    {
-      snprintf(msg, sizeof(msg), "drawn %.0f  emu %.0f fps  skip %u  main %.0f%%  all %.0f%%  audio>=%u%%",
-               st_drawn / secs, st_runs / secs, st_skips, st_main / (secs * 1e4),
+      snprintf(st_line1, sizeof(st_line1), "DRAWN %2.0f  EMU %2.0f  SKIP %u", st_drawn / secs,
+               st_runs / secs, st_skips);
+      /* CPU: percent of one core (emulation thread; whole process); AUDIO: lowest buffer level, percent */
+      snprintf(st_line2, sizeof(st_line2), "CPU %3.0f  ALL %3.0f  AUDIO %u", st_main / (secs * 1e4),
                st_proc / (secs * 1e4), st_occ_min);
-      if (ds_msg_version >= 1)
-      {
-         struct retro_message_ext m = { msg, 1100, 1, RETRO_LOG_INFO, RETRO_MESSAGE_TARGET_OSD,
-                                        RETRO_MESSAGE_TYPE_NOTIFICATION, -1 };
-         ds_env(RETRO_ENVIRONMENT_SET_MESSAGE_EXT, &m);
-      }
-      else
-      {
-         struct retro_message m = { msg, 66 };
-         ds_env(RETRO_ENVIRONMENT_SET_MESSAGE, &m);
-      }
       st_t0 = 0;
    }
    if (!st_t0)
