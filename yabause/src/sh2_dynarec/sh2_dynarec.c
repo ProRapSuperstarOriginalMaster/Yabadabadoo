@@ -4240,6 +4240,29 @@ int idle_counter_skip(int cc,u32 desc,u32 iter)
   return cc+n*(int)iter;
 }
 
+// Reads for idle_call_is_empty(): straight from the page when memory_map
+// maps it (as compiled loads do: host = addr + entry*4, longs stored as two
+// host-order halfwords), else through the handlers.
+static u32 idle_read_long(SH2_struct *sh,u32 a)
+{
+#if defined(__arm__)
+  u32 e=memory_map[a>>12];
+  if(!(e&0x80000000)&&!(a&3)) {
+    u32 v=*(u32 *)(pointer)(a+(e<<2));
+    return (v>>16)|(v<<16);
+  }
+#endif
+  return MappedMemoryReadLongNocache(sh,a);
+}
+static u16 idle_read_word(SH2_struct *sh,u32 a)
+{
+#if defined(__arm__)
+  u32 e=memory_map[a>>12];
+  if(!(e&0x80000000)&&!(a&1)) return *(u16 *)(pointer)(a+(e<<2));
+#endif
+  return MappedMemoryReadWordNocache(sh,a);
+}
+
 // Called from an idle loop's back edge (registers written back): is the
 // subroutine the loop calls still just "rts; nop"?
 int idle_call_is_empty(u32 desc,u32 addr)
@@ -4249,12 +4272,12 @@ int idle_call_is_empty(u32 desc,u32 addr)
   u32 target;
   switch(desc&0xFF) {
     case IDLE_CALL_REG: target=reg[(desc>>8)&0xFF]; break;
-    case IDLE_CALL_GBR: target=MappedMemoryReadLongNocache(sh,reg[GBR]+addr); break;
-    case IDLE_CALL_REGIND: target=MappedMemoryReadLongNocache(sh,reg[(desc>>8)&0xFF]+addr); break;
-    default: target=MappedMemoryReadLongNocache(sh,addr); break;
+    case IDLE_CALL_GBR: target=idle_read_long(sh,reg[GBR]+addr); break;
+    case IDLE_CALL_REGIND: target=idle_read_long(sh,reg[(desc>>8)&0xFF]+addr); break;
+    default: target=idle_read_long(sh,addr); break;
   }
-  return MappedMemoryReadWordNocache(sh,target)==0x000B && // RTS
-         MappedMemoryReadWordNocache(sh,target+2)==0x0009; // NOP
+  return idle_read_word(sh,target)==0x000B && // RTS
+         idle_read_word(sh,target+2)==0x0009; // NOP
 }
 
 // Taken branch of a polling loop: end the time slice now and resume at the
