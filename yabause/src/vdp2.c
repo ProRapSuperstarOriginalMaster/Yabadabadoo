@@ -49,6 +49,9 @@ Vdp2External_struct Vdp2External;
 
 struct CellScrollData cell_scroll_data[270];
 Vdp2 Vdp2Lines[270];
+/* the registers as the last display ended (VBlank-IN), see Vdp2LinesCatchUp */
+static Vdp2 vdp2_vblank_regs;
+static int vdp2_vblank_regs_valid;
 
 static int autoframeskipenab=0;
 static int throttlespeed=0;
@@ -360,6 +363,7 @@ void Vdp2Reset(void) {
 
    yabsys.VBlankLineCount = 225;
    Vdp2Internal.ColorMode = 0;
+   vdp2_vblank_regs_valid = 0;
 
    Vdp2External.disptoggle = 0xFF;
 }
@@ -375,6 +379,8 @@ void Vdp2VBlankIN(void) {
 #ifdef YAB_PROFILE
 #undef Vdp2VBlankIN
 #endif
+   memcpy(&vdp2_vblank_regs, Vdp2Regs, sizeof(Vdp2));
+   vdp2_vblank_regs_valid = 1;
    if (!(Vdp1Regs->FBCR & 2) || Vdp1External.changerequest)
       vdp1_draw_pending = 1;
    Vdp1External.changerequest = 0;
@@ -476,6 +482,47 @@ void SpeedThrottleDisable(void) {
 
 //////////////////////////////////////////////////////////////////////////////
 
+/* The renderers draw the whole frame at VBlank-OUT, at the start of the
+   display. A layer is drawn if BGON enables it now and, line by line, if
+   BGON enabled it in Vdp2Lines, which were captured during the previous
+   frame's display; other per-line registers (colour offsets, plane
+   addresses) come from Vdp2Lines too. A layer switched on during the VBlank
+   in between would be on for the frame but off on every line: not drawn.
+   VF2's intro switches its FMV between NBG0 and NBG1 this way every third
+   frame (one black frame each time; Beetle shows none).
+   So VBlank-IN keeps a copy of the registers as the display ended, and when
+   the game changed BGON since then (a scene switch), VBlank-OUT carries
+   every register it changed into the lines, from line 0 up to the first line
+   where that register changed during the display (mid-frame changes stay).
+   All of them, not just BGON: a new scene's layers need their new plane
+   addresses too (Princess Crown, loading: garbage tiles otherwise). Nothing
+   is carried when BGON stayed: games pair fades (colour offsets) with VDP1
+   pictures, which reach the screen a frame late here as well (Sega Rally:
+   carrying fades over made its brightness flicker). */
+static void Vdp2LinesCatchUp(void)
+{
+   const u16 *now = (const u16 *)Vdp2Regs;
+   const u16 *before = (const u16 *)&vdp2_vblank_regs;
+   int last = yabsys.VBlankLineCount < 270 ? yabsys.VBlankLineCount : 270;
+   int i, line;
+
+   if (!vdp2_vblank_regs_valid)
+      return;
+   vdp2_vblank_regs_valid = 0;
+
+   if (Vdp2Regs->BGON == vdp2_vblank_regs.BGON || Vdp2Regs->BGON == Vdp2Lines[0].BGON)
+      return;
+
+   for (i = 0; i < (int)(sizeof(Vdp2) / sizeof(u16)); i++)
+   {
+      u16 old = ((u16 *)&Vdp2Lines[0])[i];
+      if (now[i] == before[i] || now[i] == old)
+         continue;
+      for (line = 0; line < last && ((u16 *)&Vdp2Lines[line])[i] == old; line++)
+         ((u16 *)&Vdp2Lines[line])[i] = now[i];
+   }
+}
+
 #ifdef YAB_PROFILE
 void Vdp2VBlankOUTBody(void);
 void Vdp2VBlankOUT(void) { YAB_PROF_BEGIN(PROF_VBLANKOUT); Vdp2VBlankOUTBody(); YAB_PROF_END(PROF_VBLANKOUT); }
@@ -524,6 +571,8 @@ void Vdp2VBlankOUT(void) {
       VIDCore = vdp2_saved_vidcore;
       vdp2_saved_vidcore = NULL;
    }
+
+   Vdp2LinesCatchUp();
 
    if (VIDCore->id == 2 /* VIDCORE_SOFT */)
    {
