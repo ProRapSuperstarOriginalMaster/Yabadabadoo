@@ -358,6 +358,31 @@ void devsession_deinit(void)
    ds_stop("unloaded");
 }
 
+/* YAB_LOAD_STATE=file: load a state (the core's own data, as harness -L takes) at the first
+   frame, so scripts can start RetroArch at a benchmark scene without its state slots */
+void devsession_load_state_once(void)
+{
+   static int done;
+   const char *path = getenv("YAB_LOAD_STATE");
+   FILE *f;
+   if (done || !path)
+      return;
+   done = 1;
+   if ((f = fopen(path, "rb")))
+   {
+      long size;
+      void *buf;
+      fseek(f, 0, SEEK_END);
+      size = ftell(f);
+      fseek(f, 0, SEEK_SET);
+      buf = malloc(size);
+      if (buf && fread(buf, 1, size, f) == (size_t)size)
+         retro_unserialize(buf, size);
+      free(buf);
+      fclose(f);
+   }
+}
+
 void devsession_run_begin(void)
 {
    uint64_t t = now_us(CLOCK_MONOTONIC);

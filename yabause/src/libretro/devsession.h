@@ -11,6 +11,7 @@ void devsession_init(retro_environment_t env);
 void devsession_config(int mode, int stats, const char *game, int at_boot, const char *extra);
 void devsession_deinit(void);
 retro_input_state_t devsession_wrap_input(retro_input_state_t cb);
+void devsession_load_state_once(void);
 void devsession_run_begin(void);
 void devsession_skip_decision(int active, unsigned occupancy, int underrun, int skip_next);
 void devsession_run_end(int rendered);

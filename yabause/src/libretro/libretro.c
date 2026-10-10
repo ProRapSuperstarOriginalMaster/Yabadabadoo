@@ -1930,6 +1930,7 @@ void retro_run(void)
    }
    one_frame_rendered = false;
 #ifdef YABADABADOO_DEV
+   devsession_load_state_once();
    devsession_run_begin();
 #endif
 #if defined(__linux__) && defined(__arm__)
