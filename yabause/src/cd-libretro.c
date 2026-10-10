@@ -2131,6 +2131,11 @@ static int ISOCDReadSectorFADFromCHD(u32 FAD, void *buffer) {
       ((char*)buffer)[i+1] = pChdInfo->hunk_buffer[hunk_offset + i];
     }
   }
+  else if (track->sector_size == 2048) {
+    // Cooked sectors: build the raw layout the CD block expects (data at 0x10), as the bin/cue path does
+    memcpy(buffer, syncHdr, 12);
+    memcpy((char *)buffer + 0x10, pChdInfo->hunk_buffer + hunk_offset, 2048);
+  }
   else {
     memcpy(buffer, pChdInfo->hunk_buffer + hunk_offset, track->sector_size);
   }
