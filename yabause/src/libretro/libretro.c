@@ -976,8 +976,8 @@ static void dev_apply_options(int at_boot)
    var.value = NULL;
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
       stats = !strcmp(var.value, "enabled");
-   snprintf(extra, sizeof(extra), "bios=%s\nbitmasks=%d\nport0=%u\nport1=%u\n",
-            bios_path, libretro_supports_bitmasks ? 1 : 0, pad_type[0], pad_type[1]);
+   snprintf(extra, sizeof(extra), "version=%s\nbios=%s\nbitmasks=%d\nport0=%u\nport1=%u\n",
+            GIT_VERSION, bios_path, libretro_supports_bitmasks ? 1 : 0, pad_type[0], pad_type[1]);
    devsession_config(mode, stats, game_basename, at_boot, extra);
 }
 #endif

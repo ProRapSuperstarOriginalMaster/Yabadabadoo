@@ -17,7 +17,7 @@
  *
  * File format: records of a uint32 header (type << 24 | payload length)
  * followed by the payload, host byte order (both ends are little endian):
- *   'H' text "key=value\n" lines: version, game, mode, start time
+ *   'H' text "key=value\n" lines: game, mode, start time, version, BIOS, ...
  *   'O' text "key=value\n" lines: every core option (at start, on changes)
  *   'B' (empty) the session starts at power-on (retro_load_game)
  *   'S' u32 call; state data: a state loaded before call (or the snapshot)
@@ -288,8 +288,8 @@ static void ds_start(int mode, const char *game, int at_boot, const char *extra)
    ds_mode = mode;
    ds_invalid = 0;
    ds_unserialize_burst = 0;
-   snprintf(hdr, sizeof(hdr), "version=%s\ngame=%s\nmode=%s\nstart_time=%lld\nstart_call=%u\n%s",
-            GIT_VERSION, game, mode == DS_FULL ? "full" : "timing", (long long)t, ds_call, extra ? extra : "");
+   snprintf(hdr, sizeof(hdr), "game=%s\nmode=%s\nstart_time=%lld\nstart_call=%u\n%s",
+            game, mode == DS_FULL ? "full" : "timing", (long long)t, ds_call, extra ? extra : "");
    ds_text('H', hdr);
    ds_options();
    if (mode == DS_FULL)
