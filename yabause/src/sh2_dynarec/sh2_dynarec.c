@@ -265,6 +265,8 @@ void invalidate_addr(u32 addr);
 void remove_hash(int vaddr);
 void dyna_linker();
 void verify_code();
+u32 DynarecMasterRteInterrupts(u32 pc);
+u32 DynarecSlaveRteInterrupts(u32 pc);
 void cc_interrupt();
 void cc_interrupt_master();
 void slave_entry();
@@ -4010,6 +4012,10 @@ void rjump_assemble(int i,struct regstat *i_regs)
     assert(jaddr);
     add_stub(LOADS_STUB,jaddr,(int)out,i,sp,(int)(&branch_regs[i]),ccadj[i],reglist);
     store_regs_bt(branch_regs[i].regmap,branch_regs[i].dirty,-1);
+    // Take a pending interrupt the handler masked now (as the interpreter does)
+    if(temp!=0) emit_mov(temp,0);
+    emit_call(slave?(int)DynarecSlaveRteInterrupts:(int)DynarecMasterRteInterrupts);
+    if(temp!=0) emit_mov(0,temp);
     emit_addimm_and_set_flags(CLOCK_DIVIDER*(ccadj[i]+cycles[i]+cycles[i+1]),HOST_CCREG);
     add_stub(CC_STUB,(int)out,jump_vaddr_reg[slave][temp],0,i,-1,TAKEN,0);
     emit_jns(0);
@@ -8604,6 +8610,33 @@ int sh2_recompile_block(int addr)
 }
 
 #include "../sh2core.h"
+
+// After RTE: take a pending interrupt that the handler had masked (as the
+// interpreter does) and return the PC to continue at: pc, or the handler.
+// Unlike Dynarec*HandleInterrupts this does not look up the handler's block:
+// that can compile, and compiling can expire the block this is called from.
+// The RTE code jumps to the returned PC through jump_vaddr, which looks it up.
+static u32 rte_interrupts(SH2_struct *sh, int *reg, u32 pc)
+{
+  if (sh->NumberOfInterrupts != 0 &&
+      sh->interrupts[sh->NumberOfInterrupts-1].level > ((reg[SR]>>4)&0xF))
+  {
+    reg[15] -= 4;
+    MappedMemoryWriteLongNocache(sh, reg[15], reg[SR]);
+    reg[15] -= 4;
+    MappedMemoryWriteLongNocache(sh, reg[15], pc);
+    reg[SR] &= 0xFFFFFF0F;
+    reg[SR] |= (sh->interrupts[sh->NumberOfInterrupts-1].level)<<4;
+    pc = MappedMemoryReadLongNocache(sh, reg[VBR] + (sh->interrupts[sh->NumberOfInterrupts-1].vector << 2));
+    sh->NumberOfInterrupts--;
+    sh->isIdle = 0;
+    sh->isSleeping = 0;
+  }
+  return pc;
+}
+
+u32 DynarecMasterRteInterrupts(u32 pc) { return rte_interrupts(MSH2, master_reg, pc); }
+u32 DynarecSlaveRteInterrupts(u32 pc) { return rte_interrupts(SSH2, slave_reg, pc); }
 
 extern int framecounter;
 void DynarecMasterHandleInterrupts()

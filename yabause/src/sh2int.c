@@ -1888,6 +1888,8 @@ static void FASTCALL SH2rotr(SH2_struct * sh)
 
 //////////////////////////////////////////////////////////////////////////////
 
+static INLINE void SH2HandleInterrupts(SH2_struct *context);
+
 static void FASTCALL SH2rte(SH2_struct * sh)
 {
    u32 temp;
@@ -1898,6 +1900,9 @@ static void FASTCALL SH2rte(SH2_struct * sh)
    sh->regs.R[15] += 4;
    sh->cycles += 4;
    SH2delay(sh, temp + 2);
+   // A pending interrupt the handler masked is taken now, not at the next slice (another
+   // one may be queued above it by then: WipEout's DMA-end interrupt starved under HBlank-in)
+   SH2HandleInterrupts(sh);
 }
 
 //////////////////////////////////////////////////////////////////////////////
