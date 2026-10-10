@@ -49,6 +49,25 @@ void DynarecWriteByte(u32 addr, u32 val) { MappedMemoryWriteByteNocache(CurrentS
 void DynarecWriteWord(u32 addr, u32 val) { MappedMemoryWriteWordNocache(CurrentSH2, addr, (u16)val); }
 void DynarecWriteLong(u32 addr, u32 val) { MappedMemoryWriteLongNocache(CurrentSH2, addr, val); }
 void DynarecFRTExec(u32 cycles) { FRTExec(CurrentSH2, cycles); }
+
+// The on-chip cache's data array (0xC0000000-0xC0000FFF), used as fast RAM by
+// games (SGL keeps work variables there; NiGHTS reads and writes it ~20000
+// times a frame). With cache emulation off it is plain storage in the same
+// format as work RAM, so the running CPU's array is mapped into memory_map
+// for direct access: linkage_arm.s stores dataarray_map[0] (master) or [1]
+// (slave) into memory_map[0xC0000] whenever it switches CPUs. Code is never
+// compiled from there (see sh2_recompile_block), so writes need no
+// invalidation. -1 (unmapped) with cache emulation on.
+u32 dataarray_map[2] = { (u32)-1, (u32)-1 };
+void DynarecMapDataArrays(void)
+{
+  if(!yabsys.sh2_cache_enabled && MSH2 && SSH2) {
+    dataarray_map[0]=((u32)(pointer)MSH2->DataArray-0xC0000000)>>2;
+    dataarray_map[1]=((u32)(pointer)SSH2->DataArray-0xC0000000)>>2;
+  } else {
+    dataarray_map[0]=dataarray_map[1]=(u32)-1;
+  }
+}
 void DynarecWDTExec(u32 cycles) { WDTExec(CurrentSH2, cycles); }
 
 #ifdef __i386__

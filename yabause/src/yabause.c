@@ -669,6 +669,7 @@ int YabauseEmulate(void) {
 
    #if defined(SH2_DYNAREC)
    if(SH2Core->id==2) {
+     DynarecMapDataArrays();
      if (yabsys.IsPal)
        YabauseDynarecOneFrameExec(722,0); // m68kcycles,m68kcenticycles
      else

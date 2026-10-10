@@ -175,6 +175,10 @@ newline:
 	ldr	r12, [r7, r8]
 	str	r6, [fp, #sh2cycles-dynarec_local]
 	str	r7, [r9] /* CurrentSH2 */
+	ldr	r2, .damptr
+	ldr	r3, .mmc0ptr
+	ldr	r2, [r2] /* dataarray_map[0]: the master's data array */
+	str	r2, [r3] /* memory_map[0xC0000] */
 	tst	r12, r12
 	bne	master_handle_interrupts
 	ldr	r10, [fp, #master_cc-dynarec_local]
@@ -205,6 +209,10 @@ master_handle_interrupts:
 	.word	NumberOfInterruptsOffset
 .csh2ptr:
 	.word	CurrentSH2
+.damptr:
+	.word	dataarray_map
+.mmc0ptr:
+	.word	memory_map+0x300000 /* &memory_map[0xC0000000>>12] */
 .lcpptr:
 	.word	linecount_p
 .vlcpptr:
@@ -248,6 +256,10 @@ slave_entry:
 	/*movt	r9, #:upper16:CurrentSH2*/
 	ldr	r8, [r8]
 	str	r7, [r9] /* CurrentSH2 */
+	ldr	r0, .damptr
+	ldr	r1, .mmc0ptr
+	ldr	r0, [r0, #4] /* dataarray_map[1]: the slave's data array */
+	str	r0, [r1] /* memory_map[0xC0000] */
 	ldr	r12, [r7, r8]
 	tst	r12, r12
 	bne	slave_handle_interrupts
@@ -297,6 +309,10 @@ cc_interrupt_master:
 	ldr	r8, [r8] /* NumberOfInterruptsOffset */
 	ldr	r12, [r7, r8]
 	str	r7, [r9] /* CurrentSH2 */
+	ldr	r1, .damptr
+	ldr	r2, .mmc0ptr
+	ldr	r1, [r1] /* dataarray_map[0]: the master's data array */
+	str	r1, [r2] /* memory_map[0xC0000] */
 	tst	r12, r12
 	bne	master_handle_interrupts
 	ldr	r10, [fp, #master_cc-dynarec_local]
@@ -859,17 +875,41 @@ macl:
 	/* r6 = multiplicand address */
 	/* r0 = return MACL */
 	/* r1 = return MACH */
+	/* Operands in mapped memory (work RAM, BIOS, the data array) are read
+	   directly, as generated loads do: memory_map[addr>>12] >= 0 gives the
+	   host address addr + entry*4, a long there is stored halfword-swapped.
+	   Anything else goes through DynarecReadLong, in the same order. */
 	mov	r7, r14
 	mov	r8, r0 /* MACL */
 	mov	r9, r1 /* MACH */
+	ldr	r2, .macmmptr
+	lsr	r3, r6, #12
+	ldr	r3, [r2, r3, lsl #2]
+	tst	r3, r3
+	bmi	1f
+	ldr	r10, [r6, r3, lsl #2]
+	ror	r10, r10, #16
+	b	2f
+1:
 	mov	r0, r6
 	bl	DynarecReadLong
 	mov	r10, r0
+	ldr	r2, .macmmptr
+2:
+	lsr	r3, r5, #12
+	ldr	r3, [r2, r3, lsl #2]
+	tst	r3, r3
+	bmi	3f
+	ldr	r12, [r5, r3, lsl #2]
+	ror	r12, r12, #16
+	b	4f
+3:
 	mov	r0, r5
 	bl	DynarecReadLong
+	mov	r12, r0
+4:
 	add	r5, r5, #4
 	add	r6, r6, #4
-	mov	r12, r0
 	mov	r0, r8
 	mov	r1, r9
 	mov	r14, r7
@@ -896,18 +936,41 @@ macw:
 	/* r6 = multiplicand address */
 	/* r0 = return MACL */
 	/* r1 = return MACH */
+	/* direct reads for mapped memory as in macl; a word is stored as is */
 	mov	r7, r14
 	mov	r8, r0 /* MACL */
 	mov	r9, r1 /* MACH */
+	ldr	r2, .macmmptr
+	lsr	r3, r6, #12
+	ldr	r3, [r2, r3, lsl #2]
+	tst	r3, r3
+	bmi	1f
+	add	r3, r6, r3, lsl #2
+	ldrh	r10, [r3]
+	lsl	r10, r10, #16
+	b	2f
+1:
 	mov	r0, r6
 	bl	DynarecReadWord
 	/*sxth	r10, r0*/
 	lsl	r10, r0, #16
+	ldr	r2, .macmmptr
+2:
+	lsr	r3, r5, #12
+	ldr	r3, [r2, r3, lsl #2]
+	tst	r3, r3
+	bmi	3f
+	add	r3, r5, r3, lsl #2
+	ldrh	r12, [r3]
+	b	4f
+3:
 	mov	r0, r5
 	bl	DynarecReadWord
+	mov	r12, r0
+4:
 	add	r5, r5, #2
 	add	r6, r6, #2
-	lsl	r12, r0, #16
+	lsl	r12, r12, #16
 	/*sxth	r12, r0*/
 	mov	r0, r8
 	mov	r1, r9
@@ -925,6 +988,8 @@ macw_saturation:
 	mov	r1, r9
 	mov	pc, lr
 	.size	macw, .-macw
+.macmmptr:
+	.word	memory_map
 
 	.align	2
 	.global	master_handle_bios
