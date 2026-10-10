@@ -1890,6 +1890,166 @@ static INLINE __attribute__((always_inline)) void Vdp2DrawRotationCoefLine(const
    }
 }
 
+/* Vdp2ColorRamGetColorCM(), always inlined (the compiler kept it out of line
+ * in the rotation loop, a call per pixel) */
+static INLINE __attribute__((always_inline)) u32 Vdp2ColorRamGetColorCMI(const int colormode, u32 addr, const u8 *vdp2_color_ram)
+{
+   if (colormode == 0 || colormode == 1)
+   {
+      u32 tmp = T2ReadWord((u8 *)vdp2_color_ram, (addr << 1) & 0xFFF);
+      return (((tmp & 0x1F) << 3) | ((tmp & 0x03E0) << 6) | ((tmp & 0x7C00) << 9)) | ((tmp & 0x8000) << 16);
+   }
+   if (colormode == 2)
+      return T2ReadLong((u8 *)vdp2_color_ram, (addr << 2) & 0xFFF);
+   return 0;
+}
+
+/* One line of the coefficient loop when every coefficient of the line is the
+ * same (coefficients per line: deltaKAx == 0 for both parameters), without a
+ * rotation parameter window or per-dot line colours: the line's parameter
+ * (A, or B where A's coefficient MSB is set) is chosen once, as are the
+ * screen-over rule and GetAlpha()'s rule, and the colour lookup is inlined.
+ * Same steps and results as Vdp2DrawRotationCoefLine(). CN is the colour
+ * format, BM 1 for a bitmap screen; colormode is passed through for the
+ * colour lookup. Used by Panzer Dragoon, Shining Force III (bitmap) and
+ * others for their rotating floors and backgrounds. */
+static INLINE __attribute__((always_inline)) void Vdp2DrawRotationKLineBody(const int CN, const int BM, const int colormode,
+   vdp2draw_struct *info, vdp2rotationparameterfp_struct *q, screeninfo_struct *qs, fixed32 Xs, fixed32 Ys,
+   Vdp2 *regs, u8 *ram, u8 *color_ram, const u8 *wintab, clipping_struct *clip, int j)
+{
+   const int win_fixed = (info->wctl & 0x2a) == 0, win_pass = !(info->wctl & 0x80);
+   const int wctl = info->wctl;
+   const int post_calc = info->PostPixelFetchCalc == &DoNothing ? 0 :
+                         info->PostPixelFetchCalc == &DoColorOffset ? 1 : 2;
+   const int layer = info->titan_which_layer;
+   const u32 meta = TitanPackMeta(info->priority, info->linescreen, info->titan_shadow_type, info->titan_shadow_enabled);
+   /* GetAlpha(), inlined: the mode and code are per screen, the special colour
+    * function bit is per tile (Vdp2PatternAddr() sets it) */
+   const int scmode = info->specialcolormode;
+   const u8 alpha = info->alpha;
+   const int specialcode = info->specialcode;
+   const fixed32 kx = q->kx, ky = q->ky, Xp = q->Xp, Yp = q->Yp;
+   const u32 dX = (u32)q->dX, dY = (u32)q->dY;
+   const int over = q->screenover, xmask = qs->xmask, ymask = qs->ymask;
+   const int transparent = info->transparencyenable;
+   const int cellw = info->cellw, coloroffset = info->coloroffset;
+   struct PixelData *line = NULL;
+   u32 ax = (u32)Xs, ay = (u32)Ys;
+   int i;
+
+   for (i = 0; i < rbg0width; i++)
+   {
+      u32 color, dot, pixel;
+      int x, y, a;
+      const u32 cx = ax, cy = ay;
+      ax += dX;
+      ay += dY;
+
+      if (win_fixed ? !win_pass : !WIN_AT(wintab, wctl, clip, i, j))
+         continue;
+
+      x = touint(mulfixed(kx, (fixed32)cx) + Xp);
+      y = touint(mulfixed(ky, (fixed32)cy) + Yp);
+      if (over <= 1)
+      {
+         x &= xmask;
+         y &= ymask;
+      }
+      else if (over == 2)
+      {
+         if ((x > xmask) || (y > ymask)) continue;
+      }
+      else if ((x > 512) || (y > 512))
+         continue;
+
+      if (!BM)
+         Vdp2MapCalcXYFast(info, &x, &y, qs, regs, ram);
+
+      {
+         const int charaddr = info->charaddr, paladdr = info->paladdr;
+         if (CN == 0)
+         {
+            dot = T1ReadByte(ram, ((charaddr + ((y * cellw) + x) / 2) & 0x7FFFF));
+            if (!(x & 0x1)) dot >>= 4;
+            if (!(dot & 0xF) && transparent) continue;
+            color = Vdp2ColorRamGetColorCMI(colormode, coloroffset + (paladdr | (dot & 0xF)), color_ram);
+         }
+         else if (CN == 1)
+         {
+            dot = T1ReadByte(ram, ((charaddr + (y * cellw) + x) & 0x7FFFF));
+            if (!(dot & 0xFF) && transparent) continue;
+            color = Vdp2ColorRamGetColorCMI(colormode, coloroffset + (paladdr | (dot & 0xFF)), color_ram);
+         }
+         else if (CN == 2)
+         {
+            dot = T1ReadWord(ram, ((charaddr + ((y * cellw) + x) * 2) & 0x7FFFF));
+            if ((dot == 0) && transparent) continue;
+            color = Vdp2ColorRamGetColorCMI(colormode, coloroffset + dot, color_ram);
+         }
+         else if (CN == 3)
+         {
+            dot = T1ReadWord(ram, ((charaddr + ((y * cellw) + x) * 2) & 0x7FFFF));
+            if (!(dot & 0x8000) && transparent) continue;
+            color = COLSAT2YAB16(0, dot);
+         }
+         else /* CN == 4 */
+         {
+            dot = T1ReadLong(ram, ((charaddr + ((y * cellw) + x) * 4) & 0x7FFFF));
+            if (!(dot & 0x80000000) && transparent) continue;
+            color = COLSAT2YAB32(0, dot);
+         }
+      }
+
+      if (!line)
+      {
+         /* TitanPutPixel() clears a line that is stale from an earlier frame
+          * on its first write */
+         line = TitanGetLayerLine(layer, j);
+         if (TitanClaimLayerLine(layer, j))
+            memset(line, 0, sizeof(struct PixelData) * vdp2width);
+      }
+      if ((scmode == 1 || scmode == 2) && !(info->specialcolorfunction & 1))
+         a = 0x3F;
+      else if (scmode == 2)
+         a = (specialcode & (1 << ((dot & 0xF) >> 1))) ? alpha : 0x3F;
+      else if (scmode == 3 && !(color & 0x80000000))
+         a = 0x3F;
+      else
+         a = alpha;
+      pixel = COLSAT2YAB32(a, color);
+      if (post_calc == 1)
+         pixel = DoColorOffset(info, pixel);
+      else if (post_calc == 2)
+         pixel = info->PostPixelFetchCalc(info, pixel);
+      line[i].pixel = pixel;
+      line[i].meta = meta;
+   }
+}
+
+#define ROT_KLINE_FN(NAME, CN, BM) \
+static void NAME(vdp2draw_struct *info, vdp2rotationparameterfp_struct *q, screeninfo_struct *qs, fixed32 Xs, fixed32 Ys, \
+   Vdp2 *regs, u8 *ram, u8 *color_ram, const u8 *wintab, clipping_struct *clip, int j) \
+{ \
+   switch (Vdp2Internal.ColorMode) \
+   { \
+   case 0: Vdp2DrawRotationKLineBody(CN, BM, 0, info, q, qs, Xs, Ys, regs, ram, color_ram, wintab, clip, j); break; \
+   case 1: Vdp2DrawRotationKLineBody(CN, BM, 1, info, q, qs, Xs, Ys, regs, ram, color_ram, wintab, clip, j); break; \
+   case 2: Vdp2DrawRotationKLineBody(CN, BM, 2, info, q, qs, Xs, Ys, regs, ram, color_ram, wintab, clip, j); break; \
+   default: Vdp2DrawRotationKLineBody(CN, BM, 3, info, q, qs, Xs, Ys, regs, ram, color_ram, wintab, clip, j); break; \
+   } \
+}
+ROT_KLINE_FN(Vdp2RotKLine4bpp, 0, 0)
+ROT_KLINE_FN(Vdp2RotKLine8bpp, 1, 0)
+ROT_KLINE_FN(Vdp2RotKLine16bppPal, 2, 0)
+ROT_KLINE_FN(Vdp2RotKLine16bppRGB, 3, 0)
+ROT_KLINE_FN(Vdp2RotKLine32bpp, 4, 0)
+ROT_KLINE_FN(Vdp2RotKLine4bppBM, 0, 1)
+ROT_KLINE_FN(Vdp2RotKLine8bppBM, 1, 1)
+ROT_KLINE_FN(Vdp2RotKLine16bppPalBM, 2, 1)
+ROT_KLINE_FN(Vdp2RotKLine16bppRGBBM, 3, 1)
+ROT_KLINE_FN(Vdp2RotKLine32bppBM, 4, 1)
+#undef ROT_KLINE_FN
+
 static void FASTCALL Vdp2DrawRotationFP(vdp2draw_struct *info, vdp2rotationparameterfp_struct *parameter, Vdp2* lines, Vdp2* regs, u8* ram, u8* color_ram, struct CellScrollData * cell_data)
 {
    int i, j;
@@ -2123,6 +2283,33 @@ static void FASTCALL Vdp2DrawRotationFP(vdp2draw_struct *info, vdp2rotationparam
             L.dotlc = dotlc; L.dotlc_en = dotlc_en; L.dotlc_en2 = dotlc_en2;
             L.dotlc_word = dotlc_word; L.dotlc_last = dotlc_last; L.dotlc_color = dotlc_color;
             L.j = j;
+            /* (priority 0 draws nothing but still walks the tiles, whose
+             * lookup state carries over: left to the full loop) */
+            if (p->deltaKAx == 0 && (p2 == NULL || !p2->coefenab || p2->deltaKAx == 0) && !dotlc && !userpwindow &&
+                info->colornumber <= 4 && info->priority != 0)
+            {
+               /* coefficients per line: one parameter for the whole line */
+               vdp2rotationparameterfp_struct *q = NULL;
+               screeninfo_struct *qs = NULL;
+               fixed32 Xs = 0, Ys = 0;
+               if (!p->msb)
+               {
+                  q = p; qs = &sinfo; Xs = L.Xsp; Ys = L.Ysp;
+               }
+               else if (p2 != NULL && !(p2->coefenab && p2->msb))
+               {
+                  q = p2; qs = &sinfo2; Xs = L.Xsp2; Ys = L.Ysp2;
+               }
+               if (q != NULL)
+               {
+                  static void (*const kline[2][5])(vdp2draw_struct *, vdp2rotationparameterfp_struct *, screeninfo_struct *,
+                                                    fixed32, fixed32, Vdp2 *, u8 *, u8 *, const u8 *, clipping_struct *, int) = {
+                     { Vdp2RotKLine4bpp, Vdp2RotKLine8bpp, Vdp2RotKLine16bppPal, Vdp2RotKLine16bppRGB, Vdp2RotKLine32bpp },
+                     { Vdp2RotKLine4bppBM, Vdp2RotKLine8bppBM, Vdp2RotKLine16bppPalBM, Vdp2RotKLine16bppRGBBM, Vdp2RotKLine32bppBM } };
+                  kline[info->isbitmap ? 1 : 0][info->colornumber](info, q, qs, Xs, Ys, regs, ram, color_ram, wintab, clip, j);
+               }
+            }
+            else
             switch (info->colornumber)
             {
                case 0: Vdp2DrawRotationCoefLine(0, &L); break;
