@@ -3141,6 +3141,7 @@ struct {
    u8 ram[0x80000];
    u8 color_ram[0x1000];
    struct CellScrollData cell_scroll_data[270];
+   Vdp1 vdp1regs; // the sprite thread's copy, taken when it starts
 }vidsoft_thread_context;
 
 #define DECLARE_THREAD(NAME, LAYER, FUNC) \
@@ -3266,7 +3267,7 @@ void VidsoftSpriteThread(void * data)
       {
          vidsoft_thread_context.need_draw[TITAN_SPRITE] = 0;
          YAB_PROF_TBEGIN(PROF_T_SPRITE);
-         VidsoftDrawSprite(&vidsoft_thread_context.regs, sprite_window_mask, vdp1frontframebuffer, vidsoft_thread_context.ram, Vdp1Regs,vidsoft_thread_context.lines, vidsoft_thread_context.color_ram);
+         VidsoftDrawSprite(&vidsoft_thread_context.regs, sprite_window_mask, vdp1frontframebuffer, vidsoft_thread_context.ram, &vidsoft_thread_context.vdp1regs, vidsoft_thread_context.lines, vidsoft_thread_context.color_ram);
          YAB_PROF_TEND(PROF_T_SPRITE);
          YabFlagSet(vidsoft_thread_context.draw_finished[TITAN_SPRITE], 1);
          YabFlagNotify();
@@ -3551,34 +3552,42 @@ int VIDSoftVdp1Reset(void)
  * size. Also read by the sprite layer and the CPU framebuffer access. */
 static void VidsoftVdp1SetMode(const Vdp1 *regs)
 {
-   if (regs->FBCR & 8)
-      vdp1interlace = 2;
-   else
-      vdp1interlace = 1;
+   int interlace = (regs->FBCR & 8) ? 2 : 1;
+   int width, height, pixelsize;
    if (regs->TVMR & 0x1)
    {
       if (regs->TVMR & 0x2)
       {
          // Rotation 8-bit
-         vdp1width = 512;
-         vdp1height = 512;
+         width = 512;
+         height = 512;
       }
       else
       {
          // Normal 8-bit
-         vdp1width = 1024;
-         vdp1height = 256;
+         width = 1024;
+         height = 256;
       }
 
-      vdp1pixelsize = 1;
+      pixelsize = 1;
    }
    else
    {
       // Rotation/Normal 16-bit
-      vdp1width = 512;
-      vdp1height = 256;
-      vdp1pixelsize = 2;
+      width = 512;
+      height = 256;
+      pixelsize = 2;
    }
+   if (interlace == vdp1interlace && width == vdp1width && height == vdp1height && pixelsize == vdp1pixelsize)
+      return;
+   /* The sprite layer thread (started at VBlank-OUT) reads the mode while
+      it composes the frame's sprites: let it finish first, so it sees what
+      the single-thread path sees */
+   YabFlagWait(&vidsoft_thread_context.draw_finished[TITAN_SPRITE]);
+   vdp1interlace = interlace;
+   vdp1width = width;
+   vdp1height = height;
+   vdp1pixelsize = pixelsize;
 }
 
 void VIDSoftVdp1DrawStartBody(Vdp1* regs, u8 * back_framebuffer)
@@ -6471,6 +6480,7 @@ void VIDSoftVdp2DrawScreens(void)
    //draw vdp2 sprite layer on a thread if sprite window is not enabled
    if (CanUseSpriteThread() && vidsoft_num_layer_threads > 0)
    {
+      vidsoft_thread_context.vdp1regs = *Vdp1Regs;
       vidsoft_thread_context.draw_finished[TITAN_SPRITE] = 0;
       YabFlagSet(vidsoft_thread_context.need_draw[TITAN_SPRITE], 1);
       YabThreadWake(YAB_THREAD_VIDSOFT_LAYER_SPRITE);
