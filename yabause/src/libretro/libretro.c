@@ -715,8 +715,9 @@ void YuiSwapBuffers(void)
       const char *l1, *l2;
       if (devsession_stats_text(&l1, &l2))
       {
-         draw_text((u16 *)dispbuffer, game_width, game_height, 4, game_height - 24, l1);
-         draw_text((u16 *)dispbuffer, game_width, game_height, 4, game_height - 13, l2);
+         /* above the bottom line, where RetroArch shows its own FPS counter */
+         draw_text((u16 *)dispbuffer, game_width, game_height, 4, game_height - 37, l1);
+         draw_text((u16 *)dispbuffer, game_width, game_height, 4, game_height - 26, l2);
       }
    }
 #endif
