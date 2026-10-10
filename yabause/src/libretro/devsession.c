@@ -21,11 +21,15 @@
  *   'O' text "key=value\n" lines: every core option (at start, on changes)
  *   'B' (empty) the session starts at power-on (retro_load_game)
  *   'S' u32 call; state data: a state loaded before call (or the snapshot)
+ * Call numbers count from the session's start (start_call in 'H' = retro_run calls before it).
  *   'R' u32 call: retro_reset before call
  *   'P' u32 call, u32 port, u32 device: controller type set before call
  *   'F' frame record, see struct ds_frame, then n_inputs struct ds_input
  *   'T' u32 call, s64 value: SMPC clock read during call
  *   'C' u32 call, u32 hash: work RAM hash at the end of call
+ *   'V' u32 call, u32 hash: hash of the last picture sent to the frontend, every 60 calls
+ *       (sessions started from a snapshot: save states don't restore every timing
+ *       detail exactly, so work RAM can drift while the pictures stay the same)
  *   'X' text: the session was stopped (reason)
  */
 #ifdef YABADABADOO_DEV
@@ -79,7 +83,12 @@ static int ds_mode;                 /* DS_OFF, DS_TIMING, DS_FULL */
 static int ds_stats;
 static FILE *ds_file;
 static char ds_path[1024];
-static uint32_t ds_call;
+static uint32_t ds_call, ds_start_call;   /* records number calls from the session start */
+#define DS_REL (ds_call - ds_start_call)
+static uint64_t ds_bytes;                 /* written so far: a session stops at DS_MAX_BYTES */
+#define DS_MAX_BYTES (256u << 20)
+static int ds_pending;                    /* "Full" switched on during play: starts at the next */
+static char ds_pending_game[512], ds_pending_extra[512];   /* frame boundary with no frameskip state */
 static int ds_in_run;
 static int ds_unserialize_burst, ds_unserialize_call;
 static int ds_invalid;
@@ -169,6 +178,7 @@ static void ds_record(int type, const void *a, size_t alen, const void *b, size_
    size_t need = 4 + alen + blen;
    if (!ds_file)
       return;
+   ds_bytes += need;
    if (need > 32768)
    {
       ds_chunk *c = ds_new_chunk(need);
@@ -288,6 +298,9 @@ static void ds_start(int mode, const char *game, int at_boot, const char *extra)
    ds_mode = mode;
    ds_invalid = 0;
    ds_unserialize_burst = 0;
+   ds_start_call = ds_call;
+   ds_cur.call = 0;   /* started inside a call (option change): it is the session's first */
+   ds_bytes = 0;
    snprintf(hdr, sizeof(hdr), "game=%s\nmode=%s\nstart_time=%lld\nstart_call=%u\n%s",
             game, mode == DS_FULL ? "full" : "timing", (long long)t, ds_call, extra ? extra : "");
    ds_text('H', hdr);
@@ -301,8 +314,9 @@ static void ds_start(int mode, const char *game, int at_boot, const char *extra)
          /* snapshot of the running game: replay starts from it */
          size_t size = retro_serialize_size();
          void *buf = size ? malloc(size) : NULL;
+         uint32_t rel = DS_REL;
          if (buf && retro_serialize(buf, size))
-            ds_record('S', &ds_call, 4, buf, size);
+            ds_record('S', &rel, 4, buf, size);
          else
             ds_text('X', "snapshot failed");
          free(buf);
@@ -343,14 +357,33 @@ void devsession_config(int mode, int stats, const char *game, int at_boot, const
    if (getenv("YAB_DEV_STATS"))
       stats = atoi(getenv("YAB_DEV_STATS"));
    ds_stats = stats;
+   ds_pending = 0;
    if (mode != ds_mode)
    {
       ds_stop("option changed");
-      if (mode != DS_OFF)
+      if (mode == DS_FULL && !at_boot)
+      {
+         /* the snapshot must be taken where a replay can continue from it */
+         ds_pending = 1;
+         snprintf(ds_pending_game, sizeof(ds_pending_game), "%s", game);
+         snprintf(ds_pending_extra, sizeof(ds_pending_extra), "%s", extra ? extra : "");
+      }
+      else if (mode != DS_OFF)
          ds_start(mode, game, at_boot, extra);
    }
    else if (ds_file)
       ds_options();
+}
+
+/* top of retro_run(): a pending "Full" session starts once the frameskip state
+   that save states don't keep is at its power-on value (no skip in progress) */
+void devsession_poll_start(int frameskip_idle)
+{
+   if (ds_pending && frameskip_idle)
+   {
+      ds_pending = 0;
+      ds_start(DS_FULL, ds_pending_game, 0, ds_pending_extra);
+   }
 }
 
 void devsession_deinit(void)
@@ -388,7 +421,7 @@ void devsession_run_begin(void)
    uint64_t t = now_us(CLOCK_MONOTONIC);
    ds_in_run = 1;
    memset(&ds_cur, 0, sizeof(ds_cur));
-   ds_cur.call = ds_call;
+   ds_cur.call = DS_REL;
    ds_cur.gap_us = ds_prev_start_us ? (uint32_t)(t - ds_prev_start_us) : 0;
    ds_prev_start_us = ds_run_start_us = t;
    ds_main_cpu0 = now_us(CLOCK_THREAD_CPUTIME_ID);
@@ -437,7 +470,7 @@ static void ds_show_stats(uint64_t t)
    }
 }
 
-void devsession_run_end(int rendered)
+void devsession_run_end(int rendered, const uint16_t *fb, unsigned w, unsigned h)
 {
    uint64_t t = now_us(CLOCK_MONOTONIC);
    ds_in_run = 0;
@@ -448,9 +481,14 @@ void devsession_run_end(int rendered)
    if (ds_file)
    {
       ds_record('F', &ds_cur, sizeof(ds_cur), ds_inputs, ds_cur.n_inputs * sizeof(*ds_inputs));
-      if (ds_mode == DS_FULL && ds_call % 120 == 119 && !ds_invalid)
+      if (ds_mode == DS_FULL && DS_REL % 60 == 59 && !ds_invalid && fb && w && h)
       {
-         uint32_t rec[2] = { ds_call, 0x811C9DC5u };
+         uint32_t rec[2] = { DS_REL, ds_hash((const uint8_t *)fb, (size_t)w * h * 2, 0x811C9DC5u) };
+         ds_record('V', rec, sizeof(rec), NULL, 0);
+      }
+      if (ds_mode == DS_FULL && DS_REL % 120 == 119 && !ds_invalid)
+      {
+         uint32_t rec[2] = { DS_REL, 0x811C9DC5u };
          rec[1] = ds_hash(HighWram, 0x100000, rec[1]);
          rec[1] = ds_hash(LowWram, 0x100000, rec[1]);
          ds_record('C', rec, sizeof(rec), NULL, 0);
@@ -461,6 +499,8 @@ void devsession_run_end(int rendered)
          ds_queue(ds_fill);
          ds_fill = NULL;
       }
+      if (ds_bytes > DS_MAX_BYTES)
+         ds_stop("size limit (256 MB) reached");
    }
    if (ds_stats)
    {
@@ -494,18 +534,24 @@ void devsession_unserialize(const void *data, size_t size)
    else
       ds_unserialize_burst = 0;
    ds_unserialize_call = ds_call;
-   ds_record('S', &ds_call, 4, data, size);
+   {
+      uint32_t rel = DS_REL;
+      ds_record('S', &rel, 4, data, size);
+   }
 }
 
 void devsession_reset(void)
 {
    if (ds_mode == DS_FULL)
-      ds_record('R', &ds_call, 4, NULL, 0);
+   {
+      uint32_t rel = DS_REL;
+      ds_record('R', &rel, 4, NULL, 0);
+   }
 }
 
 void devsession_port_device(unsigned port, unsigned device)
 {
-   uint32_t rec[3] = { ds_call, port, device };
+   uint32_t rec[3] = { DS_REL, port, device };
    if (ds_mode == DS_FULL)
       ds_record('P', rec, sizeof(rec), NULL, 0);
 }
@@ -514,7 +560,7 @@ time_t devsession_rtc(time_t v)
 {
    if (ds_mode == DS_FULL && !ds_invalid)
    {
-      struct { uint32_t call, pad; int64_t value; } rec = { ds_call, 0, (int64_t)v };
+      struct { uint32_t call, pad; int64_t value; } rec = { DS_REL, 0, (int64_t)v };
       ds_record('T', &rec, sizeof(rec), NULL, 0);
    }
    return v;

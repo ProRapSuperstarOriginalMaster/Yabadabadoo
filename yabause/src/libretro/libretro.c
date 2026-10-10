@@ -1931,6 +1931,7 @@ void retro_run(void)
    one_frame_rendered = false;
 #ifdef YABADABADOO_DEV
    devsession_load_state_once();
+   devsession_poll_start(!frameskip_skip_current && frameskip_counter == 0);
    devsession_run_begin();
 #endif
 #if defined(__linux__) && defined(__arm__)
@@ -2013,7 +2014,7 @@ void retro_run(void)
    if(!one_frame_rendered)
       video_cb(NULL, game_width, game_height, game_width * 2);
 #ifdef YABADABADOO_DEV
-   devsession_run_end(one_frame_rendered);
+   devsession_run_end(one_frame_rendered, (const uint16_t *)dispbuffer, game_width, game_height);
 #endif
 #if defined(__linux__) && defined(__arm__)
    crash_in_run = 0;
