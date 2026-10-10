@@ -4305,8 +4305,28 @@ int idle_call_is_empty(u32 desc,u32 addr)
     case IDLE_CALL_REGIND: target=idle_read_long(sh,reg[(desc>>8)&0xFF]+addr); break;
     default: target=idle_read_long(sh,addr); break;
   }
-  return idle_read_word(sh,target)==0x000B && // RTS
-         idle_read_word(sh,target+2)==0x0009; // NOP
+  if(idle_read_word(sh,target)==0x000B && // RTS
+     idle_read_word(sh,target+2)==0x0009) // NOP
+    return 1;
+  // A hook that returns at once while its flag is clear (Panzer Dragoon's
+  // frame wait): "mov.l @(d,PC),Ra; mov.b @Ra,R0 (or @(0,Ra)); tst R0,R0;
+  // bt <rts; nop>". With the flag clear a pass only sets Ra, R0, T and PR,
+  // to the same values every time, like the rest of the loop.
+  {
+    u16 op0=idle_read_word(sh,target),op1=idle_read_word(sh,target+2);
+    u16 op2=idle_read_word(sh,target+4),op3=idle_read_word(sh,target+6);
+    u32 ra,lit,flag,ret;
+    if((op0&0xF000)!=0xD000) return 0;
+    ra=(op0>>8)&15;
+    if(op1!=(0x8400|(ra<<4))&&op1!=(0x6000|(ra<<4))) return 0; // MOV.B @(0,Ra),R0 / MOV.B @Ra,R0
+    if(op2!=0x2008) return 0;                                    // TST R0,R0
+    if((op3&0xFF00)!=0x8900) return 0;                           // BT
+    ret=target+6+4+((s32)(s8)(op3&0xFF))*2;
+    if(idle_read_word(sh,ret)!=0x000B||idle_read_word(sh,ret+2)!=0x0009) return 0;
+    lit=((target+4)&~3)+(op0&0xFF)*4;
+    flag=idle_read_long(sh,lit);
+    return ((idle_read_word(sh,flag&~1)>>((flag&1)?0:8))&0xFF)==0;
+  }
 }
 
 // Taken branch of a polling loop: end the time slice now and resume at the
