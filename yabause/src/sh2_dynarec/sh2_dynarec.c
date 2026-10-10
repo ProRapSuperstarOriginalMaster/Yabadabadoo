@@ -2480,7 +2480,10 @@ void store_assemble(int i,struct regstat *i_regs)
   else addr=s;
   //printf("store_assemble: c=%d\n",c);
   if(addrmode[i]==PREDEC&&!c&&rt1[i]==rs1[i]) addr=temp; // Old value is written, so decremented address is in a temporary register
-  if(addrmode[i]==REGIND&&!c&&rs1[i]==rs2[i]) {// Swapped value is written, so unswapped value must be used as the address
+  // Swapped value is written, so unswapped value must be used as the address:
+  // MOV.L Rm,@Rn and MOV.L Rm,@(0,Rn) with m=n (Virtua Cop 2 points a list
+  // head at itself with the latter; the store went to a rotated address)
+  if(addr==s&&!c&&rs1[i]==rs2[i]) {
     emit_mov(addr,temp);addr=temp;
   }
   if(!c||memtarget)
