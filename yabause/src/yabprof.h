@@ -49,6 +49,8 @@ enum {
    PROF_L_NBG2,
    PROF_L_NBG3,
    PROF_L_RBG0,
+   PROF_W_M68K,       // emulation thread CPU: draining the queued sound work
+   PROF_T_M68K,       // CPU time of the queued sound work, on whichever thread runs it
    PROF_COUNT
 };
 

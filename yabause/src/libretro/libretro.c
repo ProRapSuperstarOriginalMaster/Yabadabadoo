@@ -1042,6 +1042,11 @@ static void check_variables(void)
                       strcmp(var.value, "disabled") == 0);
 #endif
 
+   var.key = "yabadabadoo_sound_thread";
+   var.value = NULL;
+   M68KSetThreaded(!(environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value &&
+                     strcmp(var.value, "disabled") == 0));
+
    var.key = "yabadabadoo_video_standard";
    var.value = NULL;
    video_standard = -1;

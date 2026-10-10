@@ -674,6 +674,7 @@ int YabauseEmulate(void) {
        YabauseDynarecOneFrameExec(722,0); // m68kcycles,m68kcenticycles
      else
        YabauseDynarecOneFrameExec(716,20);
+     ScspFrameEnd();
      return 0;
    }
    #endif
@@ -867,6 +868,7 @@ int YabauseEmulate(void) {
 
 #ifndef USE_SCSP2
    M68KSync();
+   ScspFrameEnd();
 #endif
 
 #ifdef YAB_WANT_SSF
@@ -1364,6 +1366,7 @@ void YabProfReport(void)
       "  wait for layer threads", "  Titan compositing", "wait for VDP1 thread", "video output", "VDP2 state/VRAM snapshot", "VDP1 RAM snapshot", "VDP1 erase", "VDP1 list pre-scan",
       "SH2 block compile", "SH2 invalidations", "SH2 get_addr lookups",
       "[thread CPU] VDP1", "[thread CPU] VDP2 layers", "[thread CPU] sprite layer", "[thread CPU] compositing", "[layer CPU] NBG0", "[layer CPU] NBG1", "[layer CPU] NBG2", "[layer CPU] NBG3", "[layer CPU] RBG0",
+      "[main CPU] sound queue drains", "[any CPU] queued sound work",
    };
    u32 frames = yab_prof_frames > yab_prof_skip ? yab_prof_frames - yab_prof_skip : 0;
    double wall = YabProfWall() - yab_prof_wall0;

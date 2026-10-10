@@ -157,6 +157,8 @@ u32 FASTCALL c68k_word_read(const u32 adr);
 
 void M68KStep(void);
 void M68KSync(void);
+void ScspFrameEnd(void);
+void M68KSetThreaded(int on);
 void M68KWriteNotify(u32 address, u32 size);
 void M68KGetRegisters(m68kregs_struct *regs);
 void M68KSetRegisters(m68kregs_struct *regs);

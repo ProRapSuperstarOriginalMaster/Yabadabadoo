@@ -232,6 +232,20 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       "enabled"
    },
    {
+      "yabadabadoo_sound_thread",
+      "Sound CPU on Second Core",
+      NULL,
+      "Runs the sound CPU and the sound chip's timers and mixing on the second CPU core, a few scanlines behind the main CPUs; they wait for it whenever they touch sound hardware, so games and their audio behave the same. Frees about 2-3 ms of each frame on the main thread. 'Disabled' runs everything on one thread.",
+      NULL,
+      NULL,
+      {
+         { "enabled",  NULL },
+         { "disabled", NULL },
+         { NULL, NULL },
+      },
+      "enabled"
+   },
+   {
       "yabadabadoo_rotation_line_color",
       "Per-Pixel Rotation Line Colour",
       NULL,

@@ -83,10 +83,16 @@
 //
 //--------------------------------------------------------------
 
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE /* SCHED_BATCH */
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
 #include <math.h>
+#ifdef __linux__
+#include <sched.h>
+#endif
 
 #include "c68k/c68k.h"
 #include "yabprof.h"
@@ -98,6 +104,7 @@
 #include "scu.h"
 #include "yabause.h"
 #include "scsp.h"
+#include "threads.h"
 #ifdef HAVE_MUSASHI
 #include "m68kmusashi.h"
 #endif
@@ -1684,10 +1691,35 @@ scsp_round (double val)
 ////////////////////////////////////////////////////////////////
 // Interrupts
 
+/* Set while queued sound work runs (see "Sound CPU pipeline"): an
+   interrupt it raises for the main CPUs waits until the emulation thread
+   next drains the queue */
+static __thread int m68k_job_defer;
+static volatile int m68k_pending_mint;
+
+static volatile u32 m68kq_head, m68kq_tail; // next entry to queue / to run
+static void M68KQueueDrain (void);
+static void M68KThreadStop (void);
+
+/* Called by everything on the emulation thread that touches sound RAM, the
+   SCSP or the 68K */
+static INLINE void
+M68KJobWait (void)
+{
+  if (UNLIKELY(m68kq_head != __atomic_load_n(&m68kq_tail, __ATOMIC_ACQUIRE) ||
+               __atomic_load_n(&m68k_pending_mint, __ATOMIC_ACQUIRE)))
+    M68KQueueDrain();
+}
+
 static INLINE void
 scsp_trigger_main_interrupt (u32 id)
 {
   SCSPLOG ("scsp main interrupt accepted %.4X\n", id);
+  if (m68k_job_defer)
+  {
+    __atomic_store_n(&m68k_pending_mint, 1, __ATOMIC_RELEASE);
+    return;
+  }
   scsp.mintf ();
 }
 
@@ -3606,8 +3638,8 @@ static void (*scsp_slot_update_p[2][2][2][2][2])(slot_t *slot) =
   }
 };
 
-void
-scsp_update (s32 *bufL, s32 *bufR, u32 len)
+static void
+scsp_update_slots (s32 *bufL, s32 *bufR, u32 len)
 {
    slot_t *slot;
 
@@ -3659,51 +3691,66 @@ scsp_update (s32 *bufL, s32 *bufR, u32 len)
       [(slot->disll == 31) ? 0 : 1]
       [(slot->dislr == 31) ? 0 : 1](slot);
    }
+}
 
+/* CD audio for the next len samples: how many there are and where they
+   start in cddabuf; takes them off cdda_out_left (the CD block reads it to
+   pace itself) */
+static u32
+scsp_take_cdda (u32 len, u32 *start)
+{
+   s32 temp = cdda_next_in - cdda_out_left;
+   u32 n = 0;
+   *start = (temp < 0) ? temp + sizeof(cddabuf.data) : temp;
    if (cdda_out_left > 0)
    {
-      if (len > cdda_out_left / 4)
-         scsp_buf_len = cdda_out_left / 4;
-      else
-         scsp_buf_len = len;
-
-      scsp_buf_pos = 0;
-
-      /* May need to wrap around the buffer, so use nested loops */
-      while (scsp_buf_pos < scsp_buf_len)
-      {
-         s32 temp = cdda_next_in - cdda_out_left;
-         s32 outpos = (temp < 0) ? temp + sizeof(cddabuf.data) : temp;
-         u8 *buf = &cddabuf.data[outpos];
-
-         u32 scsp_buf_target;
-         u32 this_len = scsp_buf_len - scsp_buf_pos;
-         if (this_len > (sizeof(cddabuf.data) - outpos) / 4)
-            this_len = (sizeof(cddabuf.data) - outpos) / 4;
-         scsp_buf_target = scsp_buf_pos + this_len;
-
-         for (; scsp_buf_pos < scsp_buf_target; scsp_buf_pos++, buf += 4)
-         {
-            s32 out;
-
-            out = (s32)(s16)((buf[1] << 8) | buf[0]);
-
-            if (out)
-               scsp_bufL[scsp_buf_pos] += out;
-
-            out = (s32)(s16)((buf[3] << 8) | buf[2]);
-
-            if (out)
-               scsp_bufR[scsp_buf_pos] += out;
-         }
-
-         cdda_out_left -= this_len * 4;
-      }
+      n = len > cdda_out_left / 4 ? cdda_out_left / 4 : len;
+      cdda_out_left -= n * 4;
    }
    else if (Cs2Area->isaudio)
    {
       SCSPLOG("WARNING: CDDA buffer underrun\n");
    }
+   return n;
+}
+
+/* Mixes n samples of CD audio from cddabuf offset start */
+static void
+scsp_mix_cdda (s32 *bufL, s32 *bufR, u32 n, u32 start)
+{
+   u32 pos = 0;
+   while (pos < n)
+   {
+      u8 *buf = &cddabuf.data[start];
+      u32 this_len = n - pos, target;
+      if (this_len > (sizeof(cddabuf.data) - start) / 4)
+         this_len = (sizeof(cddabuf.data) - start) / 4;
+      target = pos + this_len;
+      for (; pos < target; pos++, buf += 4)
+      {
+         s32 out;
+
+         out = (s32)(s16)((buf[1] << 8) | buf[0]);
+
+         if (out)
+            bufL[pos] += out;
+
+         out = (s32)(s16)((buf[3] << 8) | buf[2]);
+
+         if (out)
+            bufR[pos] += out;
+      }
+      start = (start + this_len * 4) % sizeof(cddabuf.data);
+   }
+}
+
+void
+scsp_update (s32 *bufL, s32 *bufR, u32 len)
+{
+   u32 start, n;
+   scsp_update_slots(bufL, bufR, len);
+   n = scsp_take_cdda(len, &start);
+   scsp_mix_cdda(bufL, bufR, n, start);
 }
 
 void
@@ -4693,6 +4740,7 @@ SoundRamWriteLong (u32 addr, u32 val)
 u8 FASTCALL
 Sh2ScspReadByte(SH2_struct *sh, u32 addr)
 {
+   M68KJobWait();
    return ScspReadByte(addr);
 }
 
@@ -4701,6 +4749,7 @@ Sh2ScspReadByte(SH2_struct *sh, u32 addr)
 void FASTCALL
 Sh2ScspWriteByte(SH2_struct *sh, u32 addr, u8 val)
 {
+   M68KJobWait();
    ScspWriteByte(addr, val);
 }
 
@@ -4709,6 +4758,7 @@ Sh2ScspWriteByte(SH2_struct *sh, u32 addr, u8 val)
 u16 FASTCALL
 Sh2ScspReadWord(SH2_struct *sh, u32 addr)
 {
+   M68KJobWait();
    return ScspReadWord(addr);
 }
 
@@ -4717,6 +4767,7 @@ Sh2ScspReadWord(SH2_struct *sh, u32 addr)
 void FASTCALL
 Sh2ScspWriteWord(SH2_struct *sh, u32 addr, u16 val)
 {
+   M68KJobWait();
    ScspWriteWord(addr, val);
 }
 
@@ -4725,6 +4776,7 @@ Sh2ScspWriteWord(SH2_struct *sh, u32 addr, u16 val)
 u32 FASTCALL
 Sh2ScspReadLong(SH2_struct *sh, u32 addr)
 {
+   M68KJobWait();
    return ScspReadLong(addr);
 }
 
@@ -4733,6 +4785,7 @@ Sh2ScspReadLong(SH2_struct *sh, u32 addr)
 void FASTCALL
 Sh2ScspWriteLong(SH2_struct *sh, u32 addr, u32 val)
 {
+   M68KJobWait();
    ScspWriteLong(addr, val);
 }
 
@@ -4741,6 +4794,7 @@ Sh2ScspWriteLong(SH2_struct *sh, u32 addr, u32 val)
 u8 FASTCALL
 Sh2SoundRamReadByte(SH2_struct *sh, u32 addr)
 {
+   M68KJobWait();
    return SoundRamReadByte(addr);
 }
 
@@ -4749,6 +4803,7 @@ Sh2SoundRamReadByte(SH2_struct *sh, u32 addr)
 void FASTCALL
 Sh2SoundRamWriteByte(SH2_struct *sh, u32 addr, u8 val)
 {
+   M68KJobWait();
    SoundRamWriteByte(addr, val);
 }
 
@@ -4757,6 +4812,7 @@ Sh2SoundRamWriteByte(SH2_struct *sh, u32 addr, u8 val)
 u16 FASTCALL
 Sh2SoundRamReadWord(SH2_struct *sh, u32 addr)
 {
+   M68KJobWait();
    return SoundRamReadWord(addr);
 }
 
@@ -4765,6 +4821,7 @@ Sh2SoundRamReadWord(SH2_struct *sh, u32 addr)
 void FASTCALL
 Sh2SoundRamWriteWord(SH2_struct *sh, u32 addr, u16 val)
 {
+   M68KJobWait();
    SoundRamWriteWord(addr, val);
 }
 
@@ -4773,6 +4830,7 @@ Sh2SoundRamWriteWord(SH2_struct *sh, u32 addr, u16 val)
 u32 FASTCALL
 Sh2SoundRamReadLong(SH2_struct *sh, u32 addr)
 {
+   M68KJobWait();
    return SoundRamReadLong(addr);
 }
 
@@ -4781,6 +4839,7 @@ Sh2SoundRamReadLong(SH2_struct *sh, u32 addr)
 void FASTCALL
 Sh2SoundRamWriteLong(SH2_struct *sh, u32 addr, u32 val)
 {
+   M68KJobWait();
    SoundRamWriteLong(addr, val);
 }
 
@@ -4897,6 +4956,7 @@ ScspChangeSoundCore (int coreid)
 void
 ScspDeInit (void)
 {
+  M68KThreadStop();
   if (scspchannel[0].data32)
     free(scspchannel[0].data32);
   scspchannel[0].data32 = NULL;
@@ -4921,6 +4981,7 @@ ScspDeInit (void)
 void
 M68KStart (void)
 {
+  M68KJobWait();
   M68K->Reset ();
   savedcycles = 0;
   IsM68KRunning = 1;
@@ -4931,6 +4992,7 @@ M68KStart (void)
 void
 M68KStop (void)
 {
+  M68KJobWait();
   IsM68KRunning = 0;
 }
 
@@ -4939,6 +5001,7 @@ M68KStop (void)
 void
 ScspReset (void)
 {
+  M68KJobWait();
   scsp_reset();
 }
 
@@ -4947,6 +5010,7 @@ ScspReset (void)
 int
 ScspChangeVideoFormat (int type)
 {
+  M68KJobWait();
   scspsoundlen = 44100 / (type ? 50 : 60);
   scsplines = type ? 313 : 263;
   scspsoundbufsize = scspsoundlen * scspsoundbufs;
@@ -4971,16 +5035,8 @@ __attribute__((noinline))
 #endif
 static s32 FASTCALL M68KExecBP (s32 cycles);
 
-#ifdef YAB_PROFILE
-void M68KExecBody(s32 cycles);
-void M68KExec(s32 cycles) { YAB_PROF_BEGIN(PROF_M68K); M68KExecBody(cycles); YAB_PROF_END(PROF_M68K); }
-#define M68KExec M68KExecBody
-#endif
-void
-M68KExec (s32 cycles)
-#ifdef YAB_PROFILE
-#undef M68KExec
-#endif
+static void
+M68KExecInline (s32 cycles)
 {
   s32 newcycles = savedcycles - cycles;
   if (LIKELY(IsM68KRunning))
@@ -4992,6 +5048,301 @@ M68KExec (s32 cycles)
         }
       savedcycles = newcycles;
     }
+}
+
+//////////////////////////////////////////////////////////////////////////////
+// Sound CPU pipeline (core option "Sound CPU on Second Core")
+//
+// At the end of every line the main loop runs the SCSP (timers, and once a
+// frame the rendering of the frame's samples) and then the 68K for that
+// line. With the pipeline this work is queued instead, and a second thread
+// works through the queue on the other core while the SH-2s go on, up to the
+// queue's length behind. The 68K and the SCSP only exchange data with the
+// rest of the machine through sound RAM and the SCSP registers, so the
+// emulation thread drains the queue (doing what the thread hasn't, itself)
+// before anything that touches them: the SH-2 and SCU DMA sound handlers,
+// state saves, resets, starts and stops. The CD audio the rendering mixes is
+// taken off the CD buffer on the emulation thread at the same point as
+// before (the CD block paces itself by that buffer), and the rendered samples
+// go to the frontend at the end of the frame (ScspFrameEnd). Everything thus
+// sees the same values in the same order as without the pipeline. The
+// exception is an interrupt for the main CPUs raised by queued work (SCSP
+// timers or 68K writes to MCIPD; no game tested so far enables them): it is
+// delivered at the next drain, and the pipeline then turns itself off for
+// the session. YAB_M68K_THREAD=0/1 overrides the option (tests).
+
+enum { M68KQ_TIMER, M68KQ_TIMER_ONLY, M68KQ_GEN, M68KQ_EXEC };
+/* the frame's sample rendering, queued (M68KQ_GEN, arg = slot) */
+#define M68KQ_GENS 8
+static struct { u32 pos, len, cdstart, cdlen; } m68kq_gen[M68KQ_GENS];
+static u32 m68kq_gens;                    // GEN entries queued so far
+static u32 m68kq_gen_entry;               // queue index of the last one
+#define M68KQ_SIZE 1024                   // > 3 frames of lines
+static struct { s32 type, arg; } m68kq[M68KQ_SIZE];
+static volatile int m68kq_lock;           // held while an entry runs
+static int m68k_thread_on = -1;           // -1: not decided yet
+static int m68k_thread_log;
+static u32 m68k_wake = 16;                // queued entries before waking the thread (YAB_M68K_WAKE)
+static u32 m68k_spin = 2000;              // polls of an empty queue before sleeping (YAB_M68K_SPIN)
+static volatile int m68k_thread_run;
+static volatile int m68k_thread_sleeping;
+static u32 m68k_stat_queued, m68k_stat_here, m68k_stat_drains, m68k_stat_waits, m68k_stat_mint;
+
+#if defined(__arm__) || defined(__aarch64__)
+#define M68K_CPU_RELAX() __asm__ volatile("yield" ::: "memory")
+#elif defined(__i386__) || defined(__x86_64__)
+#define M68K_CPU_RELAX() __asm__ volatile("pause" ::: "memory")
+#else
+#define M68K_CPU_RELAX() __asm__ volatile("" ::: "memory")
+#endif
+
+/* Runs the oldest entry; the caller holds m68kq_lock and the queue isn't empty */
+static void
+M68KQueueRunOne (void)
+{
+  u32 t = __atomic_load_n(&m68kq_tail, __ATOMIC_RELAXED);
+  s32 type = m68kq[t % M68KQ_SIZE].type, arg = m68kq[t % M68KQ_SIZE].arg;
+  YAB_PROF_TBEGIN(PROF_T_M68K);
+  m68k_job_defer = 1;
+  switch (type)
+  {
+  case M68KQ_EXEC:
+    M68KExecInline(arg);
+    break;
+  case M68KQ_TIMER:
+    scsp_update_timer(arg);
+    scsp_update_monitor();
+    break;
+  case M68KQ_TIMER_ONLY:
+    scsp_update_timer(arg);
+    break;
+  case M68KQ_GEN:
+  {
+    u32 g = arg % M68KQ_GENS;
+    s32 *bufL = (s32 *)&scspchannel[0].data32[m68kq_gen[g].pos];
+    s32 *bufR = (s32 *)&scspchannel[1].data32[m68kq_gen[g].pos];
+    memset(bufL, 0, sizeof(u32) * m68kq_gen[g].len);
+    memset(bufR, 0, sizeof(u32) * m68kq_gen[g].len);
+    scsp_update_slots(bufL, bufR, m68kq_gen[g].len);
+    scsp_mix_cdda(bufL, bufR, m68kq_gen[g].cdlen, m68kq_gen[g].cdstart);
+    scsp_update_monitor();
+    break;
+  }
+  }
+  m68k_job_defer = 0;
+  YAB_PROF_TEND(PROF_T_M68K);
+  __atomic_store_n(&m68kq_tail, t + 1, __ATOMIC_RELEASE);
+}
+
+static INLINE int
+M68KQueueTryLock (void)
+{
+  return !__atomic_exchange_n(&m68kq_lock, 1, __ATOMIC_ACQUIRE);
+}
+
+static INLINE void
+M68KQueueUnlock (void)
+{
+  __atomic_store_n(&m68kq_lock, 0, __ATOMIC_RELEASE);
+}
+
+/* Works through the queue; spins briefly when it runs dry, then sleeps until
+   the emulation thread has queued m68k_wake entries */
+static void
+M68KThreadMain (void *arg)
+{
+  (void)arg;
+#ifdef __linux__
+  {
+    /* Like the VDP1 render thread: being woken mustn't preempt the
+       emulation thread (it drains the queue itself when it gets there) */
+    struct sched_param sp = { 0 };
+    const char *b = getenv("YAB_M68K_THREAD_BATCH");
+    if (!b || atoi(b))
+      sched_setscheduler(0, SCHED_BATCH, &sp);
+  }
+#endif
+  while (__atomic_load_n(&m68k_thread_run, __ATOMIC_ACQUIRE))
+  {
+    u32 spins = 0;
+    while (__atomic_load_n(&m68kq_head, __ATOMIC_ACQUIRE) != __atomic_load_n(&m68kq_tail, __ATOMIC_ACQUIRE))
+    {
+      if (M68KQueueTryLock())
+      {
+        if (__atomic_load_n(&m68kq_head, __ATOMIC_ACQUIRE) != m68kq_tail)
+          M68KQueueRunOne();
+        M68KQueueUnlock();
+      }
+      else
+        M68K_CPU_RELAX();
+    }
+    /* empty: spin briefly (m68k_spin polls), then sleep */
+    while (__atomic_load_n(&m68kq_head, __ATOMIC_ACQUIRE) == __atomic_load_n(&m68kq_tail, __ATOMIC_ACQUIRE))
+    {
+      if (!__atomic_load_n(&m68k_thread_run, __ATOMIC_ACQUIRE))
+        return;
+      if (++spins < m68k_spin)
+      {
+        M68K_CPU_RELAX();
+        continue;
+      }
+      __atomic_store_n(&m68k_thread_sleeping, 1, __ATOMIC_SEQ_CST);
+      if (__atomic_load_n(&m68kq_head, __ATOMIC_SEQ_CST) - __atomic_load_n(&m68kq_tail, __ATOMIC_SEQ_CST) < m68k_wake &&
+          __atomic_load_n(&m68k_thread_run, __ATOMIC_SEQ_CST))
+        YabThreadSleep();
+      __atomic_store_n(&m68k_thread_sleeping, 0, __ATOMIC_SEQ_CST);
+      spins = 0;
+    }
+  }
+}
+
+static int m68k_thread_wanted;            // the core option
+
+static void
+M68KThreadDecide (void)
+{
+  const char *env = getenv("YAB_M68K_THREAD");  // tests: overrides the option
+  const char *log = getenv("YAB_M68K_THREAD_LOG");
+  const char *wake = getenv("YAB_M68K_WAKE");
+  const char *spin = getenv("YAB_M68K_SPIN");
+  m68k_thread_log = log && atoi(log);
+  m68k_thread_on = env ? atoi(env) != 0 : m68k_thread_wanted;
+  if (wake) m68k_wake = atoi(wake) > 0 ? atoi(wake) : 1;
+  if (spin) m68k_spin = atoi(spin);
+  if (m68k_thread_on)
+  {
+    __atomic_store_n(&m68k_thread_run, 1, __ATOMIC_SEQ_CST);
+    if (YabThreadStart(YAB_THREAD_SCSP, M68KThreadMain, NULL) != 0)
+    {
+      m68k_thread_run = 0;
+      m68k_thread_on = 0;
+    }
+  }
+}
+
+/* The emulation thread: run everything queued (together with the thread),
+   then deliver the interrupts it raised */
+static void
+M68KQueueDrain (void)
+{
+  YAB_PROF_TBEGIN(PROF_W_M68K);
+  m68k_stat_drains++;
+  while (m68kq_head != __atomic_load_n(&m68kq_tail, __ATOMIC_ACQUIRE))
+  {
+    if (M68KQueueTryLock())
+    {
+      if (m68kq_head != __atomic_load_n(&m68kq_tail, __ATOMIC_RELAXED))
+      {
+        M68KQueueRunOne();
+        m68k_stat_here++;
+      }
+      M68KQueueUnlock();
+    }
+    else
+    {
+      m68k_stat_waits++;
+      M68K_CPU_RELAX();
+    }
+  }
+  YAB_PROF_TEND(PROF_W_M68K);
+  if (__atomic_load_n(&m68k_pending_mint, __ATOMIC_ACQUIRE))
+  {
+    m68k_pending_mint = 0;
+    m68k_stat_mint++;
+    if (m68k_thread_on > 0)
+    {
+      m68k_thread_on = 0; // stay exact from here on
+      if (m68k_thread_log)
+        fprintf(stderr, "m68k pipeline: the sound side raised a main CPU interrupt; pipeline off\n");
+    }
+    scsp.mintf ();
+  }
+}
+
+/* The emulation thread: wait until the queue has run past entry idx */
+static void
+M68KQueueDrainTo (u32 idx)
+{
+  YAB_PROF_TBEGIN(PROF_W_M68K);
+  while ((s32)(__atomic_load_n(&m68kq_tail, __ATOMIC_ACQUIRE) - idx) <= 0)
+  {
+    if (M68KQueueTryLock())
+    {
+      if ((s32)(__atomic_load_n(&m68kq_tail, __ATOMIC_RELAXED) - idx) <= 0)
+      {
+        M68KQueueRunOne();
+        m68k_stat_here++;
+      }
+      M68KQueueUnlock();
+    }
+    else
+      M68K_CPU_RELAX();
+  }
+  YAB_PROF_TEND(PROF_W_M68K);
+}
+
+static INLINE void
+M68KQueuePush (s32 type, s32 arg)
+{
+  u32 h = m68kq_head;
+  if (h - __atomic_load_n(&m68kq_tail, __ATOMIC_ACQUIRE) >= M68KQ_SIZE)
+    M68KQueueDrain();
+  m68kq[h % M68KQ_SIZE].type = type;
+  m68kq[h % M68KQ_SIZE].arg = arg;
+  m68k_stat_queued++;
+  __atomic_store_n(&m68kq_head, h + 1, __ATOMIC_SEQ_CST);
+  if (__atomic_load_n(&m68k_thread_sleeping, __ATOMIC_SEQ_CST) &&
+      h + 1 - __atomic_load_n(&m68kq_tail, __ATOMIC_SEQ_CST) >= m68k_wake)
+    YabThreadWake(YAB_THREAD_SCSP);
+}
+
+static void
+M68KThreadStop (void)
+{
+  M68KJobWait();
+  if (m68k_thread_run)
+  {
+    __atomic_store_n(&m68k_thread_run, 0, __ATOMIC_SEQ_CST);
+    YabThreadWake(YAB_THREAD_SCSP);
+    YabThreadWait(YAB_THREAD_SCSP);
+    if (m68k_thread_log)
+      fprintf(stderr, "m68k pipeline: queued %u, run on the emulation thread %u, drains %u, waits %u, deferred interrupts %u\n",
+              m68k_stat_queued, m68k_stat_here, m68k_stat_drains, m68k_stat_waits, m68k_stat_mint);
+  }
+  m68k_thread_on = -1;
+}
+
+/* Core option; takes effect at the next M68KExec() */
+void
+M68KSetThreaded (int on)
+{
+  if (on == m68k_thread_wanted)
+    return;
+  m68k_thread_wanted = on;
+  if (m68k_thread_on >= 0)
+    M68KThreadStop();      // drains; the next M68KExec() decides again
+}
+
+#ifdef YAB_PROFILE
+void M68KExecBody(s32 cycles);
+void M68KExec(s32 cycles) { YAB_PROF_BEGIN(PROF_M68K); M68KExecBody(cycles); YAB_PROF_END(PROF_M68K); }
+#define M68KExec M68KExecBody
+#endif
+void
+M68KExec (s32 cycles)
+#ifdef YAB_PROFILE
+#undef M68KExec
+#endif
+{
+  if (UNLIKELY(m68k_thread_on < 0))
+    M68KThreadDecide();
+  if (m68k_thread_on && !__atomic_load_n(&m68k_pending_mint, __ATOMIC_ACQUIRE))
+  {
+    M68KQueuePush(M68KQ_EXEC, cycles);
+    return;
+  }
+  M68KJobWait();
+  M68KExecInline(cycles);
 }
 
 void new_scsp_run_sample()
@@ -5078,6 +5429,7 @@ M68KExecBP (s32 cycles)
 void
 M68KStep (void)
 {
+  M68KJobWait();
   M68K->Exec(1);
 }
 
@@ -5195,58 +5547,11 @@ void new_scsp_update_samples(s32 *bufL, s32 *bufR, int scspsoundlen)
    new_scsp_outbuf_pos = 0;
 }
 
-#ifdef YAB_PROFILE
-void ScspExecBody(void);
-void ScspExec(void) { YAB_PROF_BEGIN(PROF_SCSP); ScspExecBody(); YAB_PROF_END(PROF_SCSP); }
-#define ScspExec ScspExecBody
-#endif
-void
-ScspExec ()
-#ifdef YAB_PROFILE
-#undef ScspExec
-#endif
+/* Sends the rendered samples the frontend has room for */
+static void
+ScspOutputAudio (void)
 {
   u32 audiosize;
-
-  ScspInternalVars->scsptiming2 +=
-    ((scspsoundlen << 16) + scsplines / 2) / scsplines;
-  if (!use_new_scsp)
-     scsp_update_timer (ScspInternalVars->scsptiming2 >> 16); // Pass integer part
-  ScspInternalVars->scsptiming2 &= 0xFFFF; // Keep fractional part
-  ScspInternalVars->scsptiming1++;
-
-  if (ScspInternalVars->scsptiming1 >= scsplines)
-  {
-     s32 *bufL, *bufR;
-
-     ScspInternalVars->scsptiming1 -= scsplines;
-     ScspInternalVars->scsptiming2 = 0;
-
-     // Update sound buffers
-     if (scspsoundgenpos + scspsoundlen > scspsoundbufsize)
-        scspsoundgenpos = 0;
-
-     if (scspsoundoutleft + scspsoundlen > scspsoundbufsize)
-     {
-        u32 overrun = (scspsoundoutleft + scspsoundlen) -
-           scspsoundbufsize;
-        SCSPLOG("WARNING: Sound buffer overrun, %lu samples\n",
-           (long)overrun);
-        scspsoundoutleft -= overrun;
-     }
-
-     bufL = (s32 *)&scspchannel[0].data32[scspsoundgenpos];
-     bufR = (s32 *)&scspchannel[1].data32[scspsoundgenpos];
-     memset(bufL, 0, sizeof(u32) * scspsoundlen);
-     memset(bufR, 0, sizeof(u32) * scspsoundlen);
-     if (use_new_scsp)
-        new_scsp_update_samples(bufL, bufR, scspsoundlen);
-     else
-        scsp_update(bufL, bufR, scspsoundlen);
-     scspsoundgenpos += scspsoundlen;
-     scspsoundoutleft += scspsoundlen;
-  }
-
   while (scspsoundoutleft > 0 &&
      (audiosize = SNDCore->GetAudioSpace()) > 0)
   {
@@ -5271,7 +5576,110 @@ ScspExec ()
 #endif
   }
 
+}
+
+/* End of an emulated frame: with the sound CPU pipeline, the frame's samples
+   are rendered by queued work and sent here */
+void
+ScspFrameEnd (void)
+{
+  if (m68kq_gens && (s32)(__atomic_load_n(&m68kq_tail, __ATOMIC_ACQUIRE) - m68kq_gen_entry) <= 0)
+    M68KQueueDrainTo(m68kq_gen_entry);
+  if (m68k_thread_on > 0)
+    ScspOutputAudio();
+}
+
+#ifdef YAB_PROFILE
+void ScspExecBody(void);
+void ScspExec(void) { YAB_PROF_BEGIN(PROF_SCSP); ScspExecBody(); YAB_PROF_END(PROF_SCSP); }
+#define ScspExec ScspExecBody
+#endif
+void
+ScspExec ()
+#ifdef YAB_PROFILE
+#undef ScspExec
+#endif
+{
+  u32 audiosize;
+  u32 timer_step;
+  int queued = 0, gen, pipe;
+
+  ScspInternalVars->scsptiming2 +=
+    ((scspsoundlen << 16) + scsplines / 2) / scsplines;
+  timer_step = ScspInternalVars->scsptiming2 >> 16; // Pass integer part
+  ScspInternalVars->scsptiming2 &= 0xFFFF; // Keep fractional part
+  ScspInternalVars->scsptiming1++;
+  gen = ScspInternalVars->scsptiming1 >= scsplines;
+  /* With the sound CPU pipeline the timers and the rendering of the
+     frame's samples run queued; the samples go out at the end of the frame
+     (ScspFrameEnd) */
+  pipe = !use_new_scsp && m68k_thread_on > 0 && !__atomic_load_n(&m68k_pending_mint, __ATOMIC_ACQUIRE);
   if (!use_new_scsp)
+  {
+     if (pipe)
+     {
+        M68KQueuePush(gen ? M68KQ_TIMER_ONLY : M68KQ_TIMER, timer_step);
+        queued = 1;
+     }
+     else
+     {
+        M68KJobWait();
+        scsp_update_timer (timer_step);
+     }
+  }
+
+  if (ScspInternalVars->scsptiming1 >= scsplines)
+  {
+     s32 *bufL, *bufR;
+
+     ScspInternalVars->scsptiming1 -= scsplines;
+     ScspInternalVars->scsptiming2 = 0;
+
+     // Update sound buffers
+     if (scspsoundgenpos + scspsoundlen > scspsoundbufsize)
+        scspsoundgenpos = 0;
+
+     if (scspsoundoutleft + scspsoundlen > scspsoundbufsize)
+     {
+        u32 overrun = (scspsoundoutleft + scspsoundlen) -
+           scspsoundbufsize;
+        SCSPLOG("WARNING: Sound buffer overrun, %lu samples\n",
+           (long)overrun);
+        scspsoundoutleft -= overrun;
+     }
+
+     if (pipe)
+     {
+        /* the CD audio is taken here, so the CD block sees its buffer
+           drain at the same point as without the pipeline */
+        u32 g = m68kq_gens % M68KQ_GENS;
+        if (m68kq_gens >= M68KQ_GENS)
+           M68KQueueDrainTo(m68kq_gen_entry);
+        m68kq_gen[g].pos = scspsoundgenpos;
+        m68kq_gen[g].len = scspsoundlen;
+        m68kq_gen[g].cdlen = scsp_take_cdda(scspsoundlen, &m68kq_gen[g].cdstart);
+        m68kq_gen_entry = m68kq_head;
+        M68KQueuePush(M68KQ_GEN, m68kq_gens++);
+     }
+     else
+     {
+     bufL = (s32 *)&scspchannel[0].data32[scspsoundgenpos];
+     bufR = (s32 *)&scspchannel[1].data32[scspsoundgenpos];
+     memset(bufL, 0, sizeof(u32) * scspsoundlen);
+     memset(bufR, 0, sizeof(u32) * scspsoundlen);
+     if (use_new_scsp)
+        new_scsp_update_samples(bufL, bufR, scspsoundlen);
+     else
+        scsp_update(bufL, bufR, scspsoundlen);
+     }
+     scspsoundgenpos += scspsoundlen;
+     scspsoundoutleft += scspsoundlen;
+  }
+
+  if (!pipe)
+     ScspOutputAudio();
+
+  if (!use_new_scsp && !queued)
      scsp_update_monitor();
 
 #ifdef USE_SCSPMIDI
@@ -5309,6 +5717,7 @@ M68KWriteNotify (u32 address, u32 size)
 void
 M68KGetRegisters (m68kregs_struct *regs)
 {
+  M68KJobWait();
   int i;
 
   if (regs != NULL)
@@ -5329,6 +5738,7 @@ M68KGetRegisters (m68kregs_struct *regs)
 void
 M68KSetRegisters (m68kregs_struct *regs)
 {
+  M68KJobWait();
   int i;
 
   if (regs != NULL)
@@ -5482,6 +5892,7 @@ M68KClearCodeBreakpoints ()
 int
 SoundSaveState (void ** stream)
 {
+  M68KJobWait();
   int i;
   u32 temp;
   int offset;
@@ -5688,6 +6099,7 @@ SoundSaveState (void ** stream)
 int
 SoundLoadState (const void * stream, int version, int size)
 {
+  M68KJobWait();
   int i, i2;
   u32 temp;
   u8 nextphase;
