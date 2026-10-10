@@ -4114,13 +4114,30 @@ static int idle_skip_off; // YAB_DYNAREC_IDLE=0 (tests): no idle-loop skipping
 
 static int idle_loop(int i)
 {
-  int t,j,k,last,call=-1;
+  int t,j,k,last,call=-1,via=0;
   u64 all=0,written=0;
   if(idle_skip_off) return 0;
   if(itype[i]!=CJUMP&&itype[i]!=SJUMP) return 0;
-  if(!internal_branch(ba[i])) return 0;
-  t=(ba[i]-start)>>1;
-  if(t>i||i-t>8||is_ds[t]) return 0;
+  if(ba[i]>start+i*2&&ba[i]-start<0x400) {
+    // "top: ... bf skip; <rare work>; skip: bra top; nop": the branch goes
+    // forward to an unconditional branch back to the loop start (Panzer
+    // Dragoon's slave waiting for the master's FRT input capture). The BRA
+    // is often compiled as a block of its own, so it is read from the
+    // source. The yield resumes at the BRA, which goes back to the top.
+    u16 op=source[(ba[i]-start)>>1];
+    u32 top=ba[i]+4+((s32)((op&0xFFF)<<20)>>19);
+    if((op&0xF000)!=0xA000) return 0; // BRA
+    if(source[((ba[i]-start)>>1)+1]!=0x0009) return 0; // NOP in the delay slot
+    if(top<start||top>start+i*2) return 0;
+    t=(top-start)>>1;
+    via=1;
+  }
+  else {
+    if(!internal_branch(ba[i])) return 0;
+    t=(ba[i]-start)>>1;
+    if(t>i) return 0;
+  }
+  if(i-t>8||is_ds[t]) return 0;
   last=itype[i]==SJUMP?i+1:i; // include the delay slot
   for(j=t;j<=last;j++) {
     if(j!=i) {
@@ -4214,6 +4231,7 @@ static int idle_loop(int i)
     return 2;
   }
   if(idle_cnt_desc!=0xFFFFFFFF) {
+    if(via) return 0; // its pass length below assumes the direct back edge
     // cycles one pass charges: what the branch adds minus the adjustment of
     // the taken path back to the loop start (see do_cc())
     int adj=is_ds[t]?ccadj[t+1]-cycles[t]:ccadj[t];
