@@ -1042,9 +1042,12 @@ void invalidate_addr(u32 addr)
 }
 // This is called when loading a save state.
 // Anything could have changed, so invalidate everything.
+static void vram_shadow_refresh(void);
+
 void invalidate_all_pages()
 {
   u32 page;
+  vram_shadow_refresh(); // after a state load: VDP RAM changed under the shadow
   for(page=0;page<2048;page++)
     invalidate_page(page);
   for(page=0;page<256;page++) {
@@ -2658,7 +2661,12 @@ void pcrel_assemble(int i,struct regstat *i_regs)
       //assert(map>=0);
       reglist&=~(1<<t);
       //reglist&=~(1<<map);
-      assert(can_direct_read(constaddr));
+      if(!can_direct_read(constaddr)) {
+        // Code in VDP1/VDP2 RAM: the literal is read through the handlers
+        // (map_address() only knows BIOS and work RAM)
+        inline_readstub(opcode[i]==9?LOADW_STUB:LOADL_STUB,i,constaddr,i_regs->regmap,rt1[i],ccadj[i],reglist);
+        return;
+      }
       #ifndef HOST_IMM_ADDR32
       emit_movimm(map_address(constaddr),t);
       #endif
@@ -5656,6 +5664,65 @@ void sh2_dynarec_cleanup()
   for(n=0;n<2048;n++) ll_clear(jump_dirty+n);
 }
 
+/* Code in VDP1 RAM (Fighting Vipers) or VDP2 VRAM (Virtua Cop 2 keeps a
+   routine there). Those regions are stored as big-endian bytes, while
+   blocks are compiled from (and checked against) host-order halfwords like
+   work RAM, so code there is compiled from a host-order shadow of the
+   region. Every 4 KB page that has been shadowed is kept up to date on
+   writes (SH2DynarecVramWrite), which also invalidates the page's blocks,
+   as a write to code in work RAM does. */
+static u16 vram_shadow[2][0x40000];
+static u32 vram_shadow_pages[2][4];       // 128 pages of 4 KB per region
+int vram_shadow_any;                      // any page shadowed yet
+extern u8 *Vdp1Ram, *Vdp2Ram;
+
+static void vram_shadow_fill(int r, u32 off, u32 len)
+{
+  const u8 *ram = r ? Vdp2Ram : Vdp1Ram;
+  u32 i;
+  for(i=off&~1;i<off+len&&i<0x80000;i+=2)
+    vram_shadow[r][i>>1]=(ram[i]<<8)|ram[i+1];
+}
+
+static u16 *vram_shadow_source(int r, u32 off)
+{
+  u32 first=off>>12, last=(off+0x3FFF)>>12, p;
+  if(last>127) last=127;
+  for(p=first;p<=last;p++) {
+    if(!((vram_shadow_pages[r][p>>5]>>(p&31))&1)) {
+      vram_shadow_fill(r,p<<12,0x1000);
+      vram_shadow_pages[r][p>>5]|=1u<<(p&31);
+    }
+  }
+  vram_shadow_any=1;
+  return &vram_shadow[r][off>>1];
+}
+
+static void vram_shadow_refresh(void)
+{
+  int r;
+  u32 p;
+  for(r=0;r<2;r++)
+    for(p=0;p<128;p++)
+      if((vram_shadow_pages[r][p>>5]>>(p&31))&1)
+        vram_shadow_fill(r,p<<12,0x1000);
+}
+
+/* A write of size bytes at offset addr of VDP1 RAM (r=0) or VDP2 VRAM (r=1) */
+void SH2DynarecVramWrite(int r, u32 addr, u32 size)
+{
+  u32 p=addr>>12, base, m;
+  if(!((vram_shadow_pages[r][p>>5]>>(p&31))&1)) return;
+  vram_shadow_fill(r,addr,size);
+  base=r?0x05E00000:0x05C00000;
+  // every address the page can be reached at: cache-through mirror, and the
+  // second half of VDP2 VRAM's 1 MB area
+  for(m=0;m<(r?4u:2u);m++) {
+    u32 v=(base+addr+((m&2)?0x80000:0))^((m&1)?0x20000000:0);
+    if((cached_code[v>>15]>>((v>>12)&7))&1) invalidate_blocks(v>>12,v>>12);
+  }
+}
+
 #ifdef YAB_PROFILE
 static int sh2_recompile_block_body(int addr);
 int sh2_recompile_block(int addr) { int r; YAB_PROF_BEGIN(PROF_SH2_COMPILE); r = sh2_recompile_block_body(addr); YAB_PROF_END(PROF_SH2_COMPILE); return r; }
@@ -5703,9 +5770,20 @@ int sh2_recompile_block(int addr)
     source = (u16 *)((char *)HighWram+(start & 0xFFFFF));
     pagelimit = (addr|0xFFFFF) + 1;
   }
+  else if ((cached_addr & 0xFFF80000) == 0x05C00000 || (cached_addr & 0xFFF00000) == 0x05E00000) {
+    // VDP1 RAM or VDP2 VRAM: compiled from the region's shadow
+    int r = (cached_addr & 0x00200000) != 0;
+    source = vram_shadow_source(r, start & 0x7FFFF);
+    pagelimit = (addr|0x7FFFF) + 1;
+  }
   else {
+    // Nothing to compile here: an exception or a jump into garbage. Used to
+    // exit(), taking the frontend with it; run an endless loop instead
+    // (BRA to itself), so the game hangs but RetroArch stays up.
+    static u16 bra_self[2] = { 0xAFFE, 0x0009 };
     printf("Compile at bogus memory address: %x \n", (int)addr);
-    exit(1);
+    source = bra_self;
+    pagelimit = start + 4;
   }
   //printf("source= %x\n",(int)source);
   

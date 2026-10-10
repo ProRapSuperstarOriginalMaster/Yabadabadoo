@@ -185,11 +185,21 @@ static u32 FASTCALL FetchHWram(SH2_struct *sh, u32 addr)
       return T2ReadWord(HighWram, addr & 0xFFFFF);
 }
 
+/* Code running from VDP1 RAM (Fighting Vipers) or VDP2 VRAM (Virtua Cop 2
+   keeps a routine there). FetchVram used to take only the address, so it was
+   called with the SH-2 context as the address. */
 extern u8 * Vdp1Ram;
-static u32 FASTCALL FetchVram(u32 addr)
+extern u8 * Vdp2Ram;
+static u32 FASTCALL FetchVram(UNUSED SH2_struct *sh, u32 addr)
 {
   addr &= 0x07FFFF;
   return T1ReadWord(Vdp1Ram, addr);
+}
+
+static u32 FASTCALL FetchVdp2Ram(UNUSED SH2_struct *sh, u32 addr)
+{
+  addr &= 0x07FFFF;
+  return T1ReadWord(Vdp2Ram, addr);
 }
 
 
@@ -2772,6 +2782,9 @@ int SH2InterpreterInit(enum SHMODELTYPE model, SH2_struct *msh, SH2_struct *ssh)
                break;
             case 0x05c: // Fighting Viper
                msh->fetchlist[i] = ssh->fetchlist[i] = FetchVram;
+               break;
+            case 0x05e: // VDP2 VRAM (Virtua Cop 2)
+               msh->fetchlist[i] = ssh->fetchlist[i] = FetchVdp2Ram;
                break;
             case 0x060: // High Work Ram
             case 0x061: 

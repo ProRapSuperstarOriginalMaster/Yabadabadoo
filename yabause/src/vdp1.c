@@ -26,6 +26,11 @@
 
 #include <stdlib.h>
 #include "vdp1.h"
+#ifdef SH2_DYNAREC
+#include "sh2_dynarec/sh2_dynarec.h"
+#else
+#define SH2_DYNAREC_VRAM_WRITE(r, addr, size) do { } while (0)
+#endif
 #include "yabprof.h"
 #include "debug.h"
 #include "scu.h"
@@ -76,6 +81,7 @@ void FASTCALL Vdp1RamWriteByte(u32 addr, u8 val) {
    addr &= 0x7FFFF;
    VDP1_RAM_MARK(addr);
    T1WriteByte(Vdp1Ram, addr, val);
+   SH2_DYNAREC_VRAM_WRITE(0, addr, 1);
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -84,6 +90,7 @@ void FASTCALL Vdp1RamWriteWord(u32 addr, u16 val) {
    addr &= 0x7FFFF;
    VDP1_RAM_MARK(addr);
    T1WriteWord(Vdp1Ram, addr, val);
+   SH2_DYNAREC_VRAM_WRITE(0, addr, 2);
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -92,6 +99,7 @@ void FASTCALL Vdp1RamWriteLong(u32 addr, u32 val) {
    addr &= 0x7FFFF;
    VDP1_RAM_MARK(addr);
    T1WriteLong(Vdp1Ram, addr, val);
+   SH2_DYNAREC_VRAM_WRITE(0, addr, 4);
 }
 
 //////////////////////////////////////////////////////////////////////////////
