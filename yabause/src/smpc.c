@@ -657,22 +657,24 @@ static void SmpcSetTiming(void) {
          else {
             // Calculate timing based on what data is being retrieved
 
-            if ((SmpcRegs->IREG[0] == 0x01) && (SmpcRegs->IREG[1] & 0x8))
+            if ((SmpcRegs->IREG[0] & 0x1) && (SmpcRegs->IREG[1] & 0x8))
             {
                //status followed by peripheral data
                SmpcInternalVars->timing = 250;
             }
-            else if ((SmpcRegs->IREG[0] == 0x01) && ((SmpcRegs->IREG[1] & 0x8) == 0))
+            else if ((SmpcRegs->IREG[0] & 0x1) && ((SmpcRegs->IREG[1] & 0x8) == 0))
             {
                //status only
                SmpcInternalVars->timing = 250;
             }
-            else if ((SmpcRegs->IREG[0] == 0) && (SmpcRegs->IREG[1] & 0x8))
+            else if (SmpcRegs->IREG[1] & 0x8)
             {
                //peripheral only
                SmpcInternalVars->timing = 16000;
                intback_wait_for_line = 1;
             }
+            else
+               SmpcInternalVars->timing = 1; // nothing requested: finish anyway (SF must clear)
          }
          return;
       case 0x17:
