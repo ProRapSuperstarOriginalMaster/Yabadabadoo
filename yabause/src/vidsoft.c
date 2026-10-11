@@ -354,6 +354,34 @@ static INLINE u32 FASTCALL Vdp2ColorRamGetColor(u32 addr, u8* vdp2_color_ram)
    return Vdp2ColorRamGetColorCM(Vdp2Internal.ColorMode, addr, vdp2_color_ram);
 }
 
+/* Vdp2ColorRamGetColorCM() for every address, built once per drawn frame
+ * from the colour RAM the layers draw from (the threads' snapshot, or the
+ * live one when there are no layer threads). The colour depends
+ * only on addr & 0x7FF in modes 0/1 and addr & 0x3FF in mode 2, so
+ * vidsoft_pal[addr & vidsoft_pal_mask] is the same colour, without decoding
+ * RGB555 per pixel. Used only while the colour mode and colour RAM are the
+ * ones it was built from. */
+static u32 vidsoft_pal[2048];
+static u32 vidsoft_pal_mask;
+static int vidsoft_pal_mode = -1;
+static const u8 *vidsoft_pal_src;
+
+static void VidsoftBuildPalette(u8 *color_ram)
+{
+   const int mode = Vdp2Internal.ColorMode;
+   const int n = mode == 2 ? 1024 : 2048;
+   int i;
+
+   vidsoft_pal_mode = -1;
+   if (mode > 2)
+      return;
+   for (i = 0; i < n; i++)
+      vidsoft_pal[i] = Vdp2ColorRamGetColorCM(mode, i, color_ram);
+   vidsoft_pal_mask = n - 1;
+   vidsoft_pal_src = color_ram;
+   vidsoft_pal_mode = mode;
+}
+
 //////////////////////////////////////////////////////////////////////////////
 
 static INLINE void Vdp2PatternAddr(vdp2draw_struct *info, Vdp2* regs, u8* ram)
@@ -1177,6 +1205,121 @@ transparent:
    }
 }
 
+/* The pixel loop of Vdp2DrawScrollRunPal() (palp = the run's first palette
+ * entry). Out of line, one copy per format and colour offset on/off:
+ * inlined into the line loop, its values didn't fit in registers and were
+ * reloaded from the stack per pixel. flags: 1 = transparency enabled,
+ * 2 = fresh line (write transparent pixels too). co = cor, cog, cob. */
+static INLINE __attribute__((always_inline)) void Vdp2DrawScrollRunPalPlain(const int colornumber, const int offset,
+   const u8 *row, int xf, int dir, const u32 *palp, struct PixelData *out, int run,
+   u32 alpha, u32 meta, int flags, const s32 *co)
+{
+   /* dot | opaque_zero is 0 only for a transparent pixel */
+   const u32 opaque_zero = !(flags & 1);
+   const int fresh = flags & 2;
+   const s32 cor = offset ? co[0] : 0, cog = offset ? co[1] : 0, cob = offset ? co[2] : 0;
+   struct PixelData *end = out + run;
+   const u8 *p = row + xf;
+
+   for (; out < end; out++, xf += dir, p += dir)
+   {
+      u32 dot, pixel;
+
+      if (colornumber == 0)
+      {
+         dot = row[xf >> 1];
+         dot = (xf & 1) ? dot & 0xF : dot >> 4;
+      }
+      else
+         dot = *p;
+
+      if ((dot | opaque_zero) == 0)
+      {
+         if (fresh)
+         {
+            out->pixel = 0;
+            out->meta = 0;
+         }
+         continue;
+      }
+
+      pixel = alpha | (palp[dot] & 0xFFFFFF);
+      if (offset)
+         pixel = COLOR_ADD(pixel, cor, cog, cob);
+      out->pixel = pixel;
+      out->meta = meta;
+   }
+}
+
+#define PAL_RUN_FN(NAME, CN, OFS) \
+static __attribute__((noinline)) void NAME(const u8 *row, int xf, int dir, const u32 *palp, struct PixelData *out, int run, \
+   u32 alpha, u32 meta, int flags, const s32 *co) \
+{ \
+   Vdp2DrawScrollRunPalPlain(CN, OFS, row, xf, dir, palp, out, run, alpha, meta, flags, co); \
+}
+PAL_RUN_FN(Vdp2PalRun4, 0, 0)
+PAL_RUN_FN(Vdp2PalRun4Ofs, 0, 1)
+PAL_RUN_FN(Vdp2PalRun8, 1, 0)
+PAL_RUN_FN(Vdp2PalRun8Ofs, 1, 1)
+#undef PAL_RUN_FN
+
+/* Vdp2DrawScrollRun() for 4bpp and 8bpp in the usual case, with what is
+ * fixed for the run worked out once and kept in locals (stores to titan_line
+ * could alias info's fields, so the general loop reloads them per pixel): the
+ * tile row's address, the priority, the alpha, the colour offset; the colour
+ * comes from vidsoft_pal. Same pixels as Vdp2DrawScrollRun(). The caller
+ * (Vdp2DrawScrollLineFast) makes sure that: vidsoft_pal was built from this
+ * colour RAM in this colour mode, cellw is 8, there is no per-pixel priority
+ * (specialprimode != 2), post_calc is 0 or 1, the colour calc window is the
+ * same for the whole line (cc_win_fixed), the alpha doesn't depend on the
+ * pixel (special colour calculation mode not 3, and not 2 with the tile's
+ * special colour function on), charaddr is a multiple of 0x20, paladdr has
+ * no bits under the dot (so paladdr | dot == paladdr + dot) and the run's
+ * palette entries don't wrap. A tile row is then 4 or 8 bytes, aligned to its
+ * size: masking the row's address with 0x7FFFF once masks every pixel's. */
+static INLINE __attribute__((always_inline)) void Vdp2DrawScrollRunPal(const int colornumber,
+   vdp2draw_struct *info, u8 *ram, struct PixelData *titan_line,
+   int i, int run, int xf, int dir, int yf, int fresh, u32 meta_base, int post_calc, int cc_win_pass)
+{
+   const int priority = info->priority;
+   const int scm = info->specialcolormode;
+   struct PixelData *out = titan_line + i;
+   const u8 *row;
+   u32 alpha, meta;
+   int flags, k;
+
+   if (priority == 0)
+   {
+      if (fresh)
+         for (k = 0; k < run; k++)
+         {
+            out[k].pixel = 0;
+            out[k].meta = 0;
+         }
+      return;
+   }
+
+   /* the colour calc window gives 0x3F, else GetAlpha(): 0x3F where special
+    * colour calculation mode 1 or 2 is off for this tile */
+   if (!cc_win_pass || ((scm == 1 || scm == 2) && !(info->specialcolorfunction & 1)))
+      alpha = 0x3Fu << 24;
+   else
+      alpha = (u32)(u8)info->alpha << 24;
+   meta = meta_base | TitanPackMeta(priority, 0, 0, 0);
+   flags = (info->transparencyenable ? 1 : 0) | (fresh ? 2 : 0);
+
+   if (colornumber == 0)
+   {
+      row = ram + ((info->charaddr + yf * 4) & 0x7FFFF);
+      (post_calc == 1 ? Vdp2PalRun4Ofs : Vdp2PalRun4)(row, xf, dir, vidsoft_pal + info->coloroffset + info->paladdr, out, run, alpha, meta, flags, &info->cor);
+   }
+   else
+   {
+      row = ram + ((info->charaddr + yf * 8) & 0x7FFFF);
+      (post_calc == 1 ? Vdp2PalRun8Ofs : Vdp2PalRun8)(row, xf, dir, vidsoft_pal + info->coloroffset + info->paladdr, out, run, alpha, meta, flags, &info->cor);
+   }
+}
+
 /* One line of the fast path in Vdp2DrawScroll(), for one colour format: the
  * line splits into runs inside one 8-pixel block (split further where x
  * wraps) that share tile data, row and flip. Kept as one function per format
@@ -1186,6 +1329,12 @@ static INLINE __attribute__((always_inline)) void Vdp2DrawScrollLineFast(const i
    struct PixelData *titan_line, int linescrollx, int Y, int j, int fresh, u32 meta_base, int post_calc,
    int cc_win_fixed, int cc_win_pass, int cc_wctl, clipping_struct *colorcalcwindow, const u8 *cc_tab, int start, int end)
 {
+   /* Vdp2DrawScrollRunPal() for this line? (its conditions that hold for
+    * the whole line; the per-tile ones are tested per run) */
+   const int pal_line = colornumber <= 1 && colormode == vidsoft_pal_mode && color_ram == vidsoft_pal_src &&
+                        info->cellw == 8 && info->specialprimode != 2 && post_calc != 2 &&
+                        cc_win_fixed && info->specialcolormode != 3;
+   const u32 dotmask = colornumber == 0 ? 0xF : 0xFF;
    int i = start;
    while (i < end)
    {
@@ -1206,7 +1355,12 @@ static INLINE __attribute__((always_inline)) void Vdp2DrawScrollLineFast(const i
       Vdp2MapCalcXYFast(info, &x, &y, sinfo, regs, ram);
       dir = (info->flipfunction & 1) ? -1 : 1;
 
-      Vdp2DrawScrollRun(colornumber, colormode, info, regs, ram, color_ram, titan_line, i, run, x, dir, y, j, fresh, meta_base, post_calc, cc_win_fixed, cc_win_pass, cc_wctl, colorcalcwindow, cc_tab);
+      if (pal_line && !(info->specialcolormode == 2 && (info->specialcolorfunction & 1)) &&
+          (info->charaddr & 0x1F) == 0 && (info->paladdr & dotmask) == 0 &&
+          info->coloroffset + info->paladdr + dotmask <= vidsoft_pal_mask)
+         Vdp2DrawScrollRunPal(colornumber, info, ram, titan_line, i, run, x, dir, y, fresh, meta_base, post_calc, cc_win_pass);
+      else
+         Vdp2DrawScrollRun(colornumber, colormode, info, regs, ram, color_ram, titan_line, i, run, x, dir, y, j, fresh, meta_base, post_calc, cc_win_fixed, cc_win_pass, cc_wctl, colorcalcwindow, cc_tab);
       i += run;
    }
 }
@@ -6401,7 +6555,9 @@ void VidsoftStartLayerThread(int * layer_priority, int * draw_priority_0, int * 
       }
       else
       {
-        (*layer_func) (Vdp2Lines, Vdp2Regs, Vdp2Ram, Vdp2ColorRam, cell_scroll_data);
+        /* the colour RAM snapshot was just taken from Vdp2ColorRam (same
+           bytes); drawing from it lets the layer use vidsoft_pal */
+        (*layer_func) (Vdp2Lines, Vdp2Regs, Vdp2Ram, vidsoft_thread_context.color_ram, cell_scroll_data);
       }
    }
 }
@@ -6478,8 +6634,11 @@ void VIDSoftVdp2DrawScreens(void)
       VidsoftSyncRamCopy(vidsoft_thread_context.ram, Vdp2Ram, Vdp2RamDirty, "VDP2");
       memcpy(vidsoft_thread_context.color_ram, Vdp2ColorRam, 0x1000);
       memcpy(vidsoft_thread_context.cell_scroll_data, cell_scroll_data, sizeof(struct CellScrollData) * 270);
+      VidsoftBuildPalette(vidsoft_thread_context.color_ram);
       YAB_PROF_END(PROF_SNAPSHOT);
    }
+   else
+      VidsoftBuildPalette(Vdp2ColorRam);
 
    //draw vdp2 sprite layer on a thread if sprite window is not enabled
    if (CanUseSpriteThread() && vidsoft_num_layer_threads > 0)
@@ -6518,6 +6677,8 @@ void VIDSoftVdp2DrawScreens(void)
 void VIDSoftVdp2DrawScreen(int screen)
 {
    VIDSoftVdp2SetResolution(Vdp2Regs->TVMD);
+   VidsoftWaitForLayerThreads(); /* they may still read vidsoft_pal */
+   VidsoftBuildPalette(Vdp2ColorRam);
 
    switch(screen)
    {
