@@ -1298,6 +1298,116 @@ static u32 yab_prof_frames, yab_prof_skip = (u32)-1;
 static u64 yab_prof_t0;
 static double yab_prof_wall0;
 
+/* CPU event counters for the sections in PROF_PMU_MASK (yabprof.h).
+   YAB_PMU = ipc | mem | stall | tlb, or up to 4 raw ARMv7 event numbers
+   ("0x08,0x03"); cycles are always counted. Each thread opens its own
+   counter group (user space only, so perf_event_paranoid 2 allows it) the
+   first time it enters such a section. */
+volatile int yab_pmu_on;
+static int yab_pmu_n;                       /* events after cycles */
+static unsigned yab_pmu_ev[YAB_PMU_MAX - 1];
+static char yab_pmu_desc[96];
+static u64 yab_pmu_acc[PROF_COUNT][YAB_PMU_MAX];
+static u32 yab_pmu_calls[PROF_COUNT];
+#ifdef __linux__
+#include <unistd.h>
+#include <sys/syscall.h>
+#include <sys/ioctl.h>
+#include <linux/perf_event.h>
+#ifndef __NR_perf_event_open
+#define __NR_perf_event_open 364            /* 32-bit ARM EABI */
+#endif
+static __thread int yab_pmu_fd = -2;        /* -2: not opened yet, -1: failed */
+static int YabPmuOpen1(unsigned type, unsigned long long config, int group)
+{
+   struct perf_event_attr a;
+   memset(&a, 0, sizeof(a));
+   a.size = sizeof(a);
+   a.type = type;
+   a.config = config;
+   a.exclude_kernel = 1;
+   a.exclude_hv = 1;
+   a.read_format = PERF_FORMAT_GROUP;
+   return (int)syscall(__NR_perf_event_open, &a, 0, -1, group, 0);
+}
+static int YabPmuOpen(void)
+{
+   int lead = YabPmuOpen1(PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES, -1), i;
+   if (lead < 0)
+   {
+      fprintf(stderr, "pmu: perf_event_open failed in a thread; its sections go uncounted\n");
+      return -1;
+   }
+   for (i = 0; i < yab_pmu_n; i++)
+      if (YabPmuOpen1(PERF_TYPE_RAW, yab_pmu_ev[i], lead) < 0)
+      {
+         fprintf(stderr, "pmu: event 0x%x not available\n", yab_pmu_ev[i]);
+         close(lead);
+         return -1;
+      }
+   return lead;
+}
+int YabPmuRead(u64 *v)
+{
+   u64 buf[1 + YAB_PMU_MAX];
+   int i;
+   if (yab_pmu_fd == -2)
+      yab_pmu_fd = YabPmuOpen();
+   if (yab_pmu_fd < 0 || read(yab_pmu_fd, buf, sizeof(u64) * (2 + yab_pmu_n)) != (ssize_t)(sizeof(u64) * (2 + yab_pmu_n)))
+      return 0;
+   for (i = 0; i <= yab_pmu_n; i++)
+      v[i] = buf[1 + i];
+   return 1;
+}
+#else
+int YabPmuRead(u64 *v) { (void)v; return 0; }
+#endif
+void YabPmuAdd(int id, const u64 *v0)
+{
+   u64 v[YAB_PMU_MAX];
+   int i;
+   if (!YabPmuRead(v))
+      return;
+   for (i = 0; i <= yab_pmu_n; i++)
+      __atomic_add_fetch(&yab_pmu_acc[id][i], v[i] - v0[i], __ATOMIC_RELAXED);
+   __atomic_add_fetch(&yab_pmu_calls[id], 1, __ATOMIC_RELAXED);
+}
+static void YabPmuSetup(void)
+{
+   static const struct { const char *name; unsigned ev[4]; const char *desc; } presets[] = {
+      { "ipc",   { 0x08, 0x03, 0x17, 0x13 }, "inst L1D_refill L2D_refill mem_access" },
+      { "mem",   { 0x04, 0x16, 0xC0, 0xC2 }, "L1D_access L2D_access ext_mem_req prefetch_linefill" },
+      { "stall", { 0xC9, 0x01, 0x10, 0x12 }, "storebuf_full_stall L1I_refill br_mispred br_pred" },
+      { "tlb",   { 0x05, 0x02, 0x06, 0x07 }, "DTLB_refill ITLB_refill loads stores" },
+   };
+   const char *e = getenv("YAB_PMU");
+   int i;
+   if (!e || !*e)
+      return;
+   for (i = 0; i < (int)(sizeof(presets) / sizeof(presets[0])); i++)
+      if (!strcmp(e, presets[i].name))
+      {
+         memcpy(yab_pmu_ev, presets[i].ev, sizeof(yab_pmu_ev));
+         yab_pmu_n = 4;
+         snprintf(yab_pmu_desc, sizeof(yab_pmu_desc), "cycles %s", presets[i].desc);
+         break;
+      }
+   if (!yab_pmu_n)
+   {
+      char *p = (char *)e;
+      int len = snprintf(yab_pmu_desc, sizeof(yab_pmu_desc), "cycles");
+      while (*p && yab_pmu_n < YAB_PMU_MAX - 1)
+      {
+         yab_pmu_ev[yab_pmu_n] = (unsigned)strtoul(p, &p, 0);
+         len += snprintf(yab_pmu_desc + len, sizeof(yab_pmu_desc) - len, " 0x%02x", yab_pmu_ev[yab_pmu_n]);
+         yab_pmu_n++;
+         while (*p == ',' || *p == ' ')
+            p++;
+      }
+   }
+   yab_pmu_on = 1;
+}
+
 static double YabProfWall(void)
 {
    struct timespec ts;
@@ -1431,7 +1541,10 @@ void YabProfFrame(void)
 {
    YabProfTraceFrame(yab_prof_frames);
    if (yab_prof_skip == (u32)-1)
+   {
       yab_prof_skip = getenv("YAB_PROF_SKIP") ? (u32)atoi(getenv("YAB_PROF_SKIP")) : 0;
+      YabPmuSetup();
+   }
    if (yab_prof_frames == yab_prof_skip)
    {
       // start (or restart after warm-up) the measurement window
@@ -1439,6 +1552,8 @@ void YabProfFrame(void)
       memset(yab_prof_calls, 0, sizeof(yab_prof_calls));
       memset(yab_prof_thread_ns, 0, sizeof(yab_prof_thread_ns));
       memset(yab_prof_cpu_ns, 0, sizeof(yab_prof_cpu_ns));
+      memset(yab_pmu_acc, 0, sizeof(yab_pmu_acc));
+      memset(yab_pmu_calls, 0, sizeof(yab_pmu_calls));
       yab_prof_t0 = YabProfNow();
       yab_prof_wall0 = YabProfWall();
    }
@@ -1511,6 +1626,20 @@ void YabProfReport(void)
       if ((1u << i) & PROF_CPU_MASK)
          fprintf(stderr, "  cpu %6.3f off-cpu %6.3f", yab_prof_cpu_ns[i] / 1e6 / frames, ms - yab_prof_cpu_ns[i] / 1e6 / frames);
       fprintf(stderr, "\n");
+   }
+   if (yab_pmu_on)
+   {
+      /* one line per counted section: calls, then each event's total per call */
+      fprintf(stderr, "pmu events: %s\n", yab_pmu_desc);
+      for (i = 0; i < PROF_COUNT; i++)
+         if (yab_pmu_calls[i])
+         {
+            int k;
+            fprintf(stderr, "pmu %-26s calls %u per-call", names[i], yab_pmu_calls[i]);
+            for (k = 0; k <= yab_pmu_n; k++)
+               fprintf(stderr, " %.0f", (double)yab_pmu_acc[i][k] / yab_pmu_calls[i]);
+            fprintf(stderr, "\n");
+         }
    }
 }
 #endif
