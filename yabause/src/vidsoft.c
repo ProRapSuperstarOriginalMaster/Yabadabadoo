@@ -5336,10 +5336,10 @@ static INLINE __attribute__((always_inline)) QuadPen QuadPlotLeanRGBBody(const i
    return pen;
 }
 
-static QuadPen QuadPlotLeanRGB(const QuadLine *Lp, QuadPen pen) { return QuadPlotLeanRGBBody(0, 0, Lp, pen); }
-static QuadPen QuadPlotLeanRGBG(const QuadLine *Lp, QuadPen pen) { return QuadPlotLeanRGBBody(0, 4, Lp, pen); }
-static QuadPen QuadPlotLeanRGBE(const QuadLine *Lp, QuadPen pen) { return QuadPlotLeanRGBBody(1, 0, Lp, pen); }
-static QuadPen QuadPlotLeanRGBEG(const QuadLine *Lp, QuadPen pen) { return QuadPlotLeanRGBBody(1, 4, Lp, pen); }
+static __attribute__((noinline)) QuadPen QuadPlotLeanRGB(const QuadLine *Lp, QuadPen pen) { return QuadPlotLeanRGBBody(0, 0, Lp, pen); }
+static __attribute__((noinline)) QuadPen QuadPlotLeanRGBG(const QuadLine *Lp, QuadPen pen) { return QuadPlotLeanRGBBody(0, 4, Lp, pen); }
+static __attribute__((noinline)) QuadPen QuadPlotLeanRGBE(const QuadLine *Lp, QuadPen pen) { return QuadPlotLeanRGBBody(1, 0, Lp, pen); }
+static __attribute__((noinline)) QuadPen QuadPlotLeanRGBEG(const QuadLine *Lp, QuadPen pen) { return QuadPlotLeanRGBBody(1, 4, Lp, pen); }
 
 /* Untextured polygons in replace mode (Dragon Force's menu panels): what
  * QuadPlotPoints(-1, 0, 0, ...) gives for them. No end codes (untextured),
@@ -5349,7 +5349,7 @@ static QuadPen QuadPlotLeanRGBEG(const QuadLine *Lp, QuadPen pen) { return QuadP
  * whether it is plotted are the same for every point. No mesh, MSB-on,
  * double interlace or user clipping "outside"; no Gouraud steps in replace
  * mode. */
-static QuadPen QuadPlotFill(const QuadLine *Lp, QuadPen pen)
+static __attribute__((noinline)) QuadPen QuadPlotFill(const QuadLine *Lp, QuadPen pen)
 {
    const u32 *const pts = Lp->pts;
    u16 *const fb = Lp->fb;
