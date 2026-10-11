@@ -681,6 +681,12 @@ void TitanPutHLine(int priority, s32 x, s32 y, s32 width, u32 color)
    }
 }
 
+/* How many pixels ahead the compositing loop prefetches each row (0 = off).
+ * Device, NiGHTS: 16..128 all alike, 32 chosen. */
+#ifndef TITAN_PLD
+#define TITAN_PLD 32
+#endif
+
 /* One line of TitanRenderLinesM() for N rows (N constant per copy): find the
  * top pixel, stopping once no remaining row can beat it, with the next row's
  * priority loaded before the current one is compared. On the Miyoo's
@@ -709,7 +715,10 @@ static INLINE __attribute__((always_inline)) void TitanLineM(const int mode, con
       int topi = 0;
       u32 dot;
 
-#ifdef TITAN_PLD
+#if TITAN_PLD
+      /* Once per cache line (8 pixels) of each row: the rows are written by
+       * other threads a frame's work earlier and are out of the cache, and
+       * the in-order Cortex-A7 stalled on every line it first read. */
       if ((x & 7) == 0)
          for (i = 0; i < N; i++)
             __builtin_prefetch(&sorted[i][x + TITAN_PLD]);
