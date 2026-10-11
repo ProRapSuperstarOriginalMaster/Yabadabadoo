@@ -343,6 +343,15 @@ int YabauseInit(yabauseinit_struct *init)
    OSDChangeCore(OSDCORE_DEFAULT);
 #endif
 
+   if (init->biospath != NULL && strlen(init->biospath) && init->biospath_for_region)
+   {
+      const char *p;
+      SmpcRecheckRegion(); /* the disc's region (SmpcReset reads it again) */
+      p = init->biospath_for_region(SmpcInternalVars->regionid);
+      if (p != NULL && strlen(p))
+         init->biospath = p;
+   }
+
    if (init->biospath != NULL && strlen(init->biospath))
    {
       if (LoadBios(init->biospath) != 0)

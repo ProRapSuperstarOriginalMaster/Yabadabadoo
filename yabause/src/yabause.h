@@ -37,6 +37,9 @@ typedef struct
    int carttype;
    u8 regionid;
    const char *biospath;
+   /* optional: picks the BIOS file once the disc's region is known (called
+      after SmpcInit with the region the SMPC reports); NULL = use biospath */
+   const char *(*biospath_for_region)(u8 regionid);
    const char *cdpath;
    const char *ssfpath;
    const char *buppath;

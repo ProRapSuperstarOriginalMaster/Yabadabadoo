@@ -143,6 +143,21 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       "4M_ram"
    },
    {
+      "yabadabadoo_bios",
+      "BIOS (Restart Required)",
+      NULL,
+      "Which Saturn BIOS to start. 'Auto' uses the one for the game's region, like a real console (Japan: sega_101.bin; USA/Europe: mpr-17933.bin). If that file is missing, saturn_bios.bin or the other region's file is used. Versions before this option preferred the Japanese BIOS: if a save state made with one of them misbehaves, choose 'Japan'.",
+      NULL,
+      NULL,
+      {
+         { "auto", "Auto (game's region)" },
+         { "japan", "Japan" },
+         { "usa_europe", "USA/Europe" },
+         { NULL, NULL},
+      },
+      "auto"
+   },
+   {
       "yabadabadoo_multitap_port1",
       "6Player Adaptor on Port 1",
       NULL,

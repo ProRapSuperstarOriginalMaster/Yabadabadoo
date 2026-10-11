@@ -90,6 +90,8 @@ static bool retro_audio_buff_underrun      = false;
 static unsigned audio_latency              = 0;
 static bool update_audio_latency           = false;
 static int addon_cart_type = CART_NONE;
+/* BIOS option: 0 = the game's region, 1 = Japan, 2 = USA/Europe */
+static int bios_choice = 0;
 static int numthreads = 1;
 static bool sh2_use_dynarec = false;
 static int deciline_mode = 1;
@@ -253,6 +255,30 @@ static void draw_text(u16 *fb, int w, int h, int x, int y, const char *str)
 static void no_bios_text(u16 *fb, int x, int y, const char *str)
 {
    draw_text(fb, 320, 240, x, y, str);
+}
+
+/* Called by YabauseInit once the SMPC knows the disc's region: the BIOS of
+ * that region (or of the BIOS option), else saturn_bios.bin, else the other
+ * region's file. Area codes J (1), T (2) and K (6) use the Japanese BIOS. */
+static int does_file_exist(const char *filename);
+static char bios_chosen[PATH_MAX_LENGTH];
+static const char *bios_for_region(u8 regionid)
+{
+   static const char *names[2][3] = {
+      { "sega_101.bin", "saturn_bios.bin", "mpr-17933.bin" },
+      { "mpr-17933.bin", "saturn_bios.bin", "sega_101.bin" },
+   };
+   bool japan = bios_choice == 1 ||
+                (bios_choice == 0 && (regionid == 1 || regionid == 2 || regionid == 6));
+   int i;
+
+   for (i = 0; i < 3; i++)
+   {
+      snprintf(bios_chosen, sizeof(bios_chosen), "%s%c%s", g_system_dir, slash, names[japan ? 0 : 1][i]);
+      if (does_file_exist(bios_chosen) == 1)
+         return bios_chosen;
+   }
+   return NULL;
 }
 
 static void no_bios_run(void)
@@ -1055,6 +1081,18 @@ static void check_variables(void)
          addon_cart_type = CART_DRAM32MBIT;
    }
 
+   var.key = "yabadabadoo_bios";
+   var.value = NULL;
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (strcmp(var.value, "auto") == 0)
+         bios_choice = 0;
+      else if (strcmp(var.value, "japan") == 0)
+         bios_choice = 1;
+      else if (strcmp(var.value, "usa_europe") == 0)
+         bios_choice = 2;
+   }
+
    var.key = "yabadabadoo_multitap_port1";
    var.value = NULL;
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
@@ -1794,6 +1832,7 @@ bool retro_load_game(const struct retro_game_info *info)
    yinit.cdpath               = disk_paths[disk_index];
    /* Emulate BIOS */
    yinit.biospath             = (have_bios && !hle_bios_force) ? bios_path : NULL;
+   yinit.biospath_for_region  = bios_for_region;
    yinit.percoretype          = PERCORE_LIBRETRO;
 #ifdef HAVE_PLAY_JIT
    yinit.sh2coretype          = SH2CORE_JIT;
@@ -1836,10 +1875,11 @@ bool retro_load_game(const struct retro_game_info *info)
    yinit.usethreads           = 0;
 #endif
 
+   ret = YabauseInit(&yinit);
+   /* after YabauseInit: it picks the BIOS by region (bios_for_region) */
    log_cb(RETRO_LOG_INFO, "Starting emulation: SH2 %s, BIOS %s\n",
           yinit.sh2coretype == SH2CORE_INTERPRETER ? "interpreter" : "recompiler",
           yinit.biospath ? yinit.biospath : "HLE");
-   ret = YabauseInit(&yinit);
    if (ret == 0)
    {
       apply_video_format();
