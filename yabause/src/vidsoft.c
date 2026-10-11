@@ -5100,10 +5100,45 @@ static QuadPen QuadPlotCM1Gouraud(const QuadLine *Lp, QuadPen pen)
    return pen;
 }
 
+/* The points of a line that the lean loops plot: inside the system clip
+ * rectangle, this thread's rows and, with user clipping "inside" (user_clip
+ * 1), the user clip rectangle (IsClipped(): clipped if outside either). The
+ * intersection is a rectangle and the walk is monotonic in x and y, so they
+ * are one run [*k0, *k1] (*k1 < *k0 when there are none). */
+static INLINE __attribute__((always_inline)) void QuadLeanRun(const QuadLine *Lp, int *k0p, int *k1p)
+{
+   const u32 *const pts = Lp->pts;
+   const int n = Lp->n;
+   int k0 = 0, k1 = n - 1;
+   int xlo = 0, xhi = Lp->regs->systemclipX2;
+   int ylo = Lp->row_lo, yhi = Lp->row_hi - 1;
+
+   if (Lp->regs->systemclipY2 < yhi)
+      yhi = Lp->regs->systemclipY2;
+   if (ylo < 0)
+      ylo = 0;
+   if (Lp->user_clip == 1)
+   {
+      if (Lp->regs->userclipX1 > xlo) xlo = Lp->regs->userclipX1;
+      if (Lp->regs->userclipX2 < xhi) xhi = Lp->regs->userclipX2;
+      if (Lp->regs->userclipY1 > ylo) ylo = Lp->regs->userclipY1;
+      if (Lp->regs->userclipY2 < yhi) yhi = Lp->regs->userclipY2;
+   }
+#define LEAN_IN(pt) ((s16)(pt) >= xlo && (s16)(pt) <= xhi && ((s32)(pt) >> 16) >= ylo && ((s32)(pt) >> 16) <= yhi)
+   while (k0 < n && !LEAN_IN(pts[k0]))
+      k0++;
+   while (k1 >= k0 && !LEAN_IN(pts[k1]))
+      k1--;
+#undef LEAN_IN
+   if (k0 > k1)
+      k1 = k0 - 1;
+   *k0p = k0;
+   *k1p = k1;
+}
+
 /* Replace mode (and CM1 Gouraud) without end codes, mesh, MSB-on, double
- * interlace or user clipping, on lines that may cross the clip window: the
- * walk is monotonic in x and y, so the points inside the system clip
- * rectangle and this thread's rows are one run [k0, k1]: only those points
+ * interlace or user clipping "outside", on lines that may cross the clip
+ * window: the points to plot are one run [k0, k1] (QuadLeanRun): only those points
  * are plotted, with the texture step at k0 computed directly. Gives exactly what
  * QuadPlotPoints() gives; Panzer Dragoon's large 256-colour walls are
  * mostly such lines. */
@@ -5119,22 +5154,9 @@ static INLINE __attribute__((always_inline)) QuadPen QuadPlotLeanBody(const int 
    const double texturestep = Lp->texturestep;
    const double rs = Lp->xredstep, gs = Lp->xgreenstep, bs = Lp->xbluestep;
    double lr = pen.lr, lg = pen.lg, lb = pen.lb;
-   int cp = pen.cp, k, k0 = 0, k1 = n - 1, quot, rem, read = 0;
-   int ylo = Lp->row_lo, yhi = Lp->row_hi - 1;
-   const int xhi = Lp->regs->systemclipX2;
+   int cp = pen.cp, k, k0, k1, quot, rem, read = 0;
 
-   if (Lp->regs->systemclipY2 < yhi)
-      yhi = Lp->regs->systemclipY2;
-   if (ylo < 0)
-      ylo = 0;
-#define LEAN_IN(pt) ((s16)(pt) >= 0 && (s16)(pt) <= xhi && ((s32)(pt) >> 16) >= ylo && ((s32)(pt) >> 16) <= yhi)
-   while (k0 < n && !LEAN_IN(pts[k0]))
-      k0++;
-   while (k1 >= k0 && !LEAN_IN(pts[k1]))
-      k1--;
-#undef LEAN_IN
-   if (k0 > k1)
-      k1 = k0 - 1;     /* nothing plotted; still advance the colours */
+   QuadLeanRun(Lp, &k0, &k1);   /* none: k1 < k0; the colours still advance */
 
    /* the texture step at k0, as the full loop would have counted it */
    quot = k0 * step_q + (k0 * step_r) / (linelength > 0 ? linelength : 1);
@@ -5219,6 +5241,143 @@ static QuadPen QuadPlotLeanCM0(const QuadLine *Lp, QuadPen pen) { return QuadPlo
 static QuadPen QuadPlotLeanCM1(const QuadLine *Lp, QuadPen pen) { return QuadPlotLeanBody(1, 0, Lp, pen); }
 static QuadPen QuadPlotLeanCM4(const QuadLine *Lp, QuadPen pen) { return QuadPlotLeanBody(4, 0, Lp, pen); }
 static QuadPen QuadPlotLeanCM1G(const QuadLine *Lp, QuadPen pen) { return QuadPlotLeanBody(1, 4, Lp, pen); }
+
+/* The lean loop for RGB textures (colour mode 5: Shining Force III draws its
+ * 3D towns with them, end codes on), replace or Gouraud, with or without end
+ * codes (ENDC); no mesh, MSB-on, double interlace or user clipping
+ * "outside". Without end codes as QuadPlotLeanBody(): only the run [k0, k1]
+ * (QuadLeanRun) is read and plotted. With end codes every point's texel is
+ * read, as QuadPlotPoints() reads it before any test: 0x7fff is an end code
+ * (not plotted; the second distinct one ends the line), the others are
+ * plotted inside the run. Gives exactly what QuadPlotPoints(5, DM, 0, ...)
+ * gives, including the colour and texel left in the pen. */
+static INLINE __attribute__((always_inline)) QuadPen QuadPlotLeanRGBBody(const int ENDC, const int DM, const QuadLine *Lp, QuadPen pen)
+{
+   const u32 *const pts = Lp->pts;
+   u16 *const fb = Lp->fb;
+   const u8 *const ram = Lp->ram;
+   const u32 rowaddr = Lp->rowaddr;
+   const int SPD = Lp->SPD, width = Lp->width, n = Lp->n;
+   const int flip = Lp->flip & 1, cwm1 = Lp->cw - 1;
+   const int step_q = Lp->step_q, step_r = Lp->step_r, linelength = Lp->linelength;
+   const double texturestep = Lp->texturestep;
+   const double rs = Lp->xredstep, gs = Lp->xgreenstep, bs = Lp->xbluestep;
+   double lr = pen.lr, lg = pen.lg, lb = pen.lb;
+   int cp = pen.cp, vis = pen.vis, k, k0, k1, kfirst, klast, quot, rem;
+   int endcodes = 0, previousStep = 123456789;
+
+   QuadLeanRun(Lp, &k0, &k1);
+   /* without end codes, points outside the run are skipped before anything
+    * is read; with Gouraud the colours still advance on every point */
+   kfirst = ENDC || DM == 4 ? 0 : k0;
+   klast = ENDC || DM == 4 ? n - 1 : k1;
+   quot = kfirst * step_q + (kfirst * step_r) / (linelength > 0 ? linelength : 1);
+   rem = (kfirst * step_r) % (linelength > 0 ? linelength : 1);
+
+   for (k = kfirst; k <= klast; k++)
+   {
+      const u32 pt = pts[k];
+      const int px = (s16)pt, py = (s32)pt >> 16;
+      const int inside = k >= k0 && k <= k1;
+      int cs, pos;
+      u32 idx;
+
+      if (DM == 4)
+      {
+         lr += rs; lg += gs; lb += bs;
+      }
+      if (rem == 0 && step_r != 0)
+         cs = (int)k * texturestep;
+      else
+         cs = quot;
+      quot += step_q;
+      rem += step_r;
+      if (rem >= linelength)
+      {
+         rem -= linelength;
+         quot++;
+      }
+      pos = py * width + px;
+      if (!ENDC && (!inside || pos >= 0x20000))
+         continue;
+      idx = flip ? (u32)(cwm1 - cs) : (u32)cs;
+      cp = T1ReadWord((u8 *)ram, (rowaddr + 2 * idx) & 0x7FFFF);
+      if (ENDC && cp == 0x7fff)
+      {
+         if (cs != previousStep)
+         {
+            previousStep = cs;
+            endcodes++;
+         }
+      }
+      else
+      {
+         if (!(cp & 0x8000) && !SPD)
+            cp = 0;
+         vis = 0xffff;
+         if ((!ENDC || (inside && pos < 0x20000)) && (SPD || cp))
+         {
+            if (DM == 0)
+               fb[pos] = cp;
+            else
+               fb[pos] = COLOR(gouraudAdjust(cp & 0x001F, (int)lr),
+                               gouraudAdjust((cp & 0x03e0) >> 5, (int)lg),
+                               gouraudAdjust((cp & 0x7c00) >> 10, (int)lb));
+         }
+      }
+      if (ENDC && endcodes == 2 && k < n - 1)
+         break;
+   }
+   pen.cp = cp;
+   pen.vis = vis;
+   pen.lr = lr;
+   pen.lg = lg;
+   pen.lb = lb;
+   return pen;
+}
+
+static QuadPen QuadPlotLeanRGB(const QuadLine *Lp, QuadPen pen) { return QuadPlotLeanRGBBody(0, 0, Lp, pen); }
+static QuadPen QuadPlotLeanRGBG(const QuadLine *Lp, QuadPen pen) { return QuadPlotLeanRGBBody(0, 4, Lp, pen); }
+static QuadPen QuadPlotLeanRGBE(const QuadLine *Lp, QuadPen pen) { return QuadPlotLeanRGBBody(1, 0, Lp, pen); }
+static QuadPen QuadPlotLeanRGBEG(const QuadLine *Lp, QuadPen pen) { return QuadPlotLeanRGBBody(1, 4, Lp, pen); }
+
+/* Untextured polygons in replace mode (Dragon Force's menu panels): what
+ * QuadPlotPoints(-1, 0, 0, ...) gives for them. No end codes (untextured),
+ * so the points outside the run (QuadLeanRun) are skipped before anything
+ * else; each point of the run reads a texel that is then replaced by the
+ * command's colour: the colour, its visibility mask (vis, by colour mode) and
+ * whether it is plotted are the same for every point. No mesh, MSB-on,
+ * double interlace or user clipping "outside"; no Gouraud steps in replace
+ * mode. */
+static QuadPen QuadPlotFill(const QuadLine *Lp, QuadPen pen)
+{
+   const u32 *const pts = Lp->pts;
+   u16 *const fb = Lp->fb;
+   const int width = Lp->width, SPD = Lp->SPD, cp = Lp->untexturedColor;
+   const int vis = Lp->colormode == 0 ? 0xf : Lp->colormode == 2 ? 0x3f : Lp->colormode == 3 ? 0x7f :
+                   Lp->colormode == 4 ? 0xff : 0xffff;
+   const int plot = (SPD || (cp & vis)) && !(cp == 0 && !SPD);
+   int k, k0, k1, any = 0;
+
+   QuadLeanRun(Lp, &k0, &k1);
+   for (k = k0; k <= k1; k++)
+   {
+      const u32 pt = Lp->pts[k];
+      const int pos = ((s32)pt >> 16) * width + (s16)pt;
+      if (pos >= 0x20000)
+         continue;
+      any = 1;
+      if (plot)
+         fb[pos] = cp;
+   }
+   (void)pts;
+   if (any)
+   {
+      pen.cp = cp;
+      pen.vis = vis;
+   }
+   return pen;
+}
 
 /* The lean loop for the 8-bit framebuffer (high resolution: Virtua Fighter 2
  * draws 95% of its polygon area as 128-colour textures this way): no end codes
@@ -5454,9 +5613,28 @@ static void DrawLineQuad(const Vdp1QuadState *st, int x1, int y1, int x2, int y2
       }
 
       /* the lean copies: no end codes, mesh, MSB-on or double interlace, and
-       * user clipping only when the whole line is inside it */
+       * no user clipping "outside" (QuadLeanRun) */
       lean = !L.endcodes && !L.mesh && !L.msbon && L.dil_skip < 0 && L.isTextured &&
-             (L.noclip || !L.user_clip);
+             (L.noclip || L.user_clip != 2);
+
+      /* RGB textures (end codes allowed) and untextured replace mode */
+      if (!L.mesh && !L.msbon && L.dil_skip < 0 && (L.noclip || L.user_clip != 2) &&
+          ((L.isTextured && colormode == 5 && (L.drawmode == 0 || L.drawmode == 4)) ||
+           (!L.isTextured && L.drawmode == 0)))
+      {
+         if (!L.isTextured)
+            pen = QuadPlotFill(&L, pen);
+         else if (L.endcodes)
+            pen = L.drawmode == 4 ? QuadPlotLeanRGBEG(&L, pen) : QuadPlotLeanRGBE(&L, pen);
+         else
+            pen = L.drawmode == 4 ? QuadPlotLeanRGBG(&L, pen) : QuadPlotLeanRGB(&L, pen);
+         currentPixel = pen.cp;
+         currentPixelIsVisible = pen.vis;
+         leftColumnColor.r = pen.lr;
+         leftColumnColor.g = pen.lg;
+         leftColumnColor.b = pen.lb;
+         return;
+      }
 
       /* specialised copies for the common colour and drawing modes */
       switch (colormode * 8 + L.drawmode)
