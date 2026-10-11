@@ -318,7 +318,9 @@ typedef struct
 
 //////////////////////////////////////////////////////////////////////////////
 
-static INLINE u32 FASTCALL Vdp2ColorRamGetColorCM(int colormode, u32 addr, u8* vdp2_color_ram)
+/* always inlined: as a call (GCC left it out of line in the big layer functions)
+ * it cost ~7% of the layer threads in NiGHTS */
+static INLINE __attribute__((always_inline)) u32 FASTCALL Vdp2ColorRamGetColorCM(int colormode, u32 addr, u8* vdp2_color_ram)
 {
    switch(colormode)
    {
@@ -448,7 +450,7 @@ static INLINE u32 FASTCALL DoNothing(UNUSED void *info, u32 pixel)
 
 //////////////////////////////////////////////////////////////////////////////
 
-static INLINE u32 FASTCALL DoColorOffset(void *info, u32 pixel)
+static INLINE __attribute__((always_inline)) u32 FASTCALL DoColorOffset(void *info, u32 pixel)
 {
     return COLOR_ADD(pixel, ((vdp2draw_struct *)info)->cor,
                      ((vdp2draw_struct *)info)->cog,
@@ -493,7 +495,9 @@ static INLINE void ReadVdp2ColorOffset(Vdp2 * regs, vdp2draw_struct *info, int c
             info->cob |= 0xFFFFFF00;
       }
 
-      info->PostPixelFetchCalc = &DoColorOffset;
+      /* an offset of 0, 0, 0 leaves every pixel as it is (games often keep
+       * the offset enabled at zero, e.g. NiGHTS and Sega Rally in play) */
+      info->PostPixelFetchCalc = (info->cor | info->cog | info->cob) ? &DoColorOffset : &DoNothing;
    }
    else // color offset disable
       info->PostPixelFetchCalc = &DoNothing;
@@ -5864,7 +5868,7 @@ void VidsoftDrawSprite(Vdp2 * vdp2_regs, u8 * spr_window_mask, u8* vdp1_front_fr
    int start_line = 0, line_increment = 0;
    int sprite_window_enabled = vdp2_regs->SPCTL & 0x10;
    int vdp1spritetype = 0;
-   int post_calc = 0;
+   int post_calc = 0, clof_on = 0;
    int fast = 0, xmode = 0, ccwin_on = 0;
    u8 winline[704], ccwin[704], ccline[704];
 #define SPRITE_POST(v) (post_calc == 0 ? (v) : post_calc == 1 ? DoColorOffset(&info, (v)) : info.PostPixelFetchCalc(&info, (v)))
@@ -5906,8 +5910,9 @@ void VidsoftDrawSprite(Vdp2 * vdp2_regs, u8 * spr_window_mask, u8* vdp1_front_fr
       vdp1spritetype = vdp2_regs->SPCTL & 0xF;
 
       ReadVdp2ColorOffset(vdp2_regs, &info, 0x40, 0x40);
-      post_calc = info.PostPixelFetchCalc == &DoNothing ? 0 :
-                  info.PostPixelFetchCalc == &DoColorOffset ? 1 : 2;
+      /* the offset is on for the frame if enabled now; its value can change
+       * per line (LoadLineParamsSprite), so a zero is skipped line by line */
+      clof_on = (vdp2_regs->CLOFEN & 0x40) != 0;
 
       wctl = vdp2_regs->WCTLC >> 8;
       clip[0].xstart = clip[0].ystart = clip[0].xend = clip[0].yend = 0;
@@ -5962,6 +5967,7 @@ void VidsoftDrawSprite(Vdp2 * vdp2_regs, u8 * spr_window_mask, u8* vdp1_front_fr
             LoadLineParamsSprite(&info, i2 / 2, vdp2_lines);
          else
             LoadLineParamsSprite(&info, i2, vdp2_lines);
+         post_calc = clof_on && (info.cor | info.cog | info.cob);
 
          if (vdp2_interlace)
          {
