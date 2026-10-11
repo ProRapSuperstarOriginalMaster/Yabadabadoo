@@ -1448,12 +1448,12 @@ static INLINE __attribute__((always_inline)) void Vdp2DrawScrollLineZoom(const i
    }
 }
 
-/* one out-of-line copy of the line loop per colour format (noinline: GCC
-   inlined some of them into Vdp2DrawScroll, a different set per build, where
-   they ran short of registers; the 8bpp loop then called the palette helpers
-   per pixel) */
+/* one out-of-line copy of the line loop per colour format. Not noinline:
+   vidsoft.c is at GCC's per-file inlining limit, and taking these out of
+   Vdp2DrawScroll changed what got inlined in the rotation and sprite paths
+   (Sega Rally's rotated RBG0 3% slower on the device). */
 #define SCROLL_LINE_FN(NAME, CN) \
-static __attribute__((noinline)) void NAME(const int colormode, vdp2draw_struct *info, screeninfo_struct *sinfo, Vdp2 *regs, u8 *ram, u8 *color_ram, \
+static void NAME(const int colormode, vdp2draw_struct *info, screeninfo_struct *sinfo, Vdp2 *regs, u8 *ram, u8 *color_ram, \
    struct PixelData *titan_line, int linescrollx, int Y, int j, int fresh, u32 meta_base, int post_calc, \
    int cc_win_fixed, int cc_win_pass, int cc_wctl, clipping_struct *colorcalcwindow, const u8 *cc_tab, int start, int end) \
 { \
