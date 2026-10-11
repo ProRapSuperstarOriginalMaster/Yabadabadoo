@@ -706,7 +706,14 @@ static INLINE __attribute__((always_inline)) void TitanLineM(const int mode, con
    for (x = 0; x < width; x++, layer_pos++)
    {
       struct PixelData *top = NULL;
+      int topi = 0;
       u32 dot;
+
+#ifdef TITAN_PLD
+      if ((x & 7) == 0)
+         for (i = 0; i < N; i++)
+            __builtin_prefetch(&sorted[i][x + TITAN_PLD]);
+#endif
 
       if (N > 0)
       {
@@ -723,6 +730,7 @@ static INLINE __attribute__((always_inline)) void TitanLineM(const int mode, con
                {
                   best = key;
                   top = &sorted[i][x];
+                  topi = i;
                }
             }
          }
@@ -737,6 +745,32 @@ static INLINE __attribute__((always_inline)) void TitanLineM(const int mode, con
             pixel = TitanBlendM(mode, pixel, TitanLineColor(top, layer_pos, y));
          if (!TitanTransM(mode, pixel))
          {
+            disp_row[x] = pixel ? TitanFixAlpha(pixel) : 0;
+            continue;
+         }
+
+         /* The pixel is blended with the one below it: the best of the other
+          * rows (what TitanDigPixel would pick as p2), found the same way as
+          * the top one, stopping once no remaining row can beat it, else the
+          * back screen. */
+         {
+            struct PixelData *p2 = NULL;
+            int best2 = 0;
+            for (i = 0; i < N && best2 < smax[i]; i++)
+            {
+               const int p = sorted[i][x].priority;
+               if (p && i != topi)
+               {
+                  const int key = p * 8 + tie[i];
+                  if (key > best2)
+                  {
+                     best2 = key;
+                     p2 = &sorted[i][x];
+                  }
+               }
+            }
+            if (!p2) p2 = &tt_context.backscreen[layer_pos];
+            pixel = TitanBlendM(mode, pixel, p2->pixel);
             disp_row[x] = pixel ? TitanFixAlpha(pixel) : 0;
             continue;
          }
