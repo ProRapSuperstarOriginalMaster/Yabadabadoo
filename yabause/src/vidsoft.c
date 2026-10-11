@@ -1205,6 +1205,47 @@ transparent:
    }
 }
 
+/* COLOR_ADD(pixel, cor, cog, cob) with the offset split into a positive and
+ * a negative part, one byte per channel (red in bits 0-7, as in COLOR_ADD;
+ * see ColorOffsetParts): a saturating byte add, then a saturating byte
+ * subtract. Only one part is non-zero per channel, so each channel is
+ * clamped to 0..255 as in COLOR_ADD (an offset of -256 subtracts 255 and
+ * still gives 0); the top byte (alpha) has 0 in both parts. Two instructions
+ * on ARMv6+ (UQADD8, UQSUB8) instead of ~20. */
+static INLINE u32 ColorOffsetSat(u32 pixel, u32 pos, u32 neg)
+{
+#if defined(__arm__) && defined(__ARM_FEATURE_SIMD32)
+   __asm__("uqadd8 %0, %0, %1" : "+r"(pixel) : "r"(pos));
+   __asm__("uqsub8 %0, %0, %1" : "+r"(pixel) : "r"(neg));
+   return pixel;
+#else
+   u32 out = 0;
+   int b;
+   for (b = 0; b < 32; b += 8)
+   {
+      int c = (int)((pixel >> b) & 0xFF) + (int)((pos >> b) & 0xFF);
+      if (c > 0xFF) c = 0xFF;
+      c -= (int)((neg >> b) & 0xFF);
+      if (c < 0) c = 0;
+      out |= (u32)c << b;
+   }
+   return out;
+#endif
+}
+
+static INLINE void ColorOffsetParts(const s32 *co, u32 *pos, u32 *neg)
+{
+   int k;
+   *pos = *neg = 0;
+   for (k = 0; k < 3; k++)
+   {
+      if (co[k] > 0)
+         *pos |= (u32)co[k] << (k * 8);
+      else if (co[k] < 0)
+         *neg |= (u32)(co[k] < -0xFF ? 0xFF : -co[k]) << (k * 8);
+   }
+}
+
 /* The pixel loop of Vdp2DrawScrollRunPal() (palp = the run's first palette
  * entry). Out of line, one copy per format and colour offset on/off:
  * inlined into the line loop, its values didn't fit in registers and were
@@ -1217,9 +1258,12 @@ static INLINE __attribute__((always_inline)) void Vdp2DrawScrollRunPalPlain(cons
    /* dot | opaque_zero is 0 only for a transparent pixel */
    const u32 opaque_zero = !(flags & 1);
    const int fresh = flags & 2;
-   const s32 cor = offset ? co[0] : 0, cog = offset ? co[1] : 0, cob = offset ? co[2] : 0;
+   u32 ofs_pos = 0, ofs_neg = 0;
    struct PixelData *end = out + run;
    const u8 *p = row + xf;
+
+   if (offset)
+      ColorOffsetParts(co, &ofs_pos, &ofs_neg);
 
    for (; out < end; out++, xf += dir, p += dir)
    {
@@ -1245,7 +1289,11 @@ static INLINE __attribute__((always_inline)) void Vdp2DrawScrollRunPalPlain(cons
 
       pixel = alpha | (palp[dot] & 0xFFFFFF);
       if (offset)
-         pixel = COLOR_ADD(pixel, cor, cog, cob);
+#ifdef WORDS_BIGENDIAN
+         pixel = COLOR_ADD(pixel, co[0], co[1], co[2]);
+#else
+         pixel = ColorOffsetSat(pixel, ofs_pos, ofs_neg);
+#endif
       out->pixel = pixel;
       out->meta = meta;
    }
@@ -1400,9 +1448,12 @@ static INLINE __attribute__((always_inline)) void Vdp2DrawScrollLineZoom(const i
    }
 }
 
-/* one out-of-line copy of the line loop per colour format */
+/* one out-of-line copy of the line loop per colour format (noinline: GCC
+   inlined some of them into Vdp2DrawScroll, a different set per build, where
+   they ran short of registers; the 8bpp loop then called the palette helpers
+   per pixel) */
 #define SCROLL_LINE_FN(NAME, CN) \
-static void NAME(const int colormode, vdp2draw_struct *info, screeninfo_struct *sinfo, Vdp2 *regs, u8 *ram, u8 *color_ram, \
+static __attribute__((noinline)) void NAME(const int colormode, vdp2draw_struct *info, screeninfo_struct *sinfo, Vdp2 *regs, u8 *ram, u8 *color_ram, \
    struct PixelData *titan_line, int linescrollx, int Y, int j, int fresh, u32 meta_base, int post_calc, \
    int cc_win_fixed, int cc_win_pass, int cc_wctl, clipping_struct *colorcalcwindow, const u8 *cc_tab, int start, int end) \
 { \
