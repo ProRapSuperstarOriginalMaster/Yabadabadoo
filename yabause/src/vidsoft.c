@@ -5242,16 +5242,39 @@ static QuadPen QuadPlotLeanCM1(const QuadLine *Lp, QuadPen pen) { return QuadPlo
 static QuadPen QuadPlotLeanCM4(const QuadLine *Lp, QuadPen pen) { return QuadPlotLeanBody(4, 0, Lp, pen); }
 static QuadPen QuadPlotLeanCM1G(const QuadLine *Lp, QuadPen pen) { return QuadPlotLeanBody(1, 4, Lp, pen); }
 
-/* The lean loop for RGB textures (colour mode 5: Shining Force III draws its
- * 3D towns with them, end codes on), replace or Gouraud, with or without end
- * codes (ENDC); no mesh, MSB-on, double interlace or user clipping
- * "outside". Without end codes as QuadPlotLeanBody(): only the run [k0, k1]
- * (QuadLeanRun) is read and plotted. With end codes every point's texel is
- * read, as QuadPlotPoints() reads it before any test: 0x7fff is an end code
- * (not plotted; the second distinct one ends the line), the others are
- * plotted inside the run. Gives exactly what QuadPlotPoints(5, DM, 0, ...)
- * gives, including the colour and texel left in the pen. */
-static INLINE __attribute__((always_inline)) QuadPen QuadPlotLeanRGBBody(const int ENDC, const int DM, const QuadLine *Lp, QuadPen pen)
+/* one big-endian VDP1 RAM word: a single REV16 on ARM (T1ReadWord() leaves
+ * the compiler a shift/or pair) */
+static INLINE __attribute__((always_inline)) u32 QuadRam16(const u8 *ram, u32 addr)
+{
+   return __builtin_bswap16(*(const u16 *)(ram + addr));
+}
+
+/* gouraudAdjust(color, tableValue) for 0 <= color <= 31: one USAT on ARM */
+static INLINE __attribute__((always_inline)) int QuadGouraud5(int color, int tableValue)
+{
+   int v = color + (tableValue - 0x10);
+#if defined(__arm__) && defined(__ARM_FEATURE_SAT)
+   __asm__("usat %0, #5, %0" : "+r"(v));
+   return v;
+#else
+   return v < 0 ? 0 : v > 0x1f ? 0x1f : v;
+#endif
+}
+
+/* the texture step where the quotient/remainder count has a remainder of 0:
+ * the double product, as DrawLine() takes it (see DrawLineQuad()) */
+static __attribute__((noinline)) int QuadStepExact(int k, double texturestep)
+{
+   return (int)k * texturestep;
+}
+
+/* The lean loop for RGB textures (colour mode 5) without end codes, replace
+ * or Gouraud; no mesh, MSB-on, double interlace or user clipping "outside".
+ * As QuadPlotLeanBody(): only the run [k0, k1] (QuadLeanRun) is read and
+ * plotted. Gives exactly what QuadPlotPoints(5, DM, 0, ...) gives, including
+ * the colour and texel left in the pen. (With end codes, Shining Force III's
+ * case, QuadPlotLeanRGBEnd() below is used; ENDC is 0 here.) */
+static INLINE __attribute__((always_inline)) QuadPen QuadPlotLeanRGBPlain(const int ENDC, const int DM, const QuadLine *Lp, QuadPen pen)
 {
    const u32 *const pts = Lp->pts;
    u16 *const fb = Lp->fb;
@@ -5336,10 +5359,105 @@ static INLINE __attribute__((always_inline)) QuadPen QuadPlotLeanRGBBody(const i
    return pen;
 }
 
-static __attribute__((noinline)) QuadPen QuadPlotLeanRGB(const QuadLine *Lp, QuadPen pen) { return QuadPlotLeanRGBBody(0, 0, Lp, pen); }
-static __attribute__((noinline)) QuadPen QuadPlotLeanRGBG(const QuadLine *Lp, QuadPen pen) { return QuadPlotLeanRGBBody(0, 4, Lp, pen); }
-static __attribute__((noinline)) QuadPen QuadPlotLeanRGBE(const QuadLine *Lp, QuadPen pen) { return QuadPlotLeanRGBBody(1, 0, Lp, pen); }
-static __attribute__((noinline)) QuadPen QuadPlotLeanRGBEG(const QuadLine *Lp, QuadPen pen) { return QuadPlotLeanRGBBody(1, 4, Lp, pen); }
+/* The lean loop for RGB textures with end codes (colour mode 5: Shining Force
+ * III draws its 3D towns with them), replace or Gouraud; no mesh, MSB-on,
+ * double interlace or user clipping "outside". Every point's texel is read
+ * first, as QuadPlotPoints() reads it before any test: 0x7fff is an end code
+ * (not plotted; the second distinct one ends the line), the others are
+ * plotted inside the run [k0, k1] (QuadLeanRun). The walk stops at k1: later
+ * points are never plotted, and what they would leave behind (the texel and
+ * its visibility; Gouraud colours) is not read again: the next line starts
+ * with getpixel(), which sets the texel and visibility, and every Gouraud
+ * line (drawmode 4) starts from its own colours (drawQuad()). The same
+ * plotted pixels as QuadPlotPoints(5, DM, 0, ...). */
+static INLINE __attribute__((always_inline)) QuadPen QuadPlotLeanRGBEnd(const int DM, const QuadLine *Lp, QuadPen pen)
+{
+   const u32 *const pts = Lp->pts;
+   u16 *const fb = Lp->fb;
+   const u8 *const ram = Lp->ram;
+   const u32 rowaddr = Lp->rowaddr;
+   const int SPD = Lp->SPD, width = Lp->width;
+   /* cwm1 - cs, or cs: (cs ^ fmask) + fadd */
+   const u32 fmask = 0u - (u32)(Lp->flip & 1), fadd = fmask & (u32)Lp->cw;
+   const int step_q = Lp->step_q, step_r = Lp->step_r, linelength = Lp->linelength;
+   const double texturestep = Lp->texturestep;
+   const double rs = Lp->xredstep, gs = Lp->xgreenstep, bs = Lp->xbluestep;
+   double lr = pen.lr, lg = pen.lg, lb = pen.lb;
+   int cp = pen.cp, k, k0, k1, quot, rem;
+
+   QuadLeanRun(Lp, &k0, &k1);
+   if (k1 < k0)
+      return pen;   /* nothing is plotted */
+
+#define QUAD_RGB_TEXEL(K) \
+      if (__builtin_expect(rem == 0 && step_r != 0, 0)) \
+         cs = QuadStepExact((K), texturestep); \
+      else \
+         cs = quot; \
+      quot += step_q; \
+      rem += step_r; \
+      if (rem >= linelength) \
+      { \
+         rem -= linelength; \
+         quot++; \
+      } \
+      idx = ((u32)cs ^ fmask) + fadd; \
+      cp = QuadRam16(ram, (rowaddr + 2 * idx) & 0x7FFFF);
+
+#define QUAD_RGB_PLOT \
+         if (DM == 0) \
+            fb[pos] = cp; \
+         else \
+            fb[pos] = COLOR(QuadGouraud5(cp & 0x001F, (int)lr), \
+                            QuadGouraud5((cp & 0x03e0) >> 5, (int)lg), \
+                            QuadGouraud5((cp & 0x7c00) >> 10, (int)lb));
+
+   int endcodes = 0, previousStep = 123456789;
+
+   quot = 0;
+   rem = 0;
+   /* the points before the run only read and count the end codes */
+   for (k = 0; k <= k1; k++)
+   {
+      const u32 pt = pts[k];
+      const int pos = ((s32)pt >> 16) * width + (s16)pt;
+      int cs;
+      u32 idx;
+
+      if (DM == 4)
+      {
+         lr += rs; lg += gs; lb += bs;
+      }
+      QUAD_RGB_TEXEL(k)
+      if (cp == 0x7fff)
+      {
+         if (cs != previousStep)
+         {
+            previousStep = cs;
+            if (++endcodes == 2)
+               return pen;
+         }
+         continue;
+      }
+      if ((SPD || (cp & 0x8000)) && k >= k0 && pos < 0x20000)
+      {
+         QUAD_RGB_PLOT
+      }
+   }
+   pen.cp = cp;
+   pen.vis = 0xffff;
+   pen.lr = lr;
+   pen.lg = lg;
+   pen.lb = lb;
+   return pen;
+#undef QUAD_RGB_TEXEL
+#undef QUAD_RGB_PLOT
+}
+
+static __attribute__((noinline)) QuadPen QuadPlotLeanRGB(const QuadLine *Lp, QuadPen pen) { return QuadPlotLeanRGBPlain(0, 0, Lp, pen); }
+static __attribute__((noinline)) QuadPen QuadPlotLeanRGBG(const QuadLine *Lp, QuadPen pen) { return QuadPlotLeanRGBPlain(0, 4, Lp, pen); }
+static __attribute__((noinline)) QuadPen QuadPlotLeanRGBE(const QuadLine *Lp, QuadPen pen) { return QuadPlotLeanRGBEnd(0, Lp, pen); }
+static __attribute__((noinline)) QuadPen QuadPlotLeanRGBEG(const QuadLine *Lp, QuadPen pen) { return QuadPlotLeanRGBEnd(4, Lp, pen); }
 
 /* Untextured polygons in replace mode (Dragon Force's menu panels): what
  * QuadPlotPoints(-1, 0, 0, ...) gives for them. No end codes (untextured),
