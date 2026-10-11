@@ -318,9 +318,7 @@ typedef struct
 
 //////////////////////////////////////////////////////////////////////////////
 
-/* always inlined: as a call (GCC left it out of line in the big layer functions)
- * it cost ~7% of the layer threads in NiGHTS */
-static INLINE __attribute__((always_inline)) u32 FASTCALL Vdp2ColorRamGetColorCM(int colormode, u32 addr, u8* vdp2_color_ram)
+static INLINE u32 FASTCALL Vdp2ColorRamGetColorCM(int colormode, u32 addr, u8* vdp2_color_ram)
 {
    switch(colormode)
    {
@@ -450,7 +448,7 @@ static INLINE u32 FASTCALL DoNothing(UNUSED void *info, u32 pixel)
 
 //////////////////////////////////////////////////////////////////////////////
 
-static INLINE __attribute__((always_inline)) u32 FASTCALL DoColorOffset(void *info, u32 pixel)
+static INLINE u32 FASTCALL DoColorOffset(void *info, u32 pixel)
 {
     return COLOR_ADD(pixel, ((vdp2draw_struct *)info)->cor,
                      ((vdp2draw_struct *)info)->cog,
