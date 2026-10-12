@@ -85,7 +85,10 @@ choice is kept.
 ## Updating
 
 Extract the new release zip over the old one. Your settings, saves and save states are kept.
-When updating from 0.1, the first launch switches the audio driver to `sdl` (see above).
+When updating from 0.1, the first launch switches the audio driver to `sdl` (see above) and
+changes Frameskip from "Auto (Threshold)", 0.1's default, to "Auto", the new default (it
+works properly now that the audio driver reports the buffer level). If you picked another
+frameskip mode, it is kept.
 
 ## Known issues
 

@@ -50,7 +50,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
          { "fixed_interval", "Fixed Interval" },
          { NULL, NULL},
       },
-      "auto_threshold"
+      "auto"
    },
    {
       "yabadabadoo_frameskip_threshold",
