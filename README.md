@@ -18,7 +18,7 @@ for instance has a screen resolution that differs from other Miyoo devices. Whil
 *shouldn't* break anything I'd still be interested to hear from V4 users that scaling and 
 rendering works as expected.
 
-Version 0.1. This is an early release: expect bugs, and expect some games to run slowly or
+Version 0.2. This is an early release: expect bugs, and expect some games to run slowly or
 not at all.
 
 PAL ROMs can be especially useful for this emulator as they're rendered at a lower refresh
@@ -71,6 +71,21 @@ of starting the game. Put one of these files in the `BIOS` folder:
 The launch script runs the Miyoo at 1700 MHz, which is safe on every Mini model. The value
 is stored in `Saves/CurrentProfile/config/Yabadabadoo/cpuclock.txt` (created on the first
 launch); edit that file to change it. Higher clocks run faster but are at your own risk.
+
+## Audio driver
+
+Yabadabadoo uses RetroArch's `sdl` audio driver instead of Onion's default `oss`. With
+`oss`, RetroArch can't tell the core how full the sound buffer is, so the automatic
+frameskip always skips as many frames as it is allowed to, even in scenes that could run at
+full speed. The launch script sets this once, as a core override
+(`Saves/CurrentProfile/config/Yabadabadoo/Yabadabadoo.cfg`); your other override settings are
+kept. If you change the audio driver back in RetroArch's menu and save a core override, your
+choice is kept.
+
+## Updating
+
+Extract the new release zip over the old one. Your settings, saves and save states are kept.
+When updating from 0.1, the first launch switches the audio driver to `sdl` (see above).
 
 ## Known issues
 
