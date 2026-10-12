@@ -18,7 +18,7 @@ for instance has a screen resolution that differs from other Miyoo devices. Whil
 *shouldn't* break anything I'd still be interested to hear from V4 users that scaling and 
 rendering works as expected.
 
-Version 0.2. This is an early release: expect bugs, and expect some games to run slowly or
+Version 0.2.1. This is an early release: expect bugs, and expect some games to run slowly or
 not at all.
 
 PAL ROMs can be especially useful for this emulator as they're rendered at a lower refresh
@@ -68,9 +68,18 @@ of starting the game. Put one of these files in the `BIOS` folder:
 
 ## CPU clock
 
-The launch script runs the Miyoo at 1700 MHz, which is safe on every Mini model. The value
-is stored in `Saves/CurrentProfile/config/Yabadabadoo/cpuclock.txt` (created on the first
-launch); edit that file to change it. Higher clocks run faster but are at your own risk.
+The launch script runs the Miyoo at 1600 MHz. The value is stored in
+`Saves/CurrentProfile/config/Yabadabadoo/cpuclock.txt` (created on the first launch); to change
+the clock, edit that file. The 1600 in `launch.sh` is only written when that file doesn't exist
+yet, so changing it there does nothing after the first launch.
+
+Every chip is a little different: many units handle more than 1600 MHz, some don't. Higher
+clocks run faster but are at your own risk. If the screen goes black when you start a game,
+the backlight stays on and even the power button does nothing, the clock is too high for your
+unit: pull the battery, lower the value in `cpuclock.txt` (1200 MHz is the stock clock) and
+try again. Pulling the battery can damage the SD card's file system; if Onion then won't boot,
+repair the card on a computer (`chkdsk` on Windows, First Aid on macOS, `fsck.vfat` on Linux)
+before reinstalling Onion.
 
 ## Audio driver
 
@@ -89,6 +98,10 @@ When updating from 0.1, the first launch switches the audio driver to `sdl` (see
 changes Frameskip from "Auto (Threshold)", 0.1's default, to "Auto", the new default (it
 works properly now that the audio driver reports the buffer level). If you picked another
 frameskip mode, it is kept.
+
+0.1 and 0.2 started at 1700 MHz, which freezes some Mini V4 units. When updating to 0.2.1, the
+first launch lowers a 1700 in `cpuclock.txt` to 1600 if the core has never been closed
+normally (that is, if it froze every time); if you have played at 1700, your clock is kept.
 
 ## Known issues
 
