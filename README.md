@@ -74,12 +74,10 @@ the clock, edit that file. The 1600 in `launch.sh` is only written when that fil
 yet, so changing it there does nothing after the first launch.
 
 Every chip is a little different: many units handle more than 1600 MHz, some don't. Higher
-clocks run faster but are at your own risk. If the screen goes black when you start a game,
-the backlight stays on and even the power button does nothing, the clock is too high for your
-unit: pull the battery, lower the value in `cpuclock.txt` (1200 MHz is the stock clock) and
-try again. Pulling the battery can damage the SD card's file system; if Onion then won't boot,
-repair the card on a computer (`chkdsk` on Windows, First Aid on macOS, `fsck.vfat` on Linux)
-before reinstalling Onion.
+clocks run faster but are at your own risk. If your Miyoo freezes, first try turning it off
+with the power button; on some models this works even when the screen is frozen. Then set a
+lower value in `cpuclock.txt` (1200 MHz is the stock clock), try again, and let me know in the
+Issues tab.
 
 ## Audio driver
 
@@ -99,9 +97,11 @@ changes Frameskip from "Auto (Threshold)", 0.1's default, to "Auto", the new def
 works properly now that the audio driver reports the buffer level). If you picked another
 frameskip mode, it is kept.
 
-0.1 and 0.2 started at 1700 MHz, which freezes some Mini V4 units. When updating to 0.2.1, the
-first launch lowers a 1700 in `cpuclock.txt` to 1600 if the core has never been closed
-normally (that is, if it froze every time); if you have played at 1700, your clock is kept.
+0.1 and 0.2 started at 1700 MHz, which might cause black screens and hangups on some Mini V4
+units. If you've ever had a black screen and a frozen Miyoo when starting a game, delete
+`Saves/CurrentProfile/config/Yabadabadoo/cpuclock.txt` and install 0.2.1. The next launch
+creates the file again at 1600 MHz. If Yabadabadoo has always run fine on your device, your
+clock stays where it is, and you don't need to update.
 
 ## Known issues
 
