@@ -20,6 +20,8 @@
  *   'H' text "key=value\n" lines: game, mode, start time, version, BIOS, ...
  *   'O' text "key=value\n" lines: every core option (at start, on changes)
  *   'B' (empty) the session starts at power-on (retro_load_game)
+ *   'M' the internal backup RAM (64 KB, the game's .srm as loaded) at power-on: a replay
+ *       must start with the same save data, or a game that reads its saves goes differently
  *   'S' u32 call; state data: a state loaded before call (or the snapshot)
  * Call numbers count from the session's start (start_call in 'H' = retro_run calls before it).
  *   'R' u32 call: retro_reset before call
@@ -312,7 +314,11 @@ static void ds_start(int mode, const char *game, int at_boot, const char *extra)
    if (mode == DS_FULL)
    {
       if (at_boot)
+      {
          ds_record('B', NULL, 0, NULL, 0);
+         if (BupRam)
+            ds_record('M', BupRam, 0x10000, NULL, 0);
+      }
       else
       {
          /* snapshot of the running game: replay starts from it */
