@@ -6327,6 +6327,16 @@ void VIDSoftVdp1ReadFrameBuffer(u32 type, u32 addr, void * out)
 {
    u32 val;
 
+   /* 32-bit reads return 0 (see case 2): no need to draw the pending VDP1
+    * job and wait for it. Burning Rangers DMAs a 176x112 picture out of the
+    * framebuffer this way every third frame, and waiting made the emulation
+    * idle for the whole draw. */
+   if (type == 2)
+   {
+      *(u32*)out = 0;
+      return;
+   }
+
    VidsoftVdp1RunJob(VidsoftFbIndex(vdp1backframebuffer));
    VidsoftWaitForVdp1Thread();
 
