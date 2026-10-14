@@ -1530,8 +1530,12 @@ static u32 readgensrc(u8 num)
    }else{
 	  if( num == 0x9)  // ALL
 		  return (u32)ScuDsp->ALU.part.L;
-	  else if( num == 0xA ) // ALH
-		  return (u32)((ScuDsp->ALU.all & (u64)(0x0000ffffffff0000))  >> 16);
+	  else if( num == 0xA ) // ALH: bits 16-47 of the ALU
+		  /* From the two fields, not as (ALU.all & 0xffffffff0000) >> 16 (or
+		     (u64)ALU.all >> 16): GCC 8.3 (the Miyoo toolchain) turns that
+		     into one 16-bit load of bits 16-31, so bits 32-47 read as 0 and
+		     negative results lose their sign (Sonic R's 3D models). */
+		  return ((u32)ScuDsp->ALU.part.L >> 16) | ((u32)(u16)ScuDsp->ALU.part.H << 16);
    }
 #if 0
    switch(num) {
