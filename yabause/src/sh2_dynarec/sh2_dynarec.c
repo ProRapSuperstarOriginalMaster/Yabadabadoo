@@ -32,6 +32,22 @@
 #include "sh2_dynarec.h"
 #include "../yabprof.h"
 
+/* Where a CPU may pause. Games built on SGL drive the slave through a command list and wake it
+   with the FRT input capture; two races in that protocol depend on where a slice ends:
+   - Fighters Megamix: the slave was paused between reading a list slot and storing its read
+     position (a JSR/RTS pair) while the master rebuilt the list -> calls/returns end a slice only
+     when the CPU is more than YAB_CALLCAP cycles over budget, so slices end at loop branches.
+   - Dead or Alive: two wake-ups in one master slice merged and the slave missed a command ->
+     a CPU that wakes the other ends its slice (YAB_KICKYIELD, see DynarecWriteWord).
+   Hardware runs both CPUs side by side; these rules bring the order of events closer to it.
+   -DYAB_SLICE_OLD builds the old rules (for comparisons). */
+#ifndef YAB_SLICE_OLD
+#ifndef YAB_CALLCAP
+#define YAB_CALLCAP 256
+#endif
+#define YAB_KICKYIELD
+#endif
+
 // The SH2 whose code is currently executing; maintained by the frame loop in
 // linkage_*.s whenever it switches between the master and slave.
 SH2_struct *CurrentSH2 = NULL;
@@ -46,9 +62,34 @@ u32 DynarecReadByte(u32 addr) { return MappedMemoryReadByteNocache(CurrentSH2, a
 u32 DynarecReadWord(u32 addr) { return MappedMemoryReadWordNocache(CurrentSH2, addr); }
 u32 DynarecReadLong(u32 addr) { return MappedMemoryReadLongNocache(CurrentSH2, addr); }
 void DynarecWriteByte(u32 addr, u32 val) { MappedMemoryWriteByteNocache(CurrentSH2, addr, (u8)val); }
+#ifdef YAB_KICKYIELD
+/* A CPU wakes the other one by a word write to its FRT input capture (0x21000000 = slave,
+   0x21800000 = master; SGL's slave commands). On hardware the woken CPU reacts within a few
+   cycles; here it runs only when the writer's slice ends, so two wake-ups in one slice merge into
+   one and the woken CPU can miss a command (Dead or Alive: the slave missed "rewind the
+   list", skipped the frame's job, and the master waited forever). So the writer's slice ends at
+   the next cycle check: the word-write stubs see yab_kick[0], set the cycle counter so the next
+   check ends the slice, and keep the cycles left over in yab_kick[1 + slave], which the switch
+   adds back to that CPU's counter (no time lost). */
+u32 yab_kick[3];
+extern int master_cc, slave_cc;
+void DynarecWriteWord(u32 addr, u32 val)
+{
+  if (((addr >> 24) & 0xF) == 1) yab_kick[0] = 1;
+  MappedMemoryWriteWordNocache(CurrentSH2, addr, (u16)val);
+}
+void DynarecFRTExec(u32 cycles)
+{
+  yab_kick[0] = 0;
+  if (CurrentSH2 == MSH2) { master_cc += yab_kick[1]; yab_kick[1] = 0; }
+  else { slave_cc += yab_kick[2]; yab_kick[2] = 0; }
+  FRTExec(CurrentSH2, cycles);
+}
+#else
 void DynarecWriteWord(u32 addr, u32 val) { MappedMemoryWriteWordNocache(CurrentSH2, addr, (u16)val); }
-void DynarecWriteLong(u32 addr, u32 val) { MappedMemoryWriteLongNocache(CurrentSH2, addr, val); }
 void DynarecFRTExec(u32 cycles) { FRTExec(CurrentSH2, cycles); }
+#endif
+void DynarecWriteLong(u32 addr, u32 val) { MappedMemoryWriteLongNocache(CurrentSH2, addr, val); }
 
 // The on-chip cache's data array (0xC0000000-0xC0000FFF), used as fast RAM by
 // games (SGL keeps work variables there; NiGHTS reads and writes it ~20000
@@ -3620,6 +3661,22 @@ void ds_assemble_entry(int i)
   emit_jmp(0);
 }
 
+#ifdef YAB_CALLCAP
+/* Fighters Megamix: at subroutine calls and returns (BSR, BSRF, JSR, RTS) a CPU
+   gives up its slice only when it is more than YAB_CALLCAP cycles over budget, so slices end at
+   loop branches instead. FM's slave was paused between reading a command-list slot and storing
+   its read position (a JSR/RTS pair) while the master rebuilt the list; it resumed with stale
+   data and called address 0. */
+static int is_call_or_return(int i)
+{
+  u16 op = source[i];
+  return op == 0x000B                 /* RTS */
+      || (op & 0xF0FF) == 0x400B      /* JSR @Rm */
+      || (op & 0xF0FF) == 0x0003      /* BSRF Rm */
+      || (op & 0xF000) == 0xB000;     /* BSR disp */
+}
+#endif
+
 void do_cc(int i,signed char i_regmap[],int *adj,int addr,int taken,int invert)
 {
   int count;
@@ -3653,6 +3710,17 @@ void do_cc(int i,signed char i_regmap[],int *adj,int addr,int taken,int invert)
     jaddr=(int)out;
     emit_jmp(0);
   }
+#ifdef YAB_CALLCAP
+  else if(is_call_or_return(i)) {
+    if(*adj==0||invert) {
+      emit_addimm(HOST_CCREG,CLOCK_DIVIDER*count,HOST_CCREG);
+      emit_cmpimm(HOST_CCREG,CLOCK_DIVIDER*YAB_CALLCAP);
+    } else
+      emit_cmpimm(HOST_CCREG,CLOCK_DIVIDER*(YAB_CALLCAP-count));
+    jaddr=(int)out;
+    emit_jge(0);
+  }
+#endif
   else if(*adj==0||invert) {
     emit_addimm_and_set_flags(CLOCK_DIVIDER*count,HOST_CCREG);
     jaddr=(int)out;
@@ -4088,9 +4156,19 @@ void rjump_assemble(int i,struct regstat *i_regs)
       //do_cc(i,branch_regs[i].regmap,&adj,-1,TAKEN);
       //if(adj) emit_addimm(cc,2*(ccadj[i]+2-adj),cc); // ??? - Shouldn't happen
       //assert(adj==0);
+#ifdef YAB_CALLCAP
+      if(is_call_or_return(i)) {
+        emit_addimm(HOST_CCREG,CLOCK_DIVIDER*(ccadj[i]+cycles[i]+cycles[i+1]),HOST_CCREG);
+        emit_cmpimm(HOST_CCREG,CLOCK_DIVIDER*YAB_CALLCAP);
+        add_stub(CC_STUB,(int)out,jump_vaddr_reg[slave][rs],0,i,-1,TAKEN,0);
+        emit_jge(0);
+      } else
+#endif
+      {
       emit_addimm_and_set_flags(CLOCK_DIVIDER*(ccadj[i]+cycles[i]+cycles[i+1]),HOST_CCREG);
       add_stub(CC_STUB,(int)out,jump_vaddr_reg[slave][rs],0,i,-1,TAKEN,0);
       emit_jns(0);
+      }
       //load_regs_bt(branch_regs[i].regmap,branch_regs[i].dirty,-1);
       #ifdef USE_MINI_HT
       if(rs1[i]==PR) {

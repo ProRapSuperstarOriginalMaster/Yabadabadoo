@@ -2881,6 +2881,37 @@ void inline_readstub(int type, int i, u32 addr, signed char regmap[], int target
   restore_regs(reglist);
 }
 
+#ifdef YAB_KICKYIELD
+/* After a word-write stub's call: if the write woke the other CPU (DynarecWriteWord set
+   yab_kick[0]), end this slice at the next cycle check, keeping the cycles left (see
+   DynarecWriteWord). The counter is set to the highest threshold any check uses (YAB_CALLCAP's
+   calls/returns), so the very next check ends the slice. r0-r2 are free here (after the call,
+   before restore_regs). */
+extern u32 yab_kick[3];
+#ifdef YAB_CALLCAP
+#define KICK_CC (CLOCK_DIVIDER*YAB_CALLCAP)
+#else
+#define KICK_CC 0
+#endif
+static void emit_kick_yield(void)
+{
+  int jaddr;
+  emit_movimm((u32)yab_kick,1);
+  emit_readword_indexed(0,1,0);
+  emit_test(0,0);
+  jaddr=(int)out;
+  emit_jeq(0);
+  emit_zeroreg(0);
+  emit_writeword_indexed(0,0,1);
+  emit_readword_indexed(4+4*slave,1,0);
+  emit_add(0,HOST_CCREG,0);
+  if(KICK_CC) { emit_movimm(KICK_CC,2); emit_sub(0,2,0); }
+  emit_writeword_indexed(0,4+4*slave,1);
+  emit_movimm(KICK_CC,HOST_CCREG);
+  set_jump_target(jaddr,(int)out);
+}
+#endif
+
 void do_writestub(int n)
 {
   assem_debug("do_writestub %x\n",start+stubs[n][3]*2);
@@ -2931,6 +2962,9 @@ void do_writestub(int n)
     emit_call((int)WriteInvalidateWord);
   if(type==STOREL_STUB)
     emit_call((int)WriteInvalidateLong);
+#ifdef YAB_KICKYIELD
+  if(type==STOREW_STUB) emit_kick_yield();
+#endif
   
   restore_regs(reglist);
   emit_jmp(stubs[n][2]); // return address
@@ -2953,6 +2987,9 @@ void inline_writestub(int type, int i, u32 addr, signed char regmap[], int targe
     emit_call((int)WriteInvalidateWord);
   if(type==STOREL_STUB)
     emit_call((int)WriteInvalidateLong);
+#ifdef YAB_KICKYIELD
+  if(type==STOREW_STUB) emit_kick_yield();
+#endif
   restore_regs(reglist);
 }
 
