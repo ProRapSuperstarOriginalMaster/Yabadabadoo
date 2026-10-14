@@ -1998,6 +1998,9 @@ void retro_run(void)
 #endif
    if (++crash_frame == crash_test_frame)
       *(volatile int *)0 = 0;
+#ifdef YAB_VDP1LOG
+   vdp1log_frame = crash_frame - 1;   /* the harness's frame number */
+#endif
 #if defined(__linux__) && defined(__arm__)
    if (crash_frame == crash_stall_test_frame)
       sleep(STALL_SECONDS + 3);

@@ -240,6 +240,173 @@ static VDP1_TLS int vdp1_row_lo = INT_MIN, vdp1_row_hi = INT_MAX;
 /* which copy of the per-thread arrays this thread uses: 1 for the second
  * VDP1 thread, 0 everywhere else */
 static VDP1_TLS int vdp1_tid;
+
+#ifdef YAB_VDP1LOG
+/* Renderer log (vdp1.h). Every framebuffer write goes through VDP1W(), which counts it for the
+ * entry being drawn; VDP1RLOG_WHY names the rule when a shape is dropped whole, VDP1RLOG_L999
+ * counts lines dropped by the 999-pixel guard. YAB_VDP1LOG_CHG=1 also counts the pixels each
+ * entry changed (framebuffer compare per entry, slow): changed > written means a write that
+ * doesn't go through VDP1W(). */
+#include <pthread.h>
+#include <stdarg.h>
+int vdp1log_on = -1, vdp1log_frame;
+static FILE *vdp1log_fp;
+static int vdp1log_chg, vdp1log_lo, vdp1log_hi = INT_MAX;
+static VDP1_TLS int vdp1log_act;
+static pthread_mutex_t vdp1log_mx = PTHREAD_MUTEX_INITIALIZER;
+static int vdp1log_seq, vdp1log_start_frame, vdp1log_copydiff = -1, vdp1log_copyram;
+static VDP1_TLS int vdp1log_px, vdp1log_l999;
+static VDP1_TLS const char *vdp1log_why;
+static VDP1_TLS u8 *vdp1log_fbp;
+static VDP1_TLS char *vdp1log_buf;
+static VDP1_TLS size_t vdp1log_len, vdp1log_cap;
+static u8 vdp1log_prev[2][0x40000];
+#define VDP1W(l) (*(vdp1log_px++, &(l)))
+#define VDP1RLOG_WHY(s) (vdp1log_why = (s))
+#define VDP1RLOG_L999() (vdp1log_l999++)
+
+static int Vdp1LogOpen(void)
+{
+   if (vdp1log_on < 0)
+   {
+      const char *f = getenv("YAB_VDP1LOG");
+      vdp1log_fp = f && *f ? fopen(f, "w") : NULL;
+      vdp1log_on = vdp1log_fp != NULL;
+      vdp1log_chg = getenv("YAB_VDP1LOG_CHG") && getenv("YAB_VDP1LOG_CHG")[0] == '1';
+      if (getenv("YAB_VDP1LOG_FRAMES"))   /* first-last harness frame */
+         sscanf(getenv("YAB_VDP1LOG_FRAMES"), "%d-%d", &vdp1log_lo, &vdp1log_hi);
+   }
+   return vdp1log_on;
+}
+
+static void Vdp1LogPrintf(const char *fmt, ...)
+{
+   va_list ap;
+   int n;
+   if (vdp1log_cap - vdp1log_len < 512)
+   {
+      vdp1log_cap = vdp1log_cap ? vdp1log_cap * 2 : 1 << 16;
+      vdp1log_buf = (char *)realloc(vdp1log_buf, vdp1log_cap);
+   }
+   va_start(ap, fmt);
+   n = vsnprintf(vdp1log_buf + vdp1log_len, vdp1log_cap - vdp1log_len, fmt, ap);
+   va_end(ap);
+   if (n > 0)
+      vdp1log_len += n;
+}
+
+/* main thread, before a draw starts: its number and frame */
+static void Vdp1LogStart(const u8 *ram)
+{
+   vdp1log_seq++;
+   vdp1log_start_frame = vdp1log_frame;
+   vdp1log_copyram = ram == Vdp1Ram;
+}
+
+/* main thread, after the render copy was brought up to date: 4 KB pages that still differ */
+static void Vdp1LogCopyCheck(const u8 *copy)
+{
+   int p, n = 0;
+   if (!Vdp1LogOpen())
+      return;
+   for (p = 0; p < 0x80000; p += 0x1000)
+      n += memcmp(copy + p, Vdp1Ram + p, 0x1000) != 0;
+   vdp1log_copydiff = n;
+}
+
+static void Vdp1LogRows(int *lo, int *hi, int *unit)
+{
+   int rowbytes = vdp1width * (vdp1pixelsize ? vdp1pixelsize : 2);
+   int rows = rowbytes > 0 ? 0x40000 / rowbytes : 0;
+   *lo = vdp1_row_lo < 0 ? 0 : vdp1_row_lo;
+   *hi = vdp1_row_hi > rows ? rows : vdp1_row_hi;
+   *unit = rowbytes;
+}
+
+void Vdp1LogDrawBegin(u8 *ram, Vdp1 *regs, u8 *back_framebuffer)
+{
+   vdp1log_act = Vdp1LogOpen() && vdp1log_start_frame >= vdp1log_lo && vdp1log_start_frame <= vdp1log_hi;
+   if (!vdp1log_act)
+      return;
+   vdp1log_len = 0;
+   vdp1log_fbp = back_framebuffer;
+   Vdp1LogPrintf("D %d %d t%d rows %d %d pix%d w%d h%d il%d copydiff %d%s sys %d,%d user %d,%d-%d,%d local %d,%d\n",
+      vdp1log_start_frame, vdp1log_seq, vdp1_tid, vdp1_row_lo == INT_MIN ? -1 : vdp1_row_lo,
+      vdp1_row_hi == INT_MAX ? -1 : vdp1_row_hi, vdp1pixelsize, vdp1width, vdp1height, vdp1interlace,
+      vdp1log_copydiff, vdp1log_copyram ? " live" : "", regs->systemclipX2, regs->systemclipY2,
+      regs->userclipX1, regs->userclipY1, regs->userclipX2, regs->userclipY2, regs->localX, regs->localY);
+}
+
+void Vdp1LogEntryBegin(void)
+{
+   if (!vdp1log_act)
+      return;
+   vdp1log_px = 0;
+   vdp1log_l999 = 0;
+   vdp1log_why = NULL;
+   if (vdp1log_chg && vdp1log_fbp)
+   {
+      int lo, hi, unit;
+      Vdp1LogRows(&lo, &hi, &unit);
+      if (hi > lo)
+         memcpy(vdp1log_prev[vdp1_tid] + lo * unit, vdp1log_fbp + lo * unit, (hi - lo) * unit);
+   }
+}
+
+void Vdp1LogEntryEnd(u8 *ram, u32 addr, u32 idx)
+{
+   int i, chg = -1;
+   if (!vdp1log_act)
+      return;
+   if (vdp1log_chg && vdp1log_fbp)
+   {
+      int lo, hi, unit, k;
+      Vdp1LogRows(&lo, &hi, &unit);
+      chg = 0;
+      if (vdp1pixelsize == 2)
+      {
+         const u16 *a = (const u16 *)(vdp1log_prev[vdp1_tid] + lo * unit), *b = (const u16 *)(vdp1log_fbp + lo * unit);
+         for (k = 0; k < (hi - lo) * unit / 2; k++)
+            chg += a[k] != b[k];
+      }
+      else
+      {
+         const u8 *a = vdp1log_prev[vdp1_tid] + lo * unit, *b = vdp1log_fbp + lo * unit;
+         for (k = 0; k < (hi - lo) * unit; k++)
+            chg += a[k] != b[k];
+      }
+   }
+   Vdp1LogPrintf("E %u %05x", idx, addr);
+   for (i = 0; i < 32; i += 2)
+      Vdp1LogPrintf(" %04x", T1ReadWord(ram, (addr + i) & 0x7FFFF));
+   Vdp1LogPrintf(" px %d why %s l999 %d chg %d\n", vdp1log_px, vdp1log_why ? vdp1log_why : "-", vdp1log_l999, chg);
+}
+
+void Vdp1LogDrawEnd(const char *end, u32 visits)
+{
+   if (!vdp1log_act)
+      return;
+   Vdp1LogPrintf("X %s %u\n", end, visits);
+   pthread_mutex_lock(&vdp1log_mx);
+   fwrite(vdp1log_buf, 1, vdp1log_len, vdp1log_fp);
+   fflush(vdp1log_fp);
+   pthread_mutex_unlock(&vdp1log_mx);
+   vdp1log_len = 0;
+}
+
+void Vdp1LogNoDraw(const char *why)
+{
+   if (!Vdp1LogOpen() || vdp1log_frame < vdp1log_lo || vdp1log_frame > vdp1log_hi)
+      return;
+   pthread_mutex_lock(&vdp1log_mx);
+   fprintf(vdp1log_fp, "N %d %s\n", vdp1log_frame, why);
+   pthread_mutex_unlock(&vdp1log_mx);
+}
+#else
+#define VDP1W(l) l
+#define VDP1RLOG_WHY(s) ((void)0)
+#define VDP1RLOG_L999() ((void)0)
+#endif
 /* framebuffer row of VDP1 y coordinate y, as putpixel() computes it */
 #define VDP1_ROW(y) (vdp1interlace == 2 ? (y) / 2 : (y))
 
@@ -3987,6 +4154,7 @@ static void VidsoftVdp1Start(u8 *ram, const Vdp1 *regs, int erase, u8 *fb)
    vidsoft_vdp1_thread_context.ramp = ram;
    memcpy(&vidsoft_vdp1_thread_context.regs, regs, sizeof(Vdp1));
    vidsoft_vdp1_thread_context.back_framebuffer = fb;
+   VDP1RLOG(Vdp1LogStart(ram));
 
    {
    YAB_PROF_BEGIN(PROF_VDP1_ERASE);
@@ -4103,6 +4271,7 @@ static void VidsoftVdp1Capture(int erase)
    YAB_PROF_BEGIN(PROF_VDP1_SNAPSHOT);
    VidsoftVdp1FoldDirty();
    VidsoftSyncRamCopy(j->ram, Vdp1Ram, j->stale, "VDP1 job");
+   VDP1RLOG(Vdp1LogCopyCheck(j->ram));
    memcpy(&j->regs, Vdp1Regs, sizeof(Vdp1));
    YAB_PROF_END(PROF_VDP1_SNAPSHOT);
    j->erase = erase;
@@ -4233,6 +4402,7 @@ void VIDSoftVdp1DrawStart()
          YAB_PROF_BEGIN(PROF_VDP1_SNAPSHOT);
          VidsoftVdp1FoldDirty();
          VidsoftSyncRamCopy(vidsoft_vdp1_thread_context.ram, Vdp1Ram, vdp1_ctx_stale, "VDP1");
+         VDP1RLOG(Vdp1LogCopyCheck(vidsoft_vdp1_thread_context.ram));
          YAB_PROF_END(PROF_VDP1_SNAPSHOT);
          }
          VidsoftVdp1Start(vidsoft_vdp1_thread_context.ram, Vdp1Regs, erase, vdp1backframebuffer);
@@ -4246,6 +4416,7 @@ void VIDSoftVdp1DrawStart()
    else
    {
       VIDSoftVdp1DrawStartBody(Vdp1Regs, vdp1backframebuffer);
+      VDP1RLOG(Vdp1LogStart(Vdp1Ram));
       Vdp1DrawCommands(Vdp1Ram, Vdp1Regs, vdp1backframebuffer);
    }
 }
@@ -4538,7 +4709,7 @@ static void putpixel8(int x, int y, Vdp1 * regs, vdp1cmd_struct *cmd, u8 * back_
         default:
         case 0:	// replace
             if (!((currentPixel == 0) && !SPD))
-                *(iPix) = currentPixel;
+                VDP1W(*(iPix)) = currentPixel;
             break;
         }
     }
@@ -4571,7 +4742,7 @@ static void putpixel(int x, int y, Vdp1* regs, vdp1cmd_struct * cmd, u8 * back_f
 	if (cmd->CMDPMOD & (1 << 15))
 	{
 		if (currentPixel) {
-			*iPix |= 0x8000;
+			VDP1W(*iPix) |= 0x8000;
 			return;
 		}
 	}
@@ -4582,20 +4753,20 @@ static void putpixel(int x, int y, Vdp1* regs, vdp1cmd_struct * cmd, u8 * back_f
 		{
 		case 0:	// replace
 			if (!((currentPixel == 0) && !SPD)) 
-				*(iPix) = currentPixel;
+				VDP1W(*(iPix)) = currentPixel;
 			break;
 		case 1: // shadow
 			if (*(iPix) & (1 << 15)) // only if MSB of framebuffer data is set
-				*(iPix) = ((*iPix & 0x7BDE) >> 1) | 0x8000;
+				VDP1W(*(iPix)) = ((*iPix & 0x7BDE) >> 1) | 0x8000;
 			break;
 		case 2: // half luminance
-			*(iPix) = ((currentPixel & ~0x8421) >> 1) | (1 << 15);
+			VDP1W(*(iPix)) = ((currentPixel & ~0x8421) >> 1) | (1 << 15);
 			break;
 		case 3: // half transparent
 			if ( *(iPix) & (1 << 15) )//only if MSB of framebuffer data is set 
-				*(iPix) = (((*iPix & currentPixel & 0x7FFF) + (((*iPix ^ currentPixel) & 0x7BDE) >> 1))) | 0x8000;
+				VDP1W(*(iPix)) = (((*iPix & currentPixel & 0x7FFF) + (((*iPix ^ currentPixel) & 0x7BDE) >> 1))) | 0x8000;
 			else
-				*(iPix) = currentPixel;
+				VDP1W(*(iPix)) = currentPixel;
 			break;
 		case 4: //gouraud
 			#define COLOR(r,g,b)    (((r)&0x1F)|(((g)&0x1F)<<5)|(((b)&0x1F)<<10) |0x8000 )
@@ -4611,10 +4782,10 @@ static void putpixel(int x, int y, Vdp1* regs, vdp1cmd_struct * cmd, u8 * back_f
 				int c = (int)(leftColumnColor.r-0x10);
 				if(c < 0) c = 0;
 				currentPixel = currentPixel+c;
-				*(iPix) = currentPixel;
+				VDP1W(*(iPix)) = currentPixel;
 				break;
 			}
-			*(iPix) = COLOR(
+			VDP1W(*(iPix)) = COLOR(
 				gouraudAdjust(
 				currentPixel&0x001F,
 				(int)leftColumnColor.r),
@@ -4629,7 +4800,7 @@ static void putpixel(int x, int y, Vdp1* regs, vdp1cmd_struct * cmd, u8 * back_f
 				);
 			break;
 		default:
-			*(iPix) = alphablend16( COLOR((int)leftColumnColor.r,(int)leftColumnColor.g, (int)leftColumnColor.b), currentPixel, (1 << 7) ) | (1 << 15);
+			VDP1W(*(iPix)) = alphablend16( COLOR((int)leftColumnColor.r,(int)leftColumnColor.g, (int)leftColumnColor.b), currentPixel, (1 << 7) ) | (1 << 15);
 			break;
 		}
 	}
@@ -4766,7 +4937,16 @@ static __attribute__((noinline)) int DrawLine(int x1, int y1, int x2, int y2, in
 	data.endcodesdetected = 0;
 	data.previousStep = 123456789;
 
+#ifdef YAB_VDP1LOG
+   {
+      int r = iterateOverLine(x1, y1, x2, y2, greedy, &data, DrawLineCallback, regs, cmd, ram, back_framebuffer);
+      if (r == INT_MAX)
+         VDP1RLOG_L999();
+      return r;
+   }
+#else
    return iterateOverLine(x1, y1, x2, y2, greedy, &data, DrawLineCallback, regs, cmd, ram, back_framebuffer);
+#endif
 }
 
 /* Quad drawing without the per-pixel overhead of DrawLine(): the command's
@@ -4823,20 +5003,20 @@ static INLINE __attribute__((always_inline)) int Vdp1QuadPut(const int drawmode,
    {
    case 0: // replace
       if (!((cp == 0) && !SPD))
-         *iPix = cp;
+         VDP1W(*iPix) = cp;
       break;
    case 1: // shadow
       if (*iPix & (1 << 15))
-         *iPix = ((*iPix & 0x7BDE) >> 1) | 0x8000;
+         VDP1W(*iPix) = ((*iPix & 0x7BDE) >> 1) | 0x8000;
       break;
    case 2: // half luminance
-      *iPix = ((cp & ~0x8421) >> 1) | (1 << 15);
+      VDP1W(*iPix) = ((cp & ~0x8421) >> 1) | (1 << 15);
       break;
    case 3: // half transparent
       if (*iPix & (1 << 15))
-         *iPix = (((*iPix & cp & 0x7FFF) + (((*iPix ^ cp) & 0x7BDE) >> 1))) | 0x8000;
+         VDP1W(*iPix) = (((*iPix & cp & 0x7FFF) + (((*iPix ^ cp) & 0x7BDE) >> 1))) | 0x8000;
       else
-         *iPix = cp;
+         VDP1W(*iPix) = cp;
       break;
    case 4: // gouraud
       if (colormode != 5 && colormode != 1 && (int)lg == 16 && (int)lb == 16)
@@ -4844,15 +5024,15 @@ static INLINE __attribute__((always_inline)) int Vdp1QuadPut(const int drawmode,
          int c = (int)(lr - 0x10);
          if (c < 0) c = 0;
          cp = cp + c;
-         *iPix = cp;
+         VDP1W(*iPix) = cp;
          break;
       }
-      *iPix = COLOR(gouraudAdjust(cp & 0x001F, (int)lr),
+      VDP1W(*iPix) = COLOR(gouraudAdjust(cp & 0x001F, (int)lr),
                     gouraudAdjust((cp & 0x03e0) >> 5, (int)lg),
                     gouraudAdjust((cp & 0x7c00) >> 10, (int)lb));
       break;
    default:
-      *iPix = alphablend16(COLOR((int)lr, (int)lg, (int)lb), cp, (1 << 7)) | (1 << 15);
+      VDP1W(*iPix) = alphablend16(COLOR((int)lr, (int)lg, (int)lb), cp, (1 << 7)) | (1 << 15);
       break;
    }
    return cp;
@@ -5006,7 +5186,7 @@ static INLINE __attribute__((always_inline)) QuadPen QuadPlotPoints(const int CM
                cp &= 0xFF;
                if (!(L.mesh && ((px ^ yy) & 1)) && (L.noclip || !IsClipped(px, py, L.regs, L.cmd)) &&
                    (L.SPD || (cp & vis)) && !((cp == 0) && !L.SPD))
-                  L.fb8[pos] = cp;
+                  VDP1W(L.fb8[pos]) = cp;
             }
          }
          else if ((py & 1) != L.dil_skip) /* CheckDil() */
@@ -5017,7 +5197,7 @@ static INLINE __attribute__((always_inline)) QuadPen QuadPlotPoints(const int CM
                 (L.noclip || !IsClipped(px, py, L.regs, L.cmd)))
             {
                if (L.msbon && cp)
-                  L.fb[pos] |= 0x8000;
+                  VDP1W(L.fb[pos]) |= 0x8000;
                else if (L.SPD || (cp & vis))
                   cp = Vdp1QuadPut(drawmode, colormode, L.SPD, &L.fb[pos], cp, lr, lg, lb);
             }
@@ -5087,7 +5267,7 @@ static QuadPen QuadPlotCM1Gouraud(const QuadLine *Lp, QuadPen pen)
          continue;                                     /* transparent */
       cp = T1ReadWord((u8 *)ram, (cp * 2 + colorlut) & 0x7FFFF);
       if (SPD || cp)
-         fb[pos] = COLOR(gouraudAdjust(cp & 0x001F, (int)lr),
+         VDP1W(fb[pos]) = COLOR(gouraudAdjust(cp & 0x001F, (int)lr),
                          gouraudAdjust((cp & 0x03e0) >> 5, (int)lg),
                          gouraudAdjust((cp & 0x7c00) >> 10, (int)lb));
    }
@@ -5222,9 +5402,9 @@ static INLINE __attribute__((always_inline)) QuadPen QuadPlotLeanBody(const int 
             continue;
       }
       if (DM == 0)
-         fb[pos] = cp;
+         VDP1W(fb[pos]) = cp;
       else
-         fb[pos] = COLOR(gouraudAdjust(cp & 0x001F, (int)lr),
+         VDP1W(fb[pos]) = COLOR(gouraudAdjust(cp & 0x001F, (int)lr),
                          gouraudAdjust((cp & 0x03e0) >> 5, (int)lg),
                          gouraudAdjust((cp & 0x7c00) >> 10, (int)lb));
    }
@@ -5341,9 +5521,9 @@ static INLINE __attribute__((always_inline)) QuadPen QuadPlotLeanRGBPlain(const 
          if ((!ENDC || (inside && pos < 0x20000)) && (SPD || cp))
          {
             if (DM == 0)
-               fb[pos] = cp;
+               VDP1W(fb[pos]) = cp;
             else
-               fb[pos] = COLOR(gouraudAdjust(cp & 0x001F, (int)lr),
+               VDP1W(fb[pos]) = COLOR(gouraudAdjust(cp & 0x001F, (int)lr),
                                gouraudAdjust((cp & 0x03e0) >> 5, (int)lg),
                                gouraudAdjust((cp & 0x7c00) >> 10, (int)lb));
          }
@@ -5406,9 +5586,9 @@ static INLINE __attribute__((always_inline)) QuadPen QuadPlotLeanRGBEnd(const in
 
 #define QUAD_RGB_PLOT \
          if (DM == 0) \
-            fb[pos] = cp; \
+            VDP1W(fb[pos]) = cp; \
          else \
-            fb[pos] = COLOR(QuadGouraud5(cp & 0x001F, (int)lr), \
+            VDP1W(fb[pos]) = COLOR(QuadGouraud5(cp & 0x001F, (int)lr), \
                             QuadGouraud5((cp & 0x03e0) >> 5, (int)lg), \
                             QuadGouraud5((cp & 0x7c00) >> 10, (int)lb));
 
@@ -5486,7 +5666,7 @@ static __attribute__((noinline)) QuadPen QuadPlotFill(const QuadLine *Lp, QuadPe
          continue;
       any = 1;
       if (plot)
-         fb[pos] = cp;
+         VDP1W(fb[pos]) = cp;
    }
    (void)pts;
    if (any)
@@ -5587,7 +5767,7 @@ static INLINE __attribute__((always_inline)) QuadPen QuadPlotLean8Body(const int
          cp = (colorbank & 0x80) | t;
       else
          cp = t;
-      fb8[pos] = cp;
+      VDP1W(fb8[pos]) = cp;
    }
    pen.cp = cp;
    if (read)
@@ -5636,7 +5816,7 @@ static __attribute__((noinline)) QuadPen QuadPlotFill8(const QuadLine *Lp, QuadP
          continue;
       any = 1;
       if (plot)
-         fb8[pos] = cp;
+         VDP1W(fb8[pos]) = cp;
    }
    if (any)
    {
@@ -5711,7 +5891,10 @@ static void DrawLineQuad(const Vdp1QuadState *st, int x1, int y1, int x2, int y2
    n = 0;
 
    if (abs(dx) > 999 || abs(dy) > 999)
+   {
+      VDP1RLOG_L999();
       return;
+   }
 
    if (abs(dx) > abs(dy)) {
       if (ax != ay) dx = -dx;
@@ -5969,7 +6152,10 @@ static void drawQuad(s16 tl_x, s16 tl_y, s16 bl_x, s16 bl_y, s16 tr_x, s16 tr_y,
 	int quad_fast;
 
    if (is_pre_clipped(tl_x, tl_y, bl_x, bl_y, tr_x, tr_y, br_x, br_y, regs))
+   {
+      VDP1RLOG_WHY("preclip");
       return;
+   }
 
    {
       /* every point drawn lies within the corners' box: nothing to do if
@@ -5991,6 +6177,7 @@ static void drawQuad(s16 tl_x, s16 tl_y, s16 bl_x, s16 bl_y, s16 tr_x, s16 tr_y,
          if ((cmd->CMDPMOD & (1 << 2)) &&   /* drawQuad() returns before it for huge shapes */
              !(abs(bl_x - tl_x) > 999 || abs(bl_y - tl_y) > 999 || abs(br_x - tr_x) > 999 || abs(br_y - tr_y) > 999))
             gouraudTable(ram, regs, cmd);
+         VDP1RLOG_WHY("other-thread-rows");
          return;
       }
    }
@@ -6006,7 +6193,10 @@ static void drawQuad(s16 tl_x, s16 tl_y, s16 bl_x, s16 bl_y, s16 tr_x, s16 tr_y,
 
 	//just for now since burning rangers will freeze up trying to draw huge shapes
 	if(totalleft == INT_MAX || totalright == INT_MAX)
+	{
+		VDP1RLOG_WHY("edge>999");
 		return;
+	}
 
 	total = totalleft > totalright ? totalleft : totalright;
 

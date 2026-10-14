@@ -129,6 +129,21 @@ void FASTCALL Sh2Vdp1FrameBufferWriteLong(SH2_struct *sh, u32, u32);
 void Vdp1DrawCommands(u8 * ram, Vdp1 * regs, u8* back_framebuffer);
 void Vdp1FakeDrawCommands(u8 * ram, Vdp1 * regs);
 
+/* Renderer log (debug builds only, -DYAB_VDP1LOG; YAB_VDP1LOG=file at run time): for every
+ * entry the renderer walks, the 16 command words as read, the pixels written and, when none
+ * were, the rule that skipped it. Read by the vdp1cmp tools. Compiled out otherwise. */
+#ifdef YAB_VDP1LOG
+extern int vdp1log_on, vdp1log_frame;
+void Vdp1LogDrawBegin(u8 *ram, Vdp1 *regs, u8 *back_framebuffer);
+void Vdp1LogEntryBegin(void);
+void Vdp1LogEntryEnd(u8 *ram, u32 addr, u32 idx);
+void Vdp1LogDrawEnd(const char *end, u32 visits);
+void Vdp1LogNoDraw(const char *why);
+#define VDP1RLOG(x) x
+#else
+#define VDP1RLOG(x)
+#endif
+
 extern Vdp1 * Vdp1Regs;
 
 // struct for Vdp1 part that shouldn't be saved

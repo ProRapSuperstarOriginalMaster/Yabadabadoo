@@ -490,7 +490,9 @@ void Vdp1DrawCommands(u8 * ram, Vdp1 * regs, u8* back_framebuffer)
    u32 commandCounter = 0;
    u32 returnAddr = 0xffffffff;
 
+   VDP1RLOG(Vdp1LogDrawBegin(ram, regs, back_framebuffer));
    while (!(command & 0x8000) && commandCounter < 2000) { // fix me
+      VDP1RLOG(Vdp1LogEntryBegin());
       // First, process the command
       if (!(command & 0x4000)) { // if (!skip)
          switch (command & 0x000F) {
@@ -531,10 +533,13 @@ void Vdp1DrawCommands(u8 * ram, Vdp1 * regs, u8* back_framebuffer)
             VIDCore->Vdp1DrawEnd();
             regs->LOPR = regs->addr >> 3;
             regs->COPR = regs->addr >> 3;
+            VDP1RLOG(Vdp1LogEntryEnd(ram, regs->addr, commandCounter));
+            VDP1RLOG(Vdp1LogDrawEnd("bad", commandCounter + 1));
             return;
          }
       }
 
+      VDP1RLOG(Vdp1LogEntryEnd(ram, regs->addr, commandCounter));
       // Next, determine where to go next
       switch ((command & 0x3000) >> 12) {
       case 0: // NEXT, jump to following table
@@ -564,6 +569,7 @@ void Vdp1DrawCommands(u8 * ram, Vdp1 * regs, u8* back_framebuffer)
    }
    if (regs == Vdp1Regs)   /* drawn on the emulation thread */
       Vdp1ListIncomplete = !(command & 0x8000);
+   VDP1RLOG(Vdp1LogDrawEnd((command & 0x8000) ? "end" : "cap", commandCounter));
 }
 
 //ensure that registers are set correctly 
@@ -675,6 +681,7 @@ void Vdp1Draw(void)
 //////////////////////////////////////////////////////////////////////////////
 
 void Vdp1NoDraw(void) {
+   VDP1RLOG(Vdp1LogNoDraw("display-off"));
    // beginning of a frame (ST-013-R3-061694 page 53)
    // BEF <- CEF
    // CEF <- 0
