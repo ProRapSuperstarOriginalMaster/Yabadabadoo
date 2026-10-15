@@ -692,10 +692,13 @@ VideoInterface_struct *VIDCoreList[] = {
 
 #pragma mark Yabause Callbacks
 
+static void crash_log_note(const char *string);
+
 void YuiErrorMsg(const char *string)
 {
    if (log_cb)
       log_cb(RETRO_LOG_ERROR, "Yabause: %s\n", string);
+   crash_log_note(string);
 }
 
 void YuiSetVideoAttribute(int type, int val)
@@ -1716,6 +1719,26 @@ static void crash_log_install(void)
       stall_quit = 1;
 }
 
+/* Core errors (e.g. a runaway SCU DMA that was cut, U9) also go to the crash
+ * log: testers send that file, not RetroArch's log. Capped per session: a
+ * crashed game can raise an error per emulated instruction (invalid opcodes),
+ * which must not fill the SD card. */
+#define CRASH_LOG_MAX_NOTES 16
+
+static void crash_log_note(const char *string)
+{
+   static int notes = 0;
+   FILE *f;
+
+   if (!crash_installed || notes > CRASH_LOG_MAX_NOTES || !(f = fopen(crash_log_path, "a")))
+      return;
+   if (notes++ == CRASH_LOG_MAX_NOTES)
+      fprintf(f, "%snote at frame %08x: more core errors, no longer logged\n\n", crash_header, crash_frame);
+   else
+      fprintf(f, "%snote at frame %08x: %s\n\n", crash_header, crash_frame, string);
+   fclose(f);
+}
+
 static void crash_log_uninstall(void)
 {
    int i;
@@ -1734,6 +1757,7 @@ static void crash_log_uninstall(void)
 #else
 #define crash_log_install()
 #define crash_log_uninstall()
+static void crash_log_note(const char *string) { (void)string; }
 static unsigned crash_frame, crash_test_frame;
 #endif
 

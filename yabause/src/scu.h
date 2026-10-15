@@ -100,6 +100,19 @@ typedef struct
 
 extern Scu * ScuRegs;
 
+// The SCU DMA in progress (immediate DMA path), for the freeze watchdog's log:
+// written once per transfer, never per word
+typedef struct
+{
+   int active;
+   int level;
+   u32 read, write, count;
+   u32 table;     // indirect DMA: address of the current table entry, else 0
+   u32 entries;   // indirect DMA: table entries started so far
+} ScuDmaNow_struct;
+
+extern volatile ScuDmaNow_struct ScuDmaNow;
+
 typedef struct
 {
    scucodebreakpoint_struct codebreakpoint[MAX_BREAKPOINTS];

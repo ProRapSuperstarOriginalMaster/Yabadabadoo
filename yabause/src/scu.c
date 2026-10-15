@@ -38,6 +38,7 @@
 #include "vdp2.h"
 #include "ygr.h"
 #include "assert.h"
+#include "error.h"
 #include <stdarg.h>
 #include "scu_dsp_jit.h"
 
@@ -51,6 +52,7 @@
 Scu * ScuRegs;
 scudspregs_struct * ScuDsp;
 scubp_struct * ScuBP;
+volatile ScuDmaNow_struct ScuDmaNow;
 static int incFlg[4] = { 0 };
 static void ScuTestInterruptMask(void);
 struct ScuDspInterface scu_dsp_inf;
@@ -1419,6 +1421,50 @@ void scu_dma_tick_all(u32 cycles)
       scu_dma_tick(&scu_dma_queue[0]);
 }
 
+// Runaway DMA guard (U9). Byte counts are 20 bits on the hardware (12 for
+// direct DMA on levels 1 and 2), but here they come from 32-bit registers and
+// table entries: a garbage count (a bad state, a game bug) once made one DoDMA
+// copy ~4 GB, freezing the device for a minute or more. Counts are masked as
+// the hardware does, and an indirect table walk stops after
+// SCU_DMA_MAX_ENTRIES entries or SCU_DMA_MAX_BYTES bytes, far beyond what
+// games use (counted work, not time, so runs stay reproducible). Either is
+// logged and the DMA ends with its usual end interrupt.
+#define SCU_DMA_MAX_ENTRIES 0x10000
+#define SCU_DMA_MAX_BYTES   0x1000000
+#define SCU_DMA_MAX_NOTES   8
+
+static void ScuDmaNote(int level, const char *what)
+{
+   static int notes = 0;
+   char msg[160];
+
+   if (notes > SCU_DMA_MAX_NOTES)
+      return;
+   if (notes++ == SCU_DMA_MAX_NOTES)
+      snprintf(msg, sizeof(msg), "SCU DMA: more runaway transfers cut, no longer logged");
+   else
+      snprintf(msg, sizeof(msg), "SCU DMA level %d: %s (runaway transfer cut)", level, what);
+   YabSetError(YAB_ERR_OTHER, msg);
+}
+
+static u32 ScuDmaCount(int level, u32 count)
+{
+   u32 cut;
+
+   if (count <= 0xFFFFF)
+      return count;
+   cut = count & 0xFFFFF;
+   if (cut == 0)
+      cut = 0x100000;
+   if (cut != count)
+   {
+      char what[64];
+      snprintf(what, sizeof(what), "byte count %08X -> %05X", (unsigned)count, (unsigned)cut);
+      ScuDmaNote(level, what);
+   }
+   return cut;
+}
+
 static void FASTCALL ScuDMA(scudmainfo_struct *dmainfo) {
    u8 ReadAdd, WriteAdd;
 
@@ -1457,13 +1503,34 @@ static void FASTCALL ScuDMA(scudmainfo_struct *dmainfo) {
          break;
    }
 
+   ScuDmaNow.level = dmainfo->mode;
+   ScuDmaNow.entries = 0;
+   ScuDmaNow.active = 1;
+
    if (dmainfo->ModeAddressUpdate & 0x1000000) {
       // Indirect DMA
+      u32 bytes = 0, table = dmainfo->WriteAddress;
 
       for (;;) {
          u32 ThisTransferSize = MappedMemoryReadLongNocache(MSH2,dmainfo->WriteAddress);
          u32 ThisWriteAddress = MappedMemoryReadLongNocache(MSH2, dmainfo->WriteAddress + 4);
          u32 ThisReadAddress  = MappedMemoryReadLongNocache(MSH2, dmainfo->WriteAddress + 8);
+
+         ThisTransferSize = ScuDmaCount(dmainfo->mode, ThisTransferSize);
+         if (ScuDmaNow.entries >= SCU_DMA_MAX_ENTRIES || ThisTransferSize > SCU_DMA_MAX_BYTES - bytes)
+         {
+            char what[96];
+            snprintf(what, sizeof(what), "indirect table from %08X without end after %u entries, %u bytes",
+                     (unsigned)table, (unsigned)ScuDmaNow.entries, (unsigned)bytes);
+            ScuDmaNote(dmainfo->mode, what);
+            break;
+         }
+         bytes += ThisTransferSize;
+         ScuDmaNow.table = dmainfo->WriteAddress;
+         ScuDmaNow.read = ThisReadAddress;
+         ScuDmaNow.write = ThisWriteAddress;
+         ScuDmaNow.count = ThisTransferSize;
+         ScuDmaNow.entries++;
 
          //LOG("SCU Indirect DMA: src %08x, dst %08x, size = %08x\n", ThisReadAddress, ThisWriteAddress, ThisTransferSize);
          DoDMA(ThisReadAddress & 0x7FFFFFFF, ReadAdd, ThisWriteAddress,
@@ -1499,8 +1566,13 @@ static void FASTCALL ScuDMA(scudmainfo_struct *dmainfo) {
       else {
          if (dmainfo->TransferNumber == 0)
             dmainfo->TransferNumber = 0x100000;
+         dmainfo->TransferNumber = ScuDmaCount(0, dmainfo->TransferNumber);
       }
 
+      ScuDmaNow.table = 0;
+      ScuDmaNow.read = dmainfo->ReadAddress;
+      ScuDmaNow.write = dmainfo->WriteAddress;
+      ScuDmaNow.count = dmainfo->TransferNumber;
       DoDMA(dmainfo->ReadAddress, ReadAdd, dmainfo->WriteAddress, WriteAdd,
             dmainfo->TransferNumber);
 
@@ -1516,6 +1588,7 @@ static void FASTCALL ScuDMA(scudmainfo_struct *dmainfo) {
             break;
       }
    }
+   ScuDmaNow.active = 0;
 }
 
 //////////////////////////////////////////////////////////////////////////////
