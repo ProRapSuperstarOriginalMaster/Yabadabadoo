@@ -24,6 +24,7 @@
 */
 
 #include <stdlib.h>
+#include <stdio.h>
 #include "cs0.h"
 #include "error.h"
 #include "japmodem.h"
@@ -1404,35 +1405,67 @@ void CartDeInit(void)
 
 //////////////////////////////////////////////////////////////////////////////
 
+// Size of the cart's RAM (the RAM expansion carts; the Action Replay and the
+// USB dev cart carry the same 4 MB), 0 for carts without one
+static u32 CartDramSize(void)
+{
+   if (CartridgeArea->dram == NULL)
+      return 0;
+   return CartridgeArea->carttype == CART_DRAM8MBIT ? 0x100000 : 0x400000;
+}
+
+// Version 2 (U8): cart type, RAM size, the RAM. Version 1 states carry only the
+// type; loading one leaves the cart RAM as it is (as before). Backup RAM carts
+// are files of their own and stay out of states.
 int CartSaveState(void ** stream)
 {
    int offset;
+   u32 ramsize = CartDramSize();
 
-   offset = MemStateWriteHeader(stream, "CART", 1);
+   offset = MemStateWriteHeader(stream, "CART", 2);
 
    // Write cart type
    MemStateWrite((void *)&CartridgeArea->carttype, 4, 1, stream);
 
-   // Write the areas associated with the cart type here
+   MemStateWrite((void *)&ramsize, 4, 1, stream);
+   if (ramsize)
+      MemStateWrite(CartridgeArea->dram, ramsize, 1, stream);
 
    return MemStateFinishHeader(stream, offset);
 }
 
 //////////////////////////////////////////////////////////////////////////////
 
-int CartLoadState(const void * stream, UNUSED int version, int size)
+int CartLoadState(const void * stream, int version, int size)
 {
    int newtype;
-   size_t num_read = 0;
+   u32 ramsize = 0;
+   int start = MemStateGetOffset();
 
    // Read cart type
    MemStateRead((void *)&newtype, 4, 1, stream);
 
-   // Check to see if old cart type and new cart type match, if they don't,
-   // reallocate memory areas
+   if (version >= 2 && size >= 8)
+      MemStateRead((void *)&ramsize, 4, 1, stream);
 
-   // Read the areas associated with the cart type here
+   // The cart RAM is restored only into the same cart (the cart option needs a
+   // restart, so it stays what the game was started with); a state made with
+   // another cart leaves the RAM as it is, as version 1 states do.
+   if (ramsize != 0 && ramsize <= (u32)size - 8)
+   {
+      if (newtype == CartridgeArea->carttype && ramsize == CartDramSize())
+         MemStateRead(CartridgeArea->dram, ramsize, 1, stream);
+      else
+      {
+         char msg[128];
+         snprintf(msg, sizeof(msg), "Save state made with another expansion cartridge (type %d, now %d): its cartridge RAM was not loaded",
+                  newtype, CartridgeArea->carttype);
+         YabSetError(YAB_ERR_OTHER, msg);
+      }
+   }
 
+   // Always continue right after this chunk, whatever was read of it
+   MemStateSetOffset(start + size);
    return size;
 }
 
