@@ -4482,6 +4482,16 @@ scsp_init (u8 *scsp_ram, void (*sint_hand)(u32), void (*mint_hand)(void))
 //////////////////////////////////////////////////////////////////////////////
 
 u8 *SoundRam = NULL;
+
+// One line for the freeze watchdog's log (T6): the sound CPU's interrupt
+// state and where the 68K is (a snapshot read from another thread)
+int ScspStallInfo(char *buf, int size)
+{
+   return snprintf(buf, size, "SCSP: SCIEB %03X SCIPD %03X SCILV %02X %02X %02X MCIEB %03X MCIPD %03X; 68K PC %06X SR %04X",
+                   (unsigned)scsp.scieb, (unsigned)scsp.scipd, (unsigned)scsp.scilv0, (unsigned)scsp.scilv1,
+                   (unsigned)scsp.scilv2, (unsigned)scsp.mcieb, (unsigned)scsp.mcipd,
+                   M68K && M68K->GetPC ? (unsigned)M68K->GetPC() : 0, M68K && M68K->GetSR ? (unsigned)M68K->GetSR() : 0);
+}
 ScspInternal *ScspInternalVars;
 static SoundInterface_struct *SNDCore = NULL;
 extern SoundInterface_struct *SNDCoreList[];

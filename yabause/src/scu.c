@@ -1591,6 +1591,22 @@ static void FASTCALL ScuDMA(scudmainfo_struct *dmainfo) {
    ScuDmaNow.active = 0;
 }
 
+// One line for the freeze watchdog's log (T6): interrupts, the DMA in
+// progress (immediate DMA) and the DSP. Read from another thread while the
+// emulation may run: a snapshot, not a consistent one.
+int ScuStallInfo(char *buf, int size)
+{
+   if (ScuRegs == NULL)
+      return snprintf(buf, size, "SCU: not initialised");
+   return snprintf(buf, size, "SCU: IMS %08X IST %08X AIACK %X; DMA %s level %d read %08X write %08X count %X table %08X entries %u; "
+                   "D0EN %X D1EN %X D2EN %X; DSP %s PC %02X",
+                   (unsigned)ScuRegs->IMS, (unsigned)ScuRegs->IST, (unsigned)ScuRegs->AIACK,
+                   ScuDmaNow.active ? "RUNNING" : "idle, last", ScuDmaNow.level, (unsigned)ScuDmaNow.read,
+                   (unsigned)ScuDmaNow.write, (unsigned)ScuDmaNow.count, (unsigned)ScuDmaNow.table, (unsigned)ScuDmaNow.entries,
+                   (unsigned)ScuRegs->D0EN, (unsigned)ScuRegs->D1EN, (unsigned)ScuRegs->D2EN,
+                   ScuDsp && ScuDsp->ProgControlPort.part.EX ? "running" : "stopped", ScuDsp ? ScuDsp->PC : 0);
+}
+
 //////////////////////////////////////////////////////////////////////////////
 
 static u32 readgensrc(u8 num)

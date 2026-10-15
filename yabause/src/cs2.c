@@ -4597,3 +4597,21 @@ u32 Cs2GetMasterStackAdress(){ if (cdip) return cdip->msh2stack; else return 0x6
 u32 Cs2GetSlaveStackAdress(){ if (cdip) return cdip->ssh2stack; else return 0x6001000; }
 
 //////////////////////////////////////////////////////////////////////////////
+
+// One line for the freeze watchdog's log (T6): CD block status, position,
+// the host interface registers and the data transfer (a snapshot read from
+// another thread)
+int Cs2StallInfo(char *buf, int size)
+{
+   if (Cs2Area == NULL)
+      return snprintf(buf, size, "CD block: not initialised");
+   return snprintf(buf, size, "CD block: status %02X FAD %06X play %06X-%06X; HIRQ %04X mask %04X CR %04X %04X %04X %04X; "
+                   "command %02X; data transfer type %d sectors %u (pos %u of %u) info transfer type %d; free blocks %u",
+                   Cs2Area->status, (unsigned)Cs2Area->FAD, (unsigned)Cs2Area->playFAD, (unsigned)Cs2Area->playendFAD,
+                   Cs2Area->reg.HIRQ, Cs2Area->reg.HIRQMASK, Cs2Area->reg.CR1, Cs2Area->reg.CR2, Cs2Area->reg.CR3,
+                   Cs2Area->reg.CR4, (unsigned)Cs2Area->_command, (int)Cs2Area->datatranstype, (unsigned)Cs2Area->datanumsecttrans,
+                   Cs2Area->datatranssectpos, Cs2Area->datasectstotrans, (int)Cs2Area->infotranstype,
+                   (unsigned)Cs2Area->blockfreespace);
+}
+
+//////////////////////////////////////////////////////////////////////////////

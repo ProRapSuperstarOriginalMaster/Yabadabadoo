@@ -387,4 +387,6 @@ u32 Cs2GetSlaveStackAdress(void);
 void Cs2ForceOpenTray();
 int Cs2ForceCloseTray( int coreid, const char * cdpath );
 
+int Cs2StallInfo(char *buf, int size);
+
 #endif

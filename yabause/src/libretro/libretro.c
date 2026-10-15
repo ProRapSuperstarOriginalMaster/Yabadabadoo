@@ -31,6 +31,8 @@
 
 #include "cs0.h"
 #include "cs2.h"
+#include "scu.h"
+#include "scsp.h"
 #include "smpc.h"
 
 #include "m68kcore.h"
@@ -1662,6 +1664,16 @@ static void *stall_watch(void *arg)
                   fprintf(f, "  tid %08x %s | %s\n", atoi(e->d_name), comm, stat);
                }
                rewinddir(d);
+            }
+            {
+               /* T6: what the emulated hardware was doing (a snapshot) */
+               char info[512];
+               ScuStallInfo(info, sizeof(info));
+               fprintf(f, "  %s\n", info);
+               ScspStallInfo(info, sizeof(info));
+               fprintf(f, "  %s\n", info);
+               Cs2StallInfo(info, sizeof(info));
+               fprintf(f, "  %s\n", info);
             }
             fclose(f);
          }

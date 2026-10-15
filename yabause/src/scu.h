@@ -112,6 +112,7 @@ typedef struct
 } ScuDmaNow_struct;
 
 extern volatile ScuDmaNow_struct ScuDmaNow;
+int ScuStallInfo(char *buf, int size);
 
 typedef struct
 {
