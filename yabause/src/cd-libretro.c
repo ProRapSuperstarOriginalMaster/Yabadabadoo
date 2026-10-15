@@ -247,6 +247,7 @@ typedef struct
    u32 postgap;
    u32 physframeofs;
    u32 chdframeofs;
+   u32 chdfad;
    u32 logframeofs;
    int isZip;
    char* filename;
@@ -1918,8 +1919,9 @@ static int LoadCHD(const char *chd_filename, RFILE *iso_file)
 
   pChdInfo->header = chd_get_header(pChdInfo->chd);
 
-  trk[num_tracks].fad_start = frame + pregap + 150;
-  
+  u32 pos = 150;    // next free FAD on the disc
+  u32 chdofs = 0;   // CHD frame where the next track's stored frames begin
+
   while ( chd_get_metadata(pChdInfo->chd, 0, num_tracks, buf, meta_outlen, &resultlen, &resulttag, &resultflags) == CHDERR_NONE )  {
 
     LOG("track info %s", buf);
@@ -1931,6 +1933,9 @@ static int LoadCHD(const char *chd_filename, RFILE *iso_file)
       sprintf(pg_type, "NONE");
       break;
     case CDROM_TRACK_METADATA2_TAG:
+      pregap = 0;
+      postgap = 0;
+      sprintf(pg_type, "NONE");
       sscanf(buf, CDROM_TRACK_METADATA2_FORMAT, &trak_number, track_type, track_subtype, &frame, &pregap, pg_type, pg_sub_type, &postgap);
       break;
     default:
@@ -2021,41 +2026,23 @@ static int LoadCHD(const char *chd_filename, RFILE *iso_file)
       trk[num_tracks].sector_size = 2352;
     }
    
-    trk[num_tracks].fad_start = trk[num_tracks].fad_start + pregap;
-    trk[num_tracks].fad_end = trk[num_tracks].fad_start + (frame - 1) - pregap;
-    frame = trk[num_tracks].fad_end+1;
+    // The pregap (INDEX 00 to INDEX 01) is stored in the CHD as the track's first frames when
+    // PGTYPE starts with 'V' (chdman does this for a cue whose INDEX 00 is in the file); FRAMES
+    // then includes it. Otherwise (cue PREGAP command) it is a gap the CHD doesn't hold.
+    int pregap_stored = (pg_type[0] == 'V');
+    trk[num_tracks].chdfad = pregap_stored ? pos : pos + pregap;  // first FAD held in the CHD
+    trk[num_tracks].chdframeofs = chdofs;
+    trk[num_tracks].fad_start = pos + pregap;                       // INDEX 01
+    trk[num_tracks].fad_end = trk[num_tracks].chdfad + frame - 1;
+    pos = trk[num_tracks].chdfad + frame + postgap;
+    chdofs += frame + trk[num_tracks].extraframes;  // CHD pads every track to 4 frames
     num_tracks++;
-    trk[num_tracks].fad_start = frame;
   }
   free(buf);
 
-  trk[num_tracks].file_offset = 0;
-  trk[num_tracks].fad_start = 0xFFFFFFFF;
-
-  u32 chdofs = 0;
-  u32 physofs = 0;
-  u32 logofs = 0;
-  int i;
-  for (i = 0; i < num_tracks; i++)
-  {
-    trk[i].logframeofs = logofs;
-    trk[i].physframeofs = physofs;
-    trk[i].chdframeofs = chdofs;
-
-    logofs += trk[i].pregap;
-    logofs += trk[i].postgap;
-    logofs += trk[i].frames;
-
-    physofs += trk[i].frames;
-
-    chdofs += trk[i].frames;
-    chdofs += trk[i].extraframes;
+  if (num_tracks == 0) {
+    return -1;
   }
-  trk[i].logframeofs = logofs;
-  trk[i].physframeofs = physofs;
-  trk[i].chdframeofs = chdofs;
-
-  //trk[num_tracks - 1].fad_end = (pChdInfo->header->logicalbytes - trk[num_tracks - 1].file_offset) / trk[num_tracks - 1].sector_size;
 
   disc.session_num = 1;
   disc.session = malloc(sizeof(session_info_struct) * disc.session_num);
@@ -2065,7 +2052,8 @@ static int LoadCHD(const char *chd_filename, RFILE *iso_file)
     return -1;
   }
   disc.session[0].fad_start = 150;
-  disc.session[0].fad_end = trk[num_tracks - 1].fad_end;
+  // Lead-out = the first FAD after the last track, as LoadBinCue reports it
+  disc.session[0].fad_end = pos;
   disc.session[0].track_num = num_tracks;
   disc.session[0].track = malloc(sizeof(track_info_struct) * disc.session[0].track_num);
   if (disc.session[0].track == NULL)
@@ -2079,8 +2067,7 @@ static int LoadCHD(const char *chd_filename, RFILE *iso_file)
   memcpy(disc.session[0].track, trk, num_tracks * sizeof(track_info_struct));
 
   pChdInfo->hunk_buffer = malloc(pChdInfo->header->hunkbytes);
-  chd_read(pChdInfo->chd, 0, pChdInfo->hunk_buffer);
-  pChdInfo->current_hunk_id = 0;
+  pChdInfo->current_hunk_id = -1;
 
   return 0;
 }
@@ -2088,24 +2075,19 @@ static int LoadCHD(const char *chd_filename, RFILE *iso_file)
 
 static int ISOCDReadSectorFADFromCHD(u32 FAD, void *buffer) {
   int i, j;
-  size_t num_read = 0;
   track_info_struct *track = NULL;
   u32 chdlba;
-  u32 physlba;
-  u32 loglba = FAD - 150;
 
-  chdlba = loglba;
-  for (i = 0; i < disc.session_num; i++)
+  // As the bin/cue path: sectors the image doesn't hold read as zeros, and no subcode
+  memset(buffer, 0, 2448);
+
+  for (i = 0; i < disc.session_num && track == NULL; i++)
   {
     for (j = 0; j < disc.session[i].track_num; j++)
     {
-      if (loglba < disc.session[i].track[j+1].logframeofs) {
-        if ((loglba > disc.session[i].track[j].pregap)) {
-          loglba -= disc.session[i].track[j].pregap;
-        }
-        physlba = disc.session[i].track[j].physframeofs + (loglba - disc.session[i].track[j].logframeofs);
-        chdlba = physlba - disc.session[i].track[j].physframeofs + disc.session[i].track[j].chdframeofs;
-        track = &disc.session[i].track[j];
+      track_info_struct *t = &disc.session[i].track[j];
+      if (FAD >= t->chdfad && FAD - t->chdfad < t->frames) {
+        track = t;
         break;
       }
     }
@@ -2113,15 +2095,21 @@ static int ISOCDReadSectorFADFromCHD(u32 FAD, void *buffer) {
 
   if (track == NULL)
   {
-    CDLOG("Warning: Sector not found in track list");
-    return 0;
+    // A gap the CHD doesn't store (pregap/postgap) or past the lead-out: silence
+    return FAD >= 150;
   }
+
+  chdlba = track->chdframeofs + (FAD - track->chdfad);
 
   int hunkid = (chdlba*CD_FRAME_SIZE) / pChdInfo->header->hunkbytes ;
   int hunk_offset =  (chdlba*CD_FRAME_SIZE) % pChdInfo->header->hunkbytes;
 
   if (pChdInfo->current_hunk_id != hunkid) {
-    chd_read(pChdInfo->chd, hunkid, pChdInfo->hunk_buffer);
+    if (chd_read(pChdInfo->chd, hunkid, pChdInfo->hunk_buffer) != CHDERR_NONE) {
+      pChdInfo->current_hunk_id = -1;
+      CDLOG("Warning: CHD hunk %d unreadable", hunkid);
+      return 0;
+    }
     pChdInfo->current_hunk_id = hunkid;
   }
 
