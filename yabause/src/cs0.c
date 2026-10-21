@@ -1427,6 +1427,17 @@ int CartSaveState(void ** stream)
    // Write cart type
    MemStateWrite((void *)&CartridgeArea->carttype, 4, 1, stream);
 
+#ifdef YAB_SAFETY_TEST
+   // Test build only: YAB_CART_FILL=1 fills the cart RAM with a pattern before
+   // it is saved, to check that a state carries it (U8)
+   if (ramsize && getenv("YAB_CART_FILL"))
+   {
+      u32 i;
+      for (i = 0; i < ramsize; i++)
+         ((u8 *)CartridgeArea->dram)[i] = (u8)((i * 2654435761u) >> 24);
+      fprintf(stderr, "CARTFILL %u bytes\n", (unsigned)ramsize);
+   }
+#endif
    MemStateWrite((void *)&ramsize, 4, 1, stream);
    if (ramsize)
       MemStateWrite(CartridgeArea->dram, ramsize, 1, stream);

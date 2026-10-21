@@ -1465,6 +1465,48 @@ static u32 ScuDmaCount(int level, u32 count)
    return cut;
 }
 
+#ifdef YAB_SAFETY_TEST
+// Test build only (-DYAB_SAFETY_TEST; never in a release): forces one runaway
+// DMA so the U9 guard can be tested, and reports the largest indirect walk.
+// YAB_DMA_TEST=direct:N  the Nth direct DMA gets a ~4 GB byte count
+// YAB_DMA_TEST=indirect:N  the Nth indirect DMA's table loses its end bits
+// YAB_DMA_TEST=entry:N  the Nth indirect DMA's first entry gets a ~4 GB count
+// YAB_DMA_TEST=stall:N  the Nth DMA sleeps 15 s (the freeze watchdog fires, T6)
+#include <string.h>
+#include <unistd.h>
+static int dmatest_mode = -1, dmatest_at, dmatest_calls;
+static u32 dmatest_max_entries, dmatest_max_bytes;
+
+static int ScuDmaTestFires(int indirect)
+{
+   if (dmatest_mode < 0)
+   {
+      const char *e = getenv("YAB_DMA_TEST");
+      dmatest_mode = 0;
+      if (e && !strncmp(e, "direct:", 7)) { dmatest_mode = 1; dmatest_at = atoi(e + 7); }
+      else if (e && !strncmp(e, "indirect:", 9)) { dmatest_mode = 2; dmatest_at = atoi(e + 9); }
+      else if (e && !strncmp(e, "entry:", 6)) { dmatest_mode = 3; dmatest_at = atoi(e + 6); }
+      else if (e && !strncmp(e, "stall:", 6)) { dmatest_mode = 4; dmatest_at = atoi(e + 6); }
+   }
+   if (dmatest_mode == 0 || (dmatest_mode != 4 && (dmatest_mode == 1) == indirect) || dmatest_calls > dmatest_at)
+      return 0;
+   if (++dmatest_calls != dmatest_at)
+      return 0;
+   fprintf(stderr, "DMATEST fired: mode %d on call %d\n", dmatest_mode, dmatest_at);
+   return dmatest_mode;
+}
+
+static void ScuDmaTestMax(u32 entries, u32 bytes)
+{
+   if (entries > dmatest_max_entries || bytes > dmatest_max_bytes)
+   {
+      if (entries > dmatest_max_entries) dmatest_max_entries = entries;
+      if (bytes > dmatest_max_bytes) dmatest_max_bytes = bytes;
+      fprintf(stderr, "DMAMAX entries %u bytes %u\n", (unsigned)dmatest_max_entries, (unsigned)dmatest_max_bytes);
+   }
+}
+#endif
+
 static void FASTCALL ScuDMA(scudmainfo_struct *dmainfo) {
    u8 ReadAdd, WriteAdd;
 
@@ -1503,9 +1545,18 @@ static void FASTCALL ScuDMA(scudmainfo_struct *dmainfo) {
          break;
    }
 
+#ifdef YAB_SAFETY_TEST
+   int dmatest = ScuDmaTestFires((dmainfo->ModeAddressUpdate & 0x1000000) != 0);
+   if (dmatest == 1)
+      dmainfo->TransferNumber = 0xFFE62B86;
+#endif
    ScuDmaNow.level = dmainfo->mode;
    ScuDmaNow.entries = 0;
    ScuDmaNow.active = 1;
+#ifdef YAB_SAFETY_TEST
+   if (dmatest == 4)
+      sleep(15);
+#endif
 
    if (dmainfo->ModeAddressUpdate & 0x1000000) {
       // Indirect DMA
@@ -1516,6 +1567,12 @@ static void FASTCALL ScuDMA(scudmainfo_struct *dmainfo) {
          u32 ThisWriteAddress = MappedMemoryReadLongNocache(MSH2, dmainfo->WriteAddress + 4);
          u32 ThisReadAddress  = MappedMemoryReadLongNocache(MSH2, dmainfo->WriteAddress + 8);
 
+#ifdef YAB_SAFETY_TEST
+         if (dmatest == 3 && ScuDmaNow.entries == 0)
+            ThisTransferSize = 0xFFE62B86;
+         if (dmatest == 2)
+            ThisReadAddress &= 0x7FFFFFFF;
+#endif
          ThisTransferSize = ScuDmaCount(dmainfo->mode, ThisTransferSize);
          if (ScuDmaNow.entries >= SCU_DMA_MAX_ENTRIES || ThisTransferSize > SCU_DMA_MAX_BYTES - bytes)
          {
@@ -1541,6 +1598,9 @@ static void FASTCALL ScuDMA(scudmainfo_struct *dmainfo) {
 
          dmainfo->WriteAddress+= 0xC;
       }
+#ifdef YAB_SAFETY_TEST
+      ScuDmaTestMax(ScuDmaNow.entries, bytes);
+#endif
 
       switch(dmainfo->mode) {
          case 0:
