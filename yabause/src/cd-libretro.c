@@ -403,7 +403,9 @@ static RFILE* fopenInPath(char* filename, char* path){
     *tmp++ = filename[k];
   }
   *tmp++ = '\0';
-  return filestream_open(filepath, RETRO_VFS_FILE_ACCESS_READ, RETRO_VFS_FILE_ACCESS_HINT_NONE);
+  RFILE *ret = filestream_open(filepath, RETRO_VFS_FILE_ACCESS_READ, RETRO_VFS_FILE_ACCESS_HINT_NONE);
+  free(filepath);
+  return ret;
 }
 
 static RFILE* OpenFile(char* buffer, const char* cue) {
@@ -454,6 +456,7 @@ static RFILE* OpenFile(char* buffer, const char* cue) {
 #ifdef ENABLE_CHD
 static int LoadCHD(const char *chd_filename, RFILE *iso_file);
 static int ISOCDReadSectorFADFromCHD(u32 FAD, void *buffer);
+static void CHDClose(void);
 #endif
 
 // Places the tracks of a cue sheet on the disc and returns the lead-out FAD. A file's sectors
@@ -1679,8 +1682,14 @@ static int ISOCDInit(const char * iso) {
 
 //////////////////////////////////////////////////////////////////////////////
 
+track_info_struct *currentTrack = NULL;
+
 static void ISOCDDeInit(void) {
    int i, j, k;
+#ifdef ENABLE_CHD
+   CHDClose();
+#endif
+   currentTrack = NULL;   // points into the track table freed below
    if (disc.session)
    {
       for (i = 0; i < disc.session_num; i++)
@@ -1758,8 +1767,6 @@ static s32 ISOCDReadTOC10(CDInterfaceToc10 *TOC) {
 }
 
 //////////////////////////////////////////////////////////////////////////////
-
-track_info_struct *currentTrack = NULL;
 
 static int ISOCDReadSectorFAD(u32 FAD, void *buffer) {
    int i,j;
@@ -1932,6 +1939,17 @@ typedef struct ChdInfo_ {
 
 ChdInfo * pChdInfo = NULL;
 
+static void CHDClose(void)
+{
+  if (pChdInfo == NULL)
+    return;
+  if (pChdInfo->chd != NULL)
+    chd_close(pChdInfo->chd);
+  free(pChdInfo->hunk_buffer);
+  free(pChdInfo);
+  pChdInfo = NULL;
+}
+
 static int LoadCHD(const char *chd_filename, RFILE *iso_file)
 {
   int trak_number;
@@ -1949,9 +1967,7 @@ static int LoadCHD(const char *chd_filename, RFILE *iso_file)
   u32 resulttag;
   u8 resultflags;
 
-  if (pChdInfo != NULL) {
-    free(pChdInfo);
-  }
+  CHDClose();
 
   pChdInfo = malloc(sizeof(ChdInfo));
   memset(pChdInfo, 0, sizeof(ChdInfo));
@@ -1963,6 +1979,9 @@ static int LoadCHD(const char *chd_filename, RFILE *iso_file)
 
   chd_error error = chd_open(chd_filename, CHD_OPEN_READ, NULL, &pChdInfo->chd);
   if (error != CHDERR_NONE) {
+    pChdInfo->chd = NULL;
+    CHDClose();
+    free(buf);
     return -1;
   }
 
@@ -1988,6 +2007,8 @@ static int LoadCHD(const char *chd_filename, RFILE *iso_file)
       sscanf(buf, CDROM_TRACK_METADATA2_FORMAT, &trak_number, track_type, track_subtype, &frame, &pregap, pg_type, pg_sub_type, &postgap);
       break;
     default:
+      CHDClose();
+      free(buf);
       return -1;
     }
 
@@ -2090,6 +2111,7 @@ static int LoadCHD(const char *chd_filename, RFILE *iso_file)
   free(buf);
 
   if (num_tracks == 0) {
+    CHDClose();
     return -1;
   }
 
@@ -2118,6 +2140,8 @@ static int LoadCHD(const char *chd_filename, RFILE *iso_file)
   pChdInfo->hunk_buffer = malloc(pChdInfo->header->hunkbytes);
   pChdInfo->current_hunk_id = -1;
 
+  // libchdr reads the file itself; the stream ISOCDInit opened is not needed (LoadBinCue closes it too)
+  filestream_close(iso_file);
   return 0;
 }
 
