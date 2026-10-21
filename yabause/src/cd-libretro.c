@@ -249,6 +249,9 @@ typedef struct
    u32 chdframeofs;
    u32 chdfad;
    u32 logframeofs;
+   int index0;       // bin/cue: file frame of INDEX 00 (-1 = none), INDEX 01, first FAD the file holds
+   u32 index1;
+   u32 readfad;
    int isZip;
    char* filename;
    ZipEntry* tr;
@@ -453,19 +456,60 @@ static int LoadCHD(const char *chd_filename, RFILE *iso_file);
 static int ISOCDReadSectorFADFromCHD(u32 FAD, void *buffer);
 #endif
 
+// Places the tracks of a cue sheet on the disc and returns the lead-out FAD. A file's sectors
+// follow the previous file's (and its POSTGAP); inside a file the INDEX times are positions in
+// that file. PREGAP and POSTGAP are gaps no file holds: they move everything after them. A track
+// reads from its INDEX 00 (its pregap, if the file holds it), else its INDEX 01, up to the next
+// track in the same file or the file's last whole sector.
+static u32 BinCueLayout(track_info_struct *trk, int n)
+{
+   u32 filefad = 150;   // FAD of the current file's first sector
+   u32 gap = 0;         // gaps added inside the current file so far
+   int i;
+
+   for (i = 0; i < n; i++)
+   {
+      track_info_struct *t = &trk[i];
+      u32 first = t->index0 >= 0 ? (u32)t->index0 : t->index1;
+      int same_file_next = (i + 1 < n && trk[i+1].file_id == t->file_id);
+      u32 count = 0;
+
+      if (i > 0 && t->file_id != trk[i-1].file_id)
+      {
+         filefad = trk[i-1].fad_end + 1 + trk[i-1].postgap;
+         gap = 0;
+      }
+      gap += t->pregap;
+      t->readfad = filefad + gap + first;
+      t->fad_start = filefad + gap + t->index1;
+      t->file_offset = first * t->sector_size;
+      if (same_file_next)
+      {
+         u32 next = trk[i+1].index0 >= 0 ? (u32)trk[i+1].index0 : trk[i+1].index1;
+         if (next > first)
+            count = next - first;
+      }
+      else if (t->sector_size && (u32)t->file_size > t->file_offset)
+         count = (t->file_size - t->file_offset) / t->sector_size;
+      t->frames = count;
+      t->fad_end = t->readfad + count - 1;
+      if (same_file_next)
+         gap += t->postgap;
+   }
+   return trk[n-1].fad_end + 1 + trk[n-1].postgap;
+}
+
 static int LoadBinCue(const char *cuefilename, RFILE *iso_file)
 {
    long size;
    char* temp_buffer;
    unsigned int track_num = 0;
    unsigned int indexnum, min, sec, frame;
-   unsigned int pregap=0;
    track_info_struct trk[100];
    int i;
    int matched = 0;
    RFILE *trackfp = NULL;
    int trackfp_size = 0;
-   int fad = 150;
    int current_file_id = 0;
 
    memset(trk, 0, sizeof(trk));
@@ -512,10 +556,6 @@ static int LoadBinCue(const char *cuefilename, RFILE *iso_file)
          trackfp_size = filestream_tell(trackfp);
          filestream_seek(trackfp, 0, RETRO_VFS_SEEK_POSITION_START);
          current_file_id++;
-         if(track_num>0) {
-           trk[track_num-1].fad_end = trk[track_num-1].fad_start+(trk[track_num-1].file_size-trk[track_num-1].file_offset)/trk[track_num-1].sector_size;
-           fad = trk[track_num-1].fad_end;
-         }
          continue;
       }
 
@@ -529,6 +569,7 @@ static int LoadBinCue(const char *cuefilename, RFILE *iso_file)
          trk[track_num-1].fp = trackfp;
          trk[track_num-1].file_size = trackfp_size;
          trk[track_num-1].file_id = current_file_id;
+         trk[track_num-1].index0 = -1;
 
          if (strncmp(temp_buffer, "MODE1", 5) == 0 ||
             strncmp(temp_buffer, "MODE2", 5) == 0)
@@ -551,30 +592,24 @@ static int LoadBinCue(const char *cuefilename, RFILE *iso_file)
          if (filestream_scanf(iso_file, "%d %d:%d:%d\r\n", &indexnum, &min, &sec, &frame) == EOF)
             break;
 
-         if (indexnum == 1)
-         {
-            // Update toc entry
-            fad += MSF_TO_FAD(min, sec, frame) + pregap;
-            trk[track_num-1].fad_start = fad;
-            trk[track_num-1].file_offset = MSF_TO_FAD(min, sec, frame) * trk[track_num-1].sector_size;
-            CDLOG("Start[%d] %d\n", track_num, trk[track_num-1].fad_start);
-            if (track_num > 1) {
-              trk[track_num-2].fad_end = trk[track_num-1].fad_start-1;
-              CDLOG("End[%d] %d\n", track_num-1, trk[track_num-2].fad_end);
-            }
-         }
+         if (track_num > 0 && indexnum == 0)
+            trk[track_num-1].index0 = MSF_TO_FAD(min, sec, frame);
+         else if (track_num > 0 && indexnum == 1)
+            trk[track_num-1].index1 = MSF_TO_FAD(min, sec, frame);
       }
       else if (strncmp(temp_buffer, "PREGAP", 6) == 0)
       {
          if (filestream_scanf(iso_file, "%d:%d:%d\r\n", &min, &sec, &frame) == EOF)
             break;
-
-         pregap += MSF_TO_FAD(min, sec, frame);
+         if (track_num > 0)
+            trk[track_num-1].pregap += MSF_TO_FAD(min, sec, frame);
       }
       else if (strncmp(temp_buffer, "POSTGAP", 7) == 0)
       {
          if (filestream_scanf(iso_file, "%d:%d:%d\r\n", &min, &sec, &frame) == EOF)
             break;
+         if (track_num > 0)
+            trk[track_num-1].postgap += MSF_TO_FAD(min, sec, frame);
       }
    }
 
@@ -588,12 +623,8 @@ static int LoadBinCue(const char *cuefilename, RFILE *iso_file)
      return -1;
    }
 
-   trk[track_num-1].fad_end = trk[track_num-1].fad_start+(trk[track_num-1].file_size-trk[track_num-1].file_offset)/trk[track_num-1].sector_size;
-
-   //for (int i =0; i<track_num; i++) printf("Track %d [%d - %d]\n", i+1, trk[i].fad_start, trk[i].fad_end);
-
    disc.session[0].fad_start = 150;
-   disc.session[0].fad_end = trk[track_num-1].fad_end;
+   disc.session[0].fad_end = BinCueLayout(trk, track_num);
    disc.session[0].track_num = track_num;
    disc.session[0].track = malloc(sizeof(track_info_struct) * disc.session[0].track_num);
    if (disc.session[0].track == NULL)
@@ -750,13 +781,11 @@ static int LoadBinCueInZip(const char *filename, RFILE *fp)
    char* temp_buffer;
    unsigned int track_num = 0;
    unsigned int indexnum, min, sec, frame;
-   unsigned int pregap=0;
    track_info_struct trk[100];
    int i;
    int matched = 0;
    char *trackfp = NULL;
    int trackfp_size = 0;
-   int fad = 150;
    int pos;
 
    JZEndRecord* endRecord = (JZEndRecord*)malloc(sizeof(JZEndRecord));
@@ -820,10 +849,6 @@ static int LoadBinCueInZip(const char *filename, RFILE *fp)
          current_file_id++;
          trackfp = strdup(temp_buffer);
          tracktr = f;
-         if(track_num > 0) {
-           trk[track_num-1].fad_end = trk[track_num-1].fad_start+(trk[track_num-1].file_size-trk[track_num-1].file_offset)/trk[track_num-1].sector_size;
-           fad = trk[track_num-1].fad_end;
-         }
          continue;
       }
 
@@ -840,6 +865,7 @@ static int LoadBinCueInZip(const char *filename, RFILE *fp)
          trk[track_num-1].file_size = trackfp_size;
          trk[track_num-1].tr = tracktr;
          trk[track_num-1].file_id = current_file_id;
+         trk[track_num-1].index0 = -1;
 
          if (strncmp(temp_buffer, "MODE1", 5) == 0 ||
             strncmp(temp_buffer, "MODE2", 5) == 0)
@@ -863,31 +889,26 @@ static int LoadBinCueInZip(const char *filename, RFILE *fp)
             break;
          index+= pos;
 
-         if (indexnum == 1)
-         {
-            // Update toc entry
-            fad += MSF_TO_FAD(min, sec, frame) + pregap;
-            trk[track_num-1].fad_start = fad;
-            trk[track_num-1].file_offset = MSF_TO_FAD(min, sec, frame) * trk[track_num-1].sector_size;
-            CDLOG("Start[%d] %d\n", track_num, trk[track_num-1].fad_start);
-            if (track_num > 1) {
-              trk[track_num-2].fad_end = trk[track_num-1].fad_start-1;
-              CDLOG("End[%d] %d\n", track_num-1, trk[track_num-2].fad_end);
-            }
-         }
+         if (track_num > 0 && indexnum == 0)
+            trk[track_num-1].index0 = MSF_TO_FAD(min, sec, frame);
+         else if (track_num > 0 && indexnum == 1)
+            trk[track_num-1].index1 = MSF_TO_FAD(min, sec, frame);
       }
       else if (strncmp(temp_buffer, "PREGAP", 6) == 0)
       {
          if (sscanf(&data[index], "%d:%d:%d\r\n%n", &min, &sec, &frame, &pos) == EOF)
             break;
          index+= pos;
-         pregap += MSF_TO_FAD(min, sec, frame);
+         if (track_num > 0)
+            trk[track_num-1].pregap += MSF_TO_FAD(min, sec, frame);
       }
       else if (strncmp(temp_buffer, "POSTGAP", 7) == 0)
       {
          if (sscanf(&data[index], "%d:%d:%d\r\n%n", &min, &sec, &frame, &pos) == EOF)
             break;
          index+= pos;
+         if (track_num > 0)
+            trk[track_num-1].postgap += MSF_TO_FAD(min, sec, frame);
       }
    }
 
@@ -901,12 +922,8 @@ static int LoadBinCueInZip(const char *filename, RFILE *fp)
      return -1;
    }
 
-   trk[track_num-1].fad_end = trk[track_num-1].fad_start+(trk[track_num-1].file_size-trk[track_num-1].file_offset)/trk[track_num-1].sector_size;
-
-   //for (int i =0; i<track_num; i++) printf("Track %d [%d - %d]\n", i+1, trk[i].fad_start, trk[i].fad_end);
-
    disc.session[0].fad_start = 150;
-   disc.session[0].fad_end = trk[track_num-1].fad_end;
+   disc.session[0].fad_end = BinCueLayout(trk, track_num);
    disc.session[0].track_num = track_num;
    disc.session[0].track = malloc(sizeof(track_info_struct) * disc.session[0].track_num);
    if (disc.session[0].track == NULL)
@@ -1729,6 +1746,9 @@ static int ISOCDReadSectorFAD(u32 FAD, void *buffer) {
    u8* zipBuffer;
    int found = 0;
    int offset = 0;
+   int hit = 0;
+   // bin/cue tracks also hold their pregap (from INDEX 00); other formats start at INDEX 01
+   int bincue = (imgtype == IMG_BINCUE);
 
    assert(disc.session);
 
@@ -1744,10 +1764,11 @@ static int ISOCDReadSectorFAD(u32 FAD, void *buffer) {
    {
       for (j = 0; j < disc.session[i].track_num; j++)
       {
-         if (FAD >= disc.session[i].track[j].fad_start &&
+         if (FAD >= (bincue ? disc.session[i].track[j].readfad : disc.session[i].track[j].fad_start) &&
              FAD <= disc.session[i].track[j].fad_end)
          {
             track_info_struct *track = &disc.session[i].track[j];
+            hit = 1;
             if ((currentTrack != track) || (currentTrack == NULL)){
               currentTrack = track;
               found = 1;
@@ -1766,6 +1787,12 @@ static int ISOCDReadSectorFAD(u32 FAD, void *buffer) {
       }
    }
 
+   if (bincue && !hit)
+   {
+      // A gap no file holds (PREGAP/POSTGAP) or past the lead-out: silence, as the CHD reader
+      return FAD >= 150;
+   }
+
    if (currentTrack == NULL)
    {
       CDLOG("Warning: Sector not found in track list\n");
@@ -1775,7 +1802,7 @@ static int ISOCDReadSectorFAD(u32 FAD, void *buffer) {
      CDLOG("Warning Zip file: Sector not found in track list\n");
      return 0;
    }
-   offset = currentTrack->file_offset + (FAD-currentTrack->fad_start) * currentTrack->sector_size;
+   offset = currentTrack->file_offset + (FAD - (bincue ? currentTrack->readfad : currentTrack->fad_start)) * currentTrack->sector_size;
    
    if (currentTrack->isZip != 1) {
       if (offset > currentTrack->file_size) offset = currentTrack->file_size;
