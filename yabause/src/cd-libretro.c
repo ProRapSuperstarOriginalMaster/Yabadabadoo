@@ -595,7 +595,18 @@ static int LoadBinCue(const char *cuefilename, RFILE *iso_file)
          if (track_num > 0 && indexnum == 0)
             trk[track_num-1].index0 = MSF_TO_FAD(min, sec, frame);
          else if (track_num > 0 && indexnum == 1)
+         {
             trk[track_num-1].index1 = MSF_TO_FAD(min, sec, frame);
+            if (trk[track_num-1].file_id != current_file_id)
+            {
+               // INDEX 00 was at the end of the previous file (the gap is read as that file's
+               // last sectors); the track itself starts in this file
+               trk[track_num-1].fp = trackfp;
+               trk[track_num-1].file_size = trackfp_size;
+               trk[track_num-1].file_id = current_file_id;
+               trk[track_num-1].index0 = -1;
+            }
+         }
       }
       else if (strncmp(temp_buffer, "PREGAP", 6) == 0)
       {
@@ -892,7 +903,18 @@ static int LoadBinCueInZip(const char *filename, RFILE *fp)
          if (track_num > 0 && indexnum == 0)
             trk[track_num-1].index0 = MSF_TO_FAD(min, sec, frame);
          else if (track_num > 0 && indexnum == 1)
+         {
             trk[track_num-1].index1 = MSF_TO_FAD(min, sec, frame);
+            if (trk[track_num-1].file_id != current_file_id)
+            {
+               // INDEX 00 was at the end of the previous file (see LoadBinCue)
+               trk[track_num-1].filename = trackfp;
+               trk[track_num-1].file_size = trackfp_size;
+               trk[track_num-1].tr = tracktr;
+               trk[track_num-1].file_id = current_file_id;
+               trk[track_num-1].index0 = -1;
+            }
+         }
       }
       else if (strncmp(temp_buffer, "PREGAP", 6) == 0)
       {
