@@ -3026,12 +3026,39 @@ static void Vdp2DrawLineScreen(void)
 
 //////////////////////////////////////////////////////////////////////////////
 
+/* Colour calculation per line (U21, Die Hard Arcade): a game may switch CCCTL
+   or change the ratios (CCRNA/CCRNB/CCRR) in the middle of the display, a
+   raster split. The layer setup reads them once, as they are at VBlank-OUT;
+   when they differ between the lines of the display just captured
+   (Vdp2Lines), vidsoft_cc_lines is set and every layer line takes its enable
+   and ratio from its own line (LoadLineParams*). Only then: the lines are a
+   frame old, so a game that changes them during the VBlank (a fade) still
+   sees the change in this frame, as before. Set by VidsoftCheckColorCalcLines
+   before the layer threads are woken. */
+static int vidsoft_cc_lines = 0;
+
+/* info->alpha of a layer: bit = its CCCTL enable bit, ratio = its 5-bit
+   colour calculation ratio */
+static __attribute__((noinline)) int VidsoftLayerAlpha(const Vdp2 *regs, u16 bit, u16 ratio)
+{
+   int alpha;
+   if (regs->CCCTL & (0x200 | bit))
+      alpha = ((~ratio & 0x1F) << 1) + 1;
+   else
+      alpha = 0x3F;
+   if ((regs->CCCTL & (0x200 | bit)) == (0x200 | bit)) alpha |= 0x80;
+   else if ((regs->CCCTL & (0x100 | bit)) == (0x100 | bit)) alpha |= 0x80;
+   return alpha;
+}
+
 static void LoadLineParamsNBG0(vdp2draw_struct * info, screeninfo_struct * sinfo, int line, Vdp2* lines)
 {
    Vdp2 * regs;
 
    regs = Vdp2RestoreRegs(line, lines);
    if (regs == NULL) return;
+   if (vidsoft_cc_lines)
+      info->alpha = VidsoftLayerAlpha(regs, 0x1, regs->CCRNA);
    ReadVdp2ColorOffset(regs, info, 0x1, 0x1);
    info->specialprimode = regs->SFPRMD & 0x3;
    info->enable = regs->BGON & 0x1 || regs->BGON & 0x20;//nbg0 or rbg1
@@ -3131,12 +3158,7 @@ static void Vdp2DrawNBG0(Vdp2* lines, Vdp2* regs, u8* ram, u8* color_ram, struct
 
    info.colornumber = (regs->CHCTLA & 0x70) >> 4;
 
-   if (regs->CCCTL & 0x201)
-      info.alpha = ((~regs->CCRNA & 0x1F) << 1) + 1;
-   else
-      info.alpha = 0x3F;
-   if ((regs->CCCTL & 0x201) == 0x201) info.alpha |= 0x80;
-   else if ((regs->CCCTL & 0x101) == 0x101) info.alpha |= 0x80;
+   info.alpha = VidsoftLayerAlpha(regs, 0x1, regs->CCRNA);
    info.specialcolormode = regs->SFCCMD & 0x3;
    if (regs->SFSEL & 0x1)
       info.specialcode = regs->SFCODE >> 8;
@@ -3190,6 +3212,8 @@ static void LoadLineParamsNBG1(vdp2draw_struct * info, screeninfo_struct * sinfo
 
    regs = Vdp2RestoreRegs(line, lines);
    if (regs == NULL) return;
+   if (vidsoft_cc_lines)
+      info->alpha = VidsoftLayerAlpha(regs, 0x2, regs->CCRNA >> 8);
    ReadVdp2ColorOffset(regs, info, 0x2, 0x2);
    info->specialprimode = (regs->SFPRMD >> 2) & 0x3;
    info->enable = regs->BGON & 0x2;//f1 challenge map when zoomed out
@@ -3244,12 +3268,7 @@ static void Vdp2DrawNBG1(Vdp2* lines, Vdp2* regs, u8* ram, u8* color_ram, struct
       ReadPatternData(&info, regs->PNCN1, regs->CHCTLA & 0x100);
    }
 
-   if (regs->CCCTL & 0x202)
-      info.alpha = ((~regs->CCRNA & 0x1F00) >> 7) + 1;
-   else
-      info.alpha = 0x3F;
-   if ((regs->CCCTL & 0x202) == 0x202) info.alpha |= 0x80;
-   else if ((regs->CCCTL & 0x102) == 0x102) info.alpha |= 0x80;
+   info.alpha = VidsoftLayerAlpha(regs, 0x2, regs->CCRNA >> 8);
    info.specialcolormode = (regs->SFCCMD >> 2) & 0x3;
    if (regs->SFSEL & 0x2)
       info.specialcode = regs->SFCODE >> 8;
@@ -3304,6 +3323,8 @@ static void LoadLineParamsNBG2(vdp2draw_struct * info, screeninfo_struct * sinfo
 
    regs = Vdp2RestoreRegs(line, lines);
    if (regs == NULL) return;
+   if (vidsoft_cc_lines)
+      info->alpha = VidsoftLayerAlpha(regs, 0x4, regs->CCRNB);
    ReadVdp2ColorOffset(regs, info, 0x4, 0x4);
    info->specialprimode = (regs->SFPRMD >> 4) & 0x3;
    info->enable = regs->BGON & 0x4;
@@ -3339,12 +3360,7 @@ static void Vdp2DrawNBG2(Vdp2* lines, Vdp2* regs, u8* ram, u8* color_ram, struct
    info.y = regs->SCYN2 & 0x7FF;
    ReadPatternData(&info, regs->PNCN2, regs->CHCTLB & 0x1);
     
-   if (regs->CCCTL & 0x204)
-      info.alpha = ((~regs->CCRNB & 0x1F) << 1) + 1;
-   else
-      info.alpha = 0x3F;
-   if ((regs->CCCTL & 0x204) == 0x204) info.alpha |= 0x80;
-   else if ((regs->CCCTL & 0x104) == 0x104) info.alpha |= 0x80;
+   info.alpha = VidsoftLayerAlpha(regs, 0x4, regs->CCRNB);
    info.specialcolormode = (regs->SFCCMD >> 4) & 0x3;
    if (regs->SFSEL & 0x4)
       info.specialcode = regs->SFCODE >> 8;
@@ -3384,6 +3400,8 @@ static void LoadLineParamsNBG3(vdp2draw_struct * info, screeninfo_struct * sinfo
 
    regs = Vdp2RestoreRegs(line, lines);
    if (regs == NULL) return;
+   if (vidsoft_cc_lines)
+      info->alpha = VidsoftLayerAlpha(regs, 0x8, regs->CCRNB >> 8);
    ReadVdp2ColorOffset(regs, info, 0x8, 0x8);
    info->specialprimode = (regs->SFPRMD >> 6) & 0x3;
    info->enable = regs->BGON & 0x8;
@@ -3420,12 +3438,7 @@ static void Vdp2DrawNBG3(Vdp2* lines, Vdp2* regs, u8* ram, u8* color_ram, struct
    info.y = regs->SCYN3 & 0x7FF;
    ReadPatternData(&info, regs->PNCN3, regs->CHCTLB & 0x10);
 
-   if (regs->CCCTL & 0x208)
-      info.alpha = ((~regs->CCRNB & 0x1F00) >> 7) + 1;
-   else
-      info.alpha = 0x3F;
-   if ((regs->CCCTL & 0x208) == 0x208) info.alpha |= 0x80;
-   else if ((regs->CCCTL & 0x108) == 0x108) info.alpha |= 0x80;
+   info.alpha = VidsoftLayerAlpha(regs, 0x8, regs->CCRNB >> 8);
    info.specialcolormode = (regs->SFCCMD >> 6) & 0x3;
    if (regs->SFSEL & 0x8)
       info.specialcode = regs->SFCODE >> 8;
@@ -3466,6 +3479,8 @@ static void LoadLineParamsRBG0(vdp2draw_struct * info, screeninfo_struct * sinfo
 
    regs = Vdp2RestoreRegs(line, lines);
    if (regs == NULL) return;
+   if (vidsoft_cc_lines)
+      info->alpha = VidsoftLayerAlpha(regs, 0x10, regs->CCRR);
    ReadVdp2ColorOffset(regs, info, 0x10, 0x10);
    info->specialprimode = (regs->SFPRMD >> 8) & 0x3;
 }
@@ -3560,12 +3575,7 @@ static void Vdp2DrawRBG0(Vdp2* lines, Vdp2* regs, u8* ram, u8* color_ram, struct
       ReadPatternData(&info, regs->PNCR, regs->CHCTLB & 0x100);
    }
 
-   if (regs->CCCTL & 0x210)
-      info.alpha = ((~regs->CCRR & 0x1F) << 1) + 1;
-   else
-      info.alpha = 0x3F;
-   if ((regs->CCCTL & 0x210) == 0x210) info.alpha |= 0x80;
-   else if ((regs->CCCTL & 0x110) == 0x110) info.alpha |= 0x80;
+   info.alpha = VidsoftLayerAlpha(regs, 0x10, regs->CCRR);
    info.specialcolormode = (regs->SFCCMD >> 8) & 0x3;
    if (regs->SFSEL & 0x10)
       info.specialcode = regs->SFCODE >> 8;
@@ -6654,12 +6664,40 @@ int VIDSoftVdp2Reset(void)
 
 //////////////////////////////////////////////////////////////////////////////
 
+/* Sets vidsoft_cc_lines (see there) from the displayed lines of Vdp2Lines and
+   gives Titan their CCCTL; returns the CCCTL that selects the blend mode: the
+   lines' when colour calculation changes inside the display and the lines agree
+   on the mode (bits 8-9), else the register's. A mode that changes inside the
+   display is not drawn per line. */
+static u16 VidsoftCheckColorCalcLines(void)
+{
+   const int n = 224 + (Vdp2Regs->TVMD & 0x30) < 270 ? 224 + (Vdp2Regs->TVMD & 0x30) : 270;
+   const Vdp2 *l = Vdp2Lines;
+   u16 ctl_or = 0, ctl_and = 0xFFFF, diff = 0;
+   int i;
+
+   for (i = 0; i < n; i++)
+   {
+      ctl_or |= l[i].CCCTL;
+      ctl_and &= l[i].CCCTL;
+      diff |= (l[i].CCCTL ^ l[0].CCCTL) | (l[i].CCRNA ^ l[0].CCRNA) |
+              (l[i].CCRNB ^ l[0].CCRNB) | (l[i].CCRR ^ l[0].CCRR);
+   }
+   vidsoft_cc_lines = diff != 0;
+   TitanSetLineColorCalc(vidsoft_cc_lines ? ctl_or : 0);
+   if (vidsoft_cc_lines && (ctl_or & 0x300) == (ctl_and & 0x300))
+      return ctl_or;
+   return Vdp2Regs->CCCTL;
+}
+
 void VIDSoftVdp2DrawStart(void)
 {
    int titanblendmode = TITAN_BLEND_TOP;
+   u16 ccctl;
    if (vdp2_skip_draw) return;
-   if (Vdp2Regs->CCCTL & 0x100) titanblendmode = TITAN_BLEND_ADD;
-   else if (Vdp2Regs->CCCTL & 0x200) titanblendmode = TITAN_BLEND_BOTTOM;
+   ccctl = VidsoftCheckColorCalcLines();
+   if (ccctl & 0x100) titanblendmode = TITAN_BLEND_ADD;
+   else if (ccctl & 0x200) titanblendmode = TITAN_BLEND_BOTTOM;
    TitanSetBlendingMode(titanblendmode);
 
    Vdp2DrawBackScreen();

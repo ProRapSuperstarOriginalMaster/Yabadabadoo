@@ -90,6 +90,10 @@ void TitanSetResolution(int width, int height);
 void TitanGetResolution(int * width, int * height);
 
 void TitanSetBlendingMode(int blend_mode);
+/* CCCTL of every displayed line ORed together, when colour calculation
+   changes inside the display (0 otherwise): the frame then needs full
+   compositing even if the register at VBlank-OUT has it off */
+void TitanSetLineColorCalc(u16 ccctl);
 
 void TitanPutBackHLine(s32 y, u32 color);
 

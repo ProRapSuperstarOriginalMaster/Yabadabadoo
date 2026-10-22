@@ -57,6 +57,7 @@ static struct TitanContext {
     * line_frame matches); 7 unless the writer said otherwise */
    u8 line_maxprio[6][512];
    int blend_mode;       /* TITAN_BLEND_*, selects blend/trans below */
+   u16 line_ccctl;       /* see TitanSetLineColorCalc */
 } tt_context = {
    0,
    { NULL, NULL, NULL, NULL, NULL, NULL },
@@ -560,6 +561,11 @@ void TitanGetResolution(int * width, int * height)
    *height = tt_context.vdp2height;
 }
 
+void TitanSetLineColorCalc(u16 ccctl)
+{
+   tt_context.line_ccctl = ccctl;
+}
+
 void TitanSetBlendingMode(int blend_mode)
 {
    tt_context.blend_mode = (blend_mode == TITAN_BLEND_BOTTOM || blend_mode == TITAN_BLEND_ADD) ? blend_mode : TITAN_BLEND_TOP;
@@ -940,8 +946,8 @@ void TitanRender(pixel_t * dispbuffer)
       return;
    }
 
-   //using color calculation
-   if ((Vdp2Regs->CCCTL & 0x807f) != 0)
+   //using color calculation (on any line, when it changes inside the display)
+   if (((Vdp2Regs->CCCTL | tt_context.line_ccctl) & 0x807f) != 0)
       can_use_simplified_rendering = 0;
 
    //using special priority
