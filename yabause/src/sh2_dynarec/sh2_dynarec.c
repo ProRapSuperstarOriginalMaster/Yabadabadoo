@@ -62,6 +62,18 @@ u32 DynarecReadByte(u32 addr) { return MappedMemoryReadByteNocache(CurrentSH2, a
 u32 DynarecReadWord(u32 addr) { return MappedMemoryReadWordNocache(CurrentSH2, addr); }
 u32 DynarecReadLong(u32 addr) { return MappedMemoryReadLongNocache(CurrentSH2, addr); }
 void DynarecWriteByte(u32 addr, u32 val) { MappedMemoryWriteByteNocache(CurrentSH2, addr, (u8)val); }
+/* Bus wait cycles (master, slave) of reads that are not charged yet: the read
+   handlers can't reach the cycle counter (a host register), so the next CPU
+   switch adds them to the CPU's counter (scsp.c Sh2ScspBusWait). */
+u32 yab_bus_wait[2];
+extern int master_cc, slave_cc;
+static INLINE void DynarecChargeBusWait(void)
+{
+  if (__builtin_expect(yab_bus_wait[0] | yab_bus_wait[1], 0)) {
+    if (CurrentSH2 == MSH2) { master_cc += yab_bus_wait[0]; yab_bus_wait[0] = 0; }
+    else { slave_cc += yab_bus_wait[1]; yab_bus_wait[1] = 0; }
+  }
+}
 #ifdef YAB_KICKYIELD
 /* A CPU wakes the other one by a word write to its FRT input capture (0x21000000 = slave,
    0x21800000 = master; SGL's slave commands). On hardware the woken CPU reacts within a few
@@ -72,7 +84,6 @@ void DynarecWriteByte(u32 addr, u32 val) { MappedMemoryWriteByteNocache(CurrentS
    check ends the slice, and keep the cycles left over in yab_kick[1 + slave], which the switch
    adds back to that CPU's counter (no time lost). */
 u32 yab_kick[3];
-extern int master_cc, slave_cc;
 void DynarecWriteWord(u32 addr, u32 val)
 {
   if (((addr >> 24) & 0xF) == 1) yab_kick[0] = 1;
@@ -86,11 +97,12 @@ void DynarecFRTExec(u32 cycles)
     if (CurrentSH2 == MSH2) { master_cc += yab_kick[1]; yab_kick[1] = 0; }
     else { slave_cc += yab_kick[2]; yab_kick[2] = 0; }
   }
+  DynarecChargeBusWait();
   FRTExec(CurrentSH2, cycles);
 }
 #else
 void DynarecWriteWord(u32 addr, u32 val) { MappedMemoryWriteWordNocache(CurrentSH2, addr, (u16)val); }
-void DynarecFRTExec(u32 cycles) { FRTExec(CurrentSH2, cycles); }
+void DynarecFRTExec(u32 cycles) { DynarecChargeBusWait(); FRTExec(CurrentSH2, cycles); }
 #endif
 void DynarecWriteLong(u32 addr, u32 val) { MappedMemoryWriteLongNocache(CurrentSH2, addr, val); }
 

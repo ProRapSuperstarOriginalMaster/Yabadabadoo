@@ -2735,6 +2735,9 @@ void DMAExec(SH2_struct *sh) {
 
 //////////////////////////////////////////////////////////////////////////////
 
+/* set while the DMA controller copies (its bus accesses are not the CPU's) */
+int sh2_dmac_active;
+
 void DMATransfer(SH2_struct *sh, u32 *CHCR, u32 *SAR, u32 *DAR, u32 *TCR, u32 *VCRDMA)
 {
    int size;
@@ -2743,6 +2746,8 @@ void DMATransfer(SH2_struct *sh, u32 *CHCR, u32 *SAR, u32 *DAR, u32 *TCR, u32 *V
    if (!(*CHCR & 0x2)) { // TE is not set
       int srcInc;
       int destInc;
+
+      sh2_dmac_active = 1;
 
       switch(*CHCR & 0x3000) {
          case 0x0000: srcInc = 0; break;
@@ -2807,6 +2812,7 @@ void DMATransfer(SH2_struct *sh, u32 *CHCR, u32 *SAR, u32 *DAR, u32 *TCR, u32 *V
             *TCR = 0;
             break;
       }
+      sh2_dmac_active = 0;
       SH2WriteNotify(destInc<0?*DAR:*DAR-i*destInc,i*abs(destInc));
    }
 

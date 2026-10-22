@@ -478,6 +478,7 @@ struct SH2Interface_struct
 extern SH2_struct *SH1;
 extern SH2_struct *MSH2;
 extern SH2_struct *SSH2;
+extern int sh2_dmac_active;
 extern SH2Interface_struct *SH2Core;
 
 int SH1Init(int coreid);

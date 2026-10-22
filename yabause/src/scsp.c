@@ -4800,10 +4800,43 @@ SoundRamWriteLong (u32 addr, u32 val)
 
 //////////////////////////////////////////////////////////////////////////////
 
+/* An SH-2 read of the sound chip's area (sound RAM and registers) waits on
+   the slow B-bus: 24 cycles per 16-bit access, as Beetle (Kronos charges 50).
+   Without it the SH-2 polled sound RAM about 3 times too fast, and a game's
+   bounded wait for its sound driver ran out: Daytona USA polls for a
+   handshake at most 100000 times and gave up before the 68K answered, so no
+   sound effects played. The DMA controller's transfers are not charged to the
+   CPU. The recompiler keeps its cycle counter in a host register, so there the
+   wait goes to yab_bus_wait and the next CPU switch charges it
+   (DynarecFRTExec). */
+#define SCSP_SH2_READ_WAIT 24
+#ifdef SH2_DYNAREC
+#include "sh2_dynarec/sh2_dynarec.h"
+extern u32 yab_bus_wait[2];
+#endif
+
+static INLINE void
+Sh2ScspBusWait (SH2_struct *sh, u32 cycles)
+{
+  if (sh2_dmac_active)
+    return;
+#ifdef SH2_DYNAREC
+  if (SH2Core->id == SH2CORE_DYNAREC)
+  {
+    yab_bus_wait[sh != MSH2] += cycles;
+    return;
+  }
+#endif
+  sh->cycles += cycles;
+}
+
+//////////////////////////////////////////////////////////////////////////////
+
 u8 FASTCALL
 Sh2ScspReadByte(SH2_struct *sh, u32 addr)
 {
    M68KJobWait();
+   Sh2ScspBusWait(sh, SCSP_SH2_READ_WAIT);
    return ScspReadByte(addr);
 }
 
@@ -4822,6 +4855,7 @@ u16 FASTCALL
 Sh2ScspReadWord(SH2_struct *sh, u32 addr)
 {
    M68KJobWait();
+   Sh2ScspBusWait(sh, SCSP_SH2_READ_WAIT);
    return ScspReadWord(addr);
 }
 
@@ -4840,6 +4874,7 @@ u32 FASTCALL
 Sh2ScspReadLong(SH2_struct *sh, u32 addr)
 {
    M68KJobWait();
+   Sh2ScspBusWait(sh, 2 * SCSP_SH2_READ_WAIT);
    return ScspReadLong(addr);
 }
 
@@ -4858,6 +4893,7 @@ u8 FASTCALL
 Sh2SoundRamReadByte(SH2_struct *sh, u32 addr)
 {
    M68KJobWait();
+   Sh2ScspBusWait(sh, SCSP_SH2_READ_WAIT);
    return SoundRamReadByte(addr);
 }
 
@@ -4876,6 +4912,7 @@ u16 FASTCALL
 Sh2SoundRamReadWord(SH2_struct *sh, u32 addr)
 {
    M68KJobWait();
+   Sh2ScspBusWait(sh, SCSP_SH2_READ_WAIT);
    return SoundRamReadWord(addr);
 }
 
@@ -4894,6 +4931,7 @@ u32 FASTCALL
 Sh2SoundRamReadLong(SH2_struct *sh, u32 addr)
 {
    M68KJobWait();
+   Sh2ScspBusWait(sh, 2 * SCSP_SH2_READ_WAIT);
    return SoundRamReadLong(addr);
 }
 
