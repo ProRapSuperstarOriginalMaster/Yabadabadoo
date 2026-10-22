@@ -80,9 +80,12 @@ void DynarecWriteWord(u32 addr, u32 val)
 }
 void DynarecFRTExec(u32 cycles)
 {
-  yab_kick[0] = 0;
-  if (CurrentSH2 == MSH2) { master_cc += yab_kick[1]; yab_kick[1] = 0; }
-  else { slave_cc += yab_kick[2]; yab_kick[2] = 0; }
+  /* runs at every CPU switch: the bookkeeping only after a kick */
+  if (__builtin_expect(yab_kick[0] | yab_kick[1] | yab_kick[2], 0)) {
+    yab_kick[0] = 0;
+    if (CurrentSH2 == MSH2) { master_cc += yab_kick[1]; yab_kick[1] = 0; }
+    else { slave_cc += yab_kick[2]; yab_kick[2] = 0; }
+  }
   FRTExec(CurrentSH2, cycles);
 }
 #else
