@@ -2082,8 +2082,8 @@ scsp_slot_set_b (u32 s, u32 a, u8 d)
       return;
 
     case 0x0C: // STWINH/SDIR
-      slot->sdir = d & 2;
-      slot->swe = d & 1;
+      slot->sdir = d & 1;
+      slot->swe = (d >> 1) & 1;
       return;
 
     case 0x0D: // TL
@@ -2333,8 +2333,8 @@ scsp_slot_set_w (u32 s, s32 a, u16 d)
       return;
 
     case 0x0C: // STWINH/SDIR
-      slot->sdir = (d >> 8) & 2;
-      slot->swe = (d >> 8) & 1;
+      slot->sdir = (d >> 8) & 1;
+      slot->swe = (d >> 9) & 1;
       slot->tl = scsp_tl_table[(d & 0xFF)];
       return;
 
@@ -3504,6 +3504,60 @@ scsp_slot_update_F_E_16B_LR (slot_t *slot)
 }
 
 ////////////////////////////////////////////////////////////////
+// Sound direct (SDIR): the sample goes out without envelope, total level
+// and amplitude LFO, as on the chip. The envelope still runs (it ends the
+// voice and is what the EG monitor reads).
+
+static void
+scsp_slot_update_sdir (slot_t *slot)
+{
+  s32 out;
+  const int fm = slot->lfofms != 31, em = slot->lfoems != 31;
+  const int l = slot->disll != 31, r = slot->dislr != 31;
+
+  for (; scsp_buf_pos < scsp_buf_len; scsp_buf_pos++)
+    {
+      if (slot->pcm8b)
+        {
+          SCSP_GET_OUT_8B
+          out <<= 8;
+        }
+      else
+        {
+          SCSP_GET_OUT_16B
+        }
+      if (em)
+        {
+          SCSP_GET_ENV_LFO
+        }
+      else
+        {
+          SCSP_GET_ENV
+        }
+
+      out <<= SCSP_ENV_HB;
+      if (l)
+        scsp_bufL[scsp_buf_pos] += out >> slot->disll;
+      if (r)
+        scsp_bufR[scsp_buf_pos] += out >> slot->dislr;
+
+      if (fm)
+        {
+          SCSP_UPDATE_PHASE_LFO
+        }
+      else
+        {
+          SCSP_UPDATE_PHASE
+        }
+      SCSP_UPDATE_ENV
+      if (fm || em)
+        {
+          SCSP_UPDATE_LFO
+        }
+    }
+}
+
+////////////////////////////////////////////////////////////////
 // Update functions
 
 static void (*scsp_slot_update_p[2][2][2][2][2])(slot_t *slot) =
@@ -3681,11 +3735,14 @@ scsp_update_slots (s32 *bufL, s32 *bufR, u32 len)
 
       // SCSPLOG("update : VL=%d  VR=%d CNT=%.8X STEP=%.8X\n", slot->disll, slot->dislr, slot->fcnt, slot->finc);
 
-      scsp_slot_update_p[(slot->lfofms == 31) ? 0 : 1]
-         [(slot->lfoems == 31) ? 0 : 1]
-      [(slot->pcm8b == 0) ? 1 : 0]
-      [(slot->disll == 31) ? 0 : 1]
-      [(slot->dislr == 31) ? 0 : 1](slot);
+      if (slot->sdir)
+         scsp_slot_update_sdir(slot);
+      else
+         scsp_slot_update_p[(slot->lfofms == 31) ? 0 : 1]
+            [(slot->lfoems == 31) ? 0 : 1]
+         [(slot->pcm8b == 0) ? 1 : 0]
+         [(slot->disll == 31) ? 0 : 1]
+         [(slot->dislr == 31) ? 0 : 1](slot);
    }
 }
 
