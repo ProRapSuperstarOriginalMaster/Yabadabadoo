@@ -3797,13 +3797,123 @@ scsp_mix_cdda (s32 *bufL, s32 *bufR, u32 n, u32 start)
    }
 }
 
+/* Level and pan of a DSP output or external input, as slots 0-17's
+   EFSDL/EFPAN set them: 1.14 fixed point per channel (Beetle's
+   SDL_PAN_ToVolume) */
+static void
+scsp_sdl_pan_volume (s32 *vol, unsigned level, unsigned pan)
+{
+   s32 basev = level ? 0x80 << level : 0;
+   s32 panv = basev >> ((pan & 0x0F) >> 1);
+   if (pan & 0x01)
+      panv -= panv >> 2;
+   if ((pan & 0x0F) == 0x0F)
+      panv = 0;
+   vol[(pan & 0x10) ? 1 : 0] = panv;
+   vol[(pan & 0x10) ? 0 : 1] = basev;
+}
+
+/* Does the DSP program read the external input (the CD audio)? */
+static int
+scsp_dsp_reads_exts (void)
+{
+   int i;
+   for (i = 0; i < 128; i++)
+   {
+      u64 w = dsp_inf.get_mpro(i);
+      u32 ira = (u32)(w >> 38) & 0x3F;
+      if ((ira == 0x30 || ira == 0x31) && ((w >> 47) & 1 || (w >> 19) & 1))
+         return 1;
+   }
+   return 0;
+}
+
+/* The chip's output stage after the voices: the CD audio (external input)
+   at the level and pan of slots 16 and 17 (EFSDL/EFPAN), then the master
+   volume (MVOL, -3 dB a step) and DAC18B (the whole output x 4), as Beetle
+   does. Games that set the CD below full level or use DAC18B (Daytona USA,
+   Virtua Cop) had their music too loud and their effects too quiet. The DSP
+   is not run, so when the CD only reaches the output through it (EFSDL of
+   slots 16 and 17 both 0 and the program reads the input: Virtua Cop), the
+   CD is added unscaled after this stage, as before: a fallback, not the
+   chip. With MVOL 15, DAC18B off and the CD at full level panned left to
+   left and right to right, this is the plain mix. */
+static void
+scsp_mix_output (s32 *bufL, s32 *bufR, u32 len, u32 cdlen, u32 cdstart)
+{
+   u16 r16 = *(u16 *)&scsp_isr[(16 * 0x20 + 0x16) ^ 2];
+   u16 r17 = *(u16 *)&scsp_isr[(17 * 0x20 + 0x16) ^ 2];
+   unsigned l16 = (r16 >> 5) & 7, l17 = (r17 >> 5) & 7;
+   // scsp_set_w/b keep the raw register at its full address (0x400 ^ 2)
+   int dac18 = (*(u16 *)&scsp_ccr[0x400 ^ 2] >> 8) & 1;
+   int plain_cd = l16 == 7 && l17 == 7 && (r16 & 0x1F) == 0x1F && (r17 & 0x1F) == 0x0F;
+   int fallback = 0;
+   u32 i;
+
+   if (plain_cd || (!l16 && !l17 && (fallback = scsp_dsp_reads_exts())))
+      ;
+   else if (cdlen)
+   {
+      s32 v16[2], v17[2];
+      u32 pos = 0, start = cdstart;
+      scsp_sdl_pan_volume(v16, l16, r16 & 0x1F);
+      scsp_sdl_pan_volume(v17, l17, r17 & 0x1F);
+      while (pos < cdlen)
+      {
+         u8 *buf = &cddabuf.data[start];
+         u32 this_len = cdlen - pos, target;
+         if (this_len > (sizeof(cddabuf.data) - start) / 4)
+            this_len = (sizeof(cddabuf.data) - start) / 4;
+         target = pos + this_len;
+         for (; pos < target; pos++, buf += 4)
+         {
+            s32 l = (s16)((buf[1] << 8) | buf[0]);
+            s32 r = (s16)((buf[3] << 8) | buf[2]);
+            bufL[pos] += ((l * v16[0]) >> 14) + ((r * v17[0]) >> 14);
+            bufR[pos] += ((l * v16[1]) >> 14) + ((r * v17[1]) >> 14);
+         }
+         start = (start + this_len * 4) % sizeof(cddabuf.data);
+      }
+   }
+   if (plain_cd)
+      scsp_mix_cdda(bufL, bufR, cdlen, cdstart);
+
+   if (scsp.mvol != 15 || dac18)
+   {
+      s32 mv = 0x2 << (scsp.mvol >> 1);
+      if (!(scsp.mvol & 1))
+         mv -= mv >> 2;
+      if (!scsp.mvol)
+         mv = 0;
+      for (i = 0; i < len; i++)
+      {
+         s32 l = (bufL[i] * mv) >> 8, r = (bufR[i] * mv) >> 8;
+         l = l < -0x8000 ? -0x8000 : l > 0x7FFF ? 0x7FFF : l;
+         r = r < -0x8000 ? -0x8000 : r > 0x7FFF ? 0x7FFF : r;
+         if (dac18)
+         {
+            // Beetle shifts into 16 bits (wraps above 8191); clamped here
+            l <<= 2;
+            r <<= 2;
+            l = l < -0x8000 ? -0x8000 : l > 0x7FFF ? 0x7FFF : l;
+            r = r < -0x8000 ? -0x8000 : r > 0x7FFF ? 0x7FFF : r;
+         }
+         bufL[i] = l;
+         bufR[i] = r;
+      }
+   }
+
+   if (fallback)
+      scsp_mix_cdda(bufL, bufR, cdlen, cdstart);
+}
+
 void
 scsp_update (s32 *bufL, s32 *bufR, u32 len)
 {
    u32 start, n;
    scsp_update_slots(bufL, bufR, len);
    n = scsp_take_cdda(len, &start);
-   scsp_mix_cdda(bufL, bufR, n, start);
+   scsp_mix_output(bufL, bufR, len, n, start);
 }
 
 void
@@ -5246,7 +5356,7 @@ M68KQueueRunOne (void)
     memset(bufL, 0, sizeof(u32) * m68kq_gen[g].len);
     memset(bufR, 0, sizeof(u32) * m68kq_gen[g].len);
     scsp_update_slots(bufL, bufR, m68kq_gen[g].len);
-    scsp_mix_cdda(bufL, bufR, m68kq_gen[g].cdlen, m68kq_gen[g].cdstart);
+    scsp_mix_output(bufL, bufR, m68kq_gen[g].len, m68kq_gen[g].cdlen, m68kq_gen[g].cdstart);
     scsp_update_monitor();
     break;
   }
