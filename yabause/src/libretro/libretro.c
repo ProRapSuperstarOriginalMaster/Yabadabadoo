@@ -771,10 +771,10 @@ void retro_get_system_info(struct retro_system_info *info)
 #endif
 #ifdef YABADABADOO_DEV
    info->library_name     = "Yabadabadoo Dev";
-   info->library_version  = "0.2-dev (Yabause 0.9.15)" GIT_VERSION;
+   info->library_version  = "0.3-dev (Yabause 0.9.15)" GIT_VERSION;
 #else
    info->library_name     = "Yabadabadoo";
-   info->library_version  = "0.2 (Yabause 0.9.15)" GIT_VERSION;
+   info->library_version  = "0.3 (Yabause 0.9.15)" GIT_VERSION;
 #endif
    info->need_fullpath    = true;
    info->block_extract    = true;
