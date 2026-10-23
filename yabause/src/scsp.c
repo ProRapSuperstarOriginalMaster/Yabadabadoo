@@ -4002,6 +4002,9 @@ scsp_midi_out_read (void)
 ////////////////////////////////////////////////////////////////
 // Access
 
+void FASTCALL scsp_w_w (u32 a, u16 d);
+u16 FASTCALL scsp_r_w (u32 a);
+
 void FASTCALL
 scsp_w_b (u32 a, u8 d)
 {
@@ -4028,6 +4031,15 @@ scsp_w_b (u32 a, u8 d)
   else if (a < 0x700)
     {
 
+    }
+  else if (a < 0xC00)
+    {
+      // DSP coefficients, addresses and program: merged into the word
+      // (they live in dsp_inf, which only the word path updates)
+      u16 w = scsp_r_w (a & ~1);
+      w = (a & 1) ? ((w & 0xFF00) | d) : ((w & 0x00FF) | (d << 8));
+      scsp_w_w (a & ~1, w);
+      return;
     }
   else if (a < 0xee4)
     {
@@ -4170,6 +4182,15 @@ scsp_w_d (u32 a, u32 d)
   else if (a < 0x700)
     {
 
+    }
+  else if (a < 0xC00)
+    {
+      // DSP coefficients, addresses and program: two word writes (a long
+      // write used to land only in scsp_dcr, so programs written with long
+      // writes, e.g. Virtua Cop's, were mostly lost)
+      scsp_w_w (a + 0, d >> 16);
+      scsp_w_w (a + 2, d & 0xFFFF);
+      return;
     }
   else if (a < 0xee4)
     {
