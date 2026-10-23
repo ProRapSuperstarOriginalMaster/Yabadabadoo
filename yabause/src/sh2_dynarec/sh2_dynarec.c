@@ -2202,8 +2202,10 @@ void imm8_assemble(int i,struct regstat *i_regs)
     t=get_reg(i_regs->regmap,rt1[i]);
     //assert(t>=0);
     if(t>=0) {
+      // MOV #imm,Rn: the sign-extended immediate itself (constant propagation
+      // usually covers this; a branch into a delay slot does not)
       if(!((i_regs->isdoingcp>>t)&1))
-        emit_movimm(imm[i]<<16,t);
+        emit_movimm(imm[i],t);
     }
   }
 }
