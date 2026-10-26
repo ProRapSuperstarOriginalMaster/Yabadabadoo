@@ -599,10 +599,10 @@ void Vdp2VBlankOUT(void) {
       int vblank_change = 0;
       if (Vdp1External.changerequest && VIDCore->id == 2 /* VIDCORE_SOFT */)
       {
-         extern void VIDSoftVdp1SwapFrameBuffer(void);
+         extern void VIDSoftVdp1SwapAtVBlankOut(void);
          Vdp1External.changerequest = 0;
          vdp1_draw_pending = 1;
-         VIDSoftVdp1SwapFrameBuffer();
+         VIDSoftVdp1SwapAtVBlankOut();
          vblank_change = 1;
       }
       Vdp2LinesCatchUp(vblank_change);

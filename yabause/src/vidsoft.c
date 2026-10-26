@@ -4374,6 +4374,15 @@ static void VidsoftVdp1NoteSwap(int swapped)
       vdp1_since_swap++;
 }
 
+/* A frame change asked for during the VBlank, taken at VBlank-OUT (vdp2.c):
+ * it belongs to the VBlank-IN before it, which counted no change */
+void VIDSoftVdp1SwapAtVBlankOut(void)
+{
+   if (vdp1_since_swap > 0)
+      vdp1_since_swap--;
+   VIDSoftVdp1SwapFrameBuffer();
+}
+
 void VIDSoftVdp1DrawStart()
 {
    if (vidsoft_vdp1_thread_enabled)
