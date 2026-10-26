@@ -144,6 +144,13 @@ pixel_t *dispbuffer=NULL;
 u8 *vdp1framebuffer[2]= { NULL, NULL };
 u8 *vdp1frontframebuffer;
 u8 *vdp1backframebuffer;
+/* Exact skip (vdp2.c, where both are defined: this file sits at GCC's inlining
+   limit). Bumped when the shown sprite picture may change: a frame change or
+   a new framebuffer mode (how the buffer is read); a deferred draw into the
+   shown buffer counts in vdp1_st_run. */
+extern u32 vidsoft_vdp1_front_gen;
+/* the field whose picture is on screen: drawn, or skipped as unchanged */
+extern u32 vdp2_picture_frame;
 u8 sprite_window_mask[704 * 512];
 
 static int vdp1width;
@@ -460,7 +467,8 @@ static int vdp1_lazy_active;              /* this frame: skipping with exact VDP
 static int vdp1_lazy_defer;               /* this frame's draws are deferred */
 static int vdp1_lazy_next_shown;          /* the next frame is shown */
 static int vdp1_swap_gap = 1, vdp1_since_swap; /* frames between frame changes */
-static unsigned long vdp1_st_eager, vdp1_st_captured, vdp1_st_replaced, vdp1_st_run, vdp1_st_sync, vdp1_st_backoffs;
+static unsigned long vdp1_st_eager, vdp1_st_captured, vdp1_st_replaced, vdp1_st_sync, vdp1_st_backoffs;
+unsigned long vdp1_st_run;   /* also read by vdp2.c (exact skip) */
 static int vdp1_lazy_shown, vdp1_lazy_misses, vdp1_lazy_backoff;
 
 /* With less VDP1 work than this per frame a second thread costs more than
@@ -3783,6 +3791,7 @@ int VIDSoftInit(void)
 
    vdp1backframebuffer = vdp1framebuffer[0];
    vdp1frontframebuffer = vdp1framebuffer[1];
+   vidsoft_vdp1_front_gen++;
    {
       int i;
       for (i = 0; i < 2; i++)
@@ -4065,6 +4074,7 @@ static void VidsoftVdp1SetMode(const Vdp1 *regs)
       it composes the frame's sprites: let it finish first, so it sees what
       the single-thread path sees */
    YabFlagWait(&vidsoft_thread_context.draw_finished[TITAN_SPRITE]);
+   vidsoft_vdp1_front_gen++;
    vdp1interlace = interlace;
    vdp1width = width;
    vdp1height = height;
@@ -7249,8 +7259,7 @@ void VIDSoftVdp2DrawEnd(void)
     * again: half the picture was frozen or black). Repeat this field's
     * lines over them instead. */
    {
-      static u32 last_drawn_frame;
-      if (vdp2_interlace && vdp2_frame_number - last_drawn_frame != 1)
+      if (vdp2_interlace && vdp2_frame_number - vdp2_picture_frame != 1)
       {
          int start_line, line_increment, y;
          Vdp2GetInterlaceInfo(&start_line, &line_increment);
@@ -7262,7 +7271,6 @@ void VIDSoftVdp2DrawEnd(void)
                       vdp2width * sizeof(pixel_t));
          }
       }
-      last_drawn_frame = vdp2_frame_number;
    }
 
    VIDSoftVdp1SwapFrameBuffer();
@@ -7538,6 +7546,7 @@ void VIDSoftVdp1SwapFrameBuffer(void)
       temp = vdp1frontframebuffer;
       vdp1frontframebuffer = vdp1backframebuffer;
       vdp1backframebuffer = temp;
+      vidsoft_vdp1_front_gen++;
       Vdp1External.manualchange = 0;
    }
 }

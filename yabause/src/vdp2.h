@@ -441,6 +441,11 @@ void DisableAutoFrameSkip(void);
 #define VDP2_FRAMESKIP_ALL       2 /* skip all rendering */
 void Vdp2SetExternalFrameSkip(int mode);
 void Vdp2SetExternalFrameSkipNext(int next_shown, int lazy);
+/* Exact skip of unchanged fields (vdp2.c) */
+void Vdp2ExactSkipInvalidate(void);
+void Vdp2SetExactSkipAllowed(int allowed);
+void Vdp2ExactSkipVerifyPicture(const u16 *pic, int width, int height);
+extern u32 vdp2_exact_dupes;
 void Vdp2RestoreVideoCore(void);
 void Vdp2SetVdp1DrawEveryFrame(int every);
 extern int vdp2_skip_draw;

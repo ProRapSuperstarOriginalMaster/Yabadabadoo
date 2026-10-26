@@ -66,6 +66,7 @@ int game_width;
 int game_height;
 
 static bool one_frame_rendered = false;
+static bool can_dupe = false;   /* RETRO_ENVIRONMENT_GET_CAN_DUPE */
 static bool hle_bios_force = false;
 /* No BIOS found and one is required: instead of the game, show a screen
  * saying where to put one (see no_bios_run()) */
@@ -738,6 +739,7 @@ void YuiSwapBuffers(void)
 
    game_width  = current_width;
    game_height = current_height;
+   Vdp2ExactSkipVerifyPicture((const u16 *)dispbuffer, current_width, current_height);
 
 #ifdef YABADABADOO_DEV
    {
@@ -1447,6 +1449,9 @@ void retro_init(void)
    if (environ_cb(RETRO_ENVIRONMENT_GET_LOG_INTERFACE, &log))
       log_cb = log.log;
 
+   if (!environ_cb(RETRO_ENVIRONMENT_GET_CAN_DUPE, &can_dupe))
+      can_dupe = false;
+
    if (environ_cb(RETRO_ENVIRONMENT_GET_PERF_INTERFACE, &perf_cb))
       perf_get_cpu_features_cb = perf_cb.get_cpu_features;
 
@@ -2021,6 +2026,9 @@ void retro_run(void)
 {
    unsigned i;
    bool updated     = false;
+#ifdef YABADABADOO_DEV
+   u32 exact_dupes_before;
+#endif
    if (no_bios_screen)
    {
       no_bios_run();
@@ -2056,6 +2064,7 @@ void retro_run(void)
    {
       int prev_multitap[2] = {multitap[0],multitap[1]};
       check_variables();
+      Vdp2ExactSkipInvalidate();
       if(PERCore && (prev_multitap[0] != multitap[0] || prev_multitap[1] != multitap[1]))
          PERCore->Init();
    }
@@ -2103,6 +2112,15 @@ void retro_run(void)
     * frame was rendered, which dropped all audio on skipped frames */
    audio_size = soundlen;
 
+   /* The picture of the next call is decided (drawn or skipped as unchanged)
+    * at this call's VBlank-OUT. A session log hashes the first picture drawn
+    * at or after every 60th call: that one is drawn, as it would be without
+    * the exact skip, so recordings and replays hash the same calls. */
+#ifdef YABADABADOO_DEV
+   Vdp2SetExactSkipAllowed(!devsession_picture_wanted_next());
+   exact_dupes_before = vdp2_exact_dupes;
+#endif
+
    //YabauseExec(); runs from handle events
    if(PERCore)
       PERCore->HandleEvents();
@@ -2111,11 +2129,14 @@ void retro_run(void)
     * pointer but stores the size and pitch passed here, and its screenshots
     * and save-state thumbnails read them: pitch 0 gave row 0 repeated down
     * the image. game_width/height are still those of the last rendered
-    * frame, which is what dispbuffer holds. */
+    * frame, which is what dispbuffer holds. A frontend that can't dupe gets
+    * that picture again. */
    if(!one_frame_rendered)
-      video_cb(NULL, game_width, game_height, game_width * 2);
+      video_cb(can_dupe ? NULL : dispbuffer, game_width, game_height, game_width * 2);
 #ifdef YABADABADOO_DEV
-   devsession_run_end(one_frame_rendered, (const uint16_t *)dispbuffer, game_width, game_height);
+   /* 2: the picture didn't change, it wasn't drawn again (exact skip) */
+   devsession_run_end(one_frame_rendered ? 1 : vdp2_exact_dupes != exact_dupes_before ? 2 : 0,
+                      (const uint16_t *)dispbuffer, game_width, game_height);
 #endif
 #if defined(__linux__) && defined(__arm__)
    crash_in_run = 0;

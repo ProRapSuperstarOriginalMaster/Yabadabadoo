@@ -24,6 +24,11 @@
 #include "../threads.h"
 
 #include <stdlib.h>
+#include <string.h>
+
+/* see TitanRenderInputsSame */
+static u16 tt_render_regs[8];
+static int tt_render_regs_valid;
 
 /* private */
 typedef u32 (*TitanBlendFunc)(u32 top, u32 bottom);
@@ -461,6 +466,8 @@ int TitanInit()
 {
    int i;
    const int reinit = tt_context.inited;
+
+   tt_render_regs_valid = 0;
 
    if (! tt_context.inited)
    {
@@ -928,6 +935,31 @@ void TitanRenderThreads(pixel_t * dispbuffer, int can_use_simplified)
    }
 }
 
+/* What TitanRender and the line renderers read from the live registers (at
+   VBlank-IN), as they were at its last run: the exact skip (vdp2.c) asks
+   whether compositing the kept layers again would read the same. Anything
+   they come to read from Vdp2Regs must be added here, as it is read. */
+static void TitanReadRenderRegs(u16 *r)
+{
+   r[0] = Vdp2Regs->SPCTL & 0x10;
+   r[1] = ((Vdp2Regs->CCCTL | tt_context.line_ccctl) & 0x807f) != 0;
+   r[2] = (Vdp2Regs->SFPRMD & 0x3ff) != 0;
+   r[3] = (Vdp2Regs->LNCLEN & 0x1f) != 0;
+   r[4] = (Vdp2Regs->SDCTL & 0x13F) != 0;
+   r[5] = Vdp2Regs->PRINA & 0x707;
+   r[6] = Vdp2Regs->PRINB & 0x707;
+   r[7] = Vdp2Regs->PRIR & 0x7;
+}
+
+int TitanRenderInputsSame(void)
+{
+   u16 r[8];
+   if (!tt_render_regs_valid)
+      return 0;
+   TitanReadRenderRegs(r);
+   return !memcmp(r, tt_render_regs, sizeof(r));
+}
+
 #ifdef YAB_PROFILE
 void TitanRenderBody(pixel_t * dispbuffer);
 void TitanRender(pixel_t * dispbuffer) { YAB_PROF_BEGIN(PROF_TITAN); TitanRenderBody(dispbuffer); YAB_PROF_END(PROF_TITAN); }
@@ -945,6 +977,8 @@ void TitanRender(pixel_t * dispbuffer)
    {
       return;
    }
+   TitanReadRenderRegs(tt_render_regs);
+   tt_render_regs_valid = 1;
 
    //using color calculation (on any line, when it changes inside the display)
    if (((Vdp2Regs->CCCTL | tt_context.line_ccctl) & 0x807f) != 0)
