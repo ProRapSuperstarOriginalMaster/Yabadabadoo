@@ -113,7 +113,8 @@ than releases: if you just want to play, use the latest release.
 A beta installs next to the release, not over it. Extract its zip at the root of the SD card: it
 adds "Saturn (beta)" to Onion's Expert section, with its own core file
 (`yabadabadoo_beta_libretro.so`) and its own settings, saves and save states (the
-`Yabadabadoo Beta` folders). Your release install and its saves are not touched. To try a
+`Yabadabadoo Beta` folders). Your release install and its saves are not touched. If your game
+list has no Expert tab, turn it on in Onion's Tweaks app (user interface settings: show the Expert tab). To try a
 release save state in the beta, copy it from `Saves/CurrentProfile/states/Yabadabadoo` to
 `Saves/CurrentProfile/states/Yabadabadoo Beta`; a state saved by a beta may not load in an older
 release. To remove a beta, delete `RApp/yabadabadoo_beta` and
