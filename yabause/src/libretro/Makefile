@@ -73,6 +73,16 @@ ifeq ($(DEV),1)
 	TARGET_NAME = yabadabadoo_dev
 	FLAGS += -DYABADABADOO_DEV
 endif
+# BETA=1 BETA_VERSION=0.4-beta.N: a public beta build, release code with its own identity next to
+# the release one (yabadabadoo_beta_libretro.so, shown as "Yabadabadoo Beta", own settings and
+# saves). The version comes from the beta's tag (v0.4-beta.N), so the source needs no edit per beta.
+ifeq ($(BETA),1)
+ifeq ($(BETA_VERSION),)
+$(error BETA=1 needs BETA_VERSION, e.g. BETA_VERSION=0.4-beta.1)
+endif
+	TARGET_NAME = yabadabadoo_beta
+	FLAGS += -DYABADABADOO_BETA -DBETA_VERSION=\"$(BETA_VERSION)\"
+endif
 CC_AS ?= $(CC)
 GIT_VERSION := " $(shell git rev-parse --short HEAD || echo unknown)"
 ifneq ($(GIT_VERSION)," unknown")

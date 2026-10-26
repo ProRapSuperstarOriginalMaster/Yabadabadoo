@@ -772,6 +772,9 @@ void retro_get_system_info(struct retro_system_info *info)
 #ifdef YABADABADOO_DEV
    info->library_name     = "Yabadabadoo Dev";
    info->library_version  = "0.3-dev (Yabause 0.9.15)" GIT_VERSION;
+#elif defined(YABADABADOO_BETA)
+   info->library_name     = "Yabadabadoo Beta";
+   info->library_version  = BETA_VERSION " (Yabause 0.9.15)" GIT_VERSION;
 #else
    info->library_name     = "Yabadabadoo";
    info->library_version  = "0.3 (Yabause 0.9.15)" GIT_VERSION;

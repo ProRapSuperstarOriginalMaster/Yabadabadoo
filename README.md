@@ -103,6 +103,25 @@ units. If you've ever had a black screen and a frozen Miyoo when starting a game
 creates the file again at 1600 MHz. If Yabadabadoo has always run fine on your device, your
 clock stays where it is, and you don't need to update.
 
+## Beta builds
+
+Between releases, every update of the `dev` branch is published as a beta on the
+[releases page](https://github.com/ProRapSuperstarOriginalMaster/Yabadabadoo/releases), marked
+"Pre-release" and named like `0.4-beta.3`. Betas get fixes to you sooner, but they are less tested
+than releases: if you just want to play, use the latest release.
+
+A beta installs next to the release, not over it. Extract its zip at the root of the SD card: it
+adds "Saturn (beta)" to Onion's Expert section, with its own core file
+(`yabadabadoo_beta_libretro.so`) and its own settings, saves and save states (the
+`Yabadabadoo Beta` folders). Your release install and its saves are not touched. To try a
+release save state in the beta, copy it from `Saves/CurrentProfile/states/Yabadabadoo` to
+`Saves/CurrentProfile/states/Yabadabadoo Beta`; a state saved by a beta may not load in an older
+release. To remove a beta, delete `RApp/yabadabadoo_beta` and
+`RetroArch/.retroarch/cores/yabadabadoo_beta_libretro.*`.
+
+When you report a problem with a beta, include its version string (RetroArch: Information >
+Core Information), e.g. `0.4-beta.3 (Yabause 0.9.15) 1a2b3c4d5`.
+
 ## Known issues
 
 - FMV's in some games still have some unresolved hiccups
@@ -127,6 +146,10 @@ https://github.com/shauninman/union-miyoomini-toolchain
 3. To make the release zip (on any machine with `zip`):
 
        packaging/make-onion-zip.sh yabause/src/libretro/yabadabadoo_libretro.so yabadabadoo.zip
+
+   A beta is built from its tag (`v0.4-beta.N`) with
+   `make platform=miyoomini -j4 BETA=1 BETA_VERSION=0.4-beta.N` and packaged with
+   `packaging/make-onion-beta-zip.sh yabause/src/libretro/yabadabadoo_beta_libretro.so 0.4-beta.N out.zip`.
 
 ## License
 
