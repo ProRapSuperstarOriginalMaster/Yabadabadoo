@@ -495,22 +495,31 @@ void SpeedThrottleDisable(void) {
    every register it changed into the lines, from line 0 up to the first line
    where that register changed during the display (mid-frame changes stay).
    All of them, not just BGON: a new scene's layers need their new plane
-   addresses too (Princess Crown, loading: garbage tiles otherwise). Nothing
-   is carried when BGON stayed: games pair fades (colour offsets) with VDP1
-   pictures, which reach the screen a frame late here as well (Sega Rally:
-   carrying fades over made its brightness flicker). */
-static void Vdp2LinesCatchUp(void)
+   addresses too (Princess Crown, loading: garbage tiles otherwise). Without
+   a scene switch nothing is carried, as games pair fades (colour offsets)
+   with VDP1 pictures, which reach the screen a frame late here when the
+   frame change is asked for at line 0 (Sega Rally: carrying fades over made
+   its brightness flicker). The exception is a frame change asked for during
+   the VBlank (vblank_change, see Vdp2VBlankOUT): that VDP1 picture is shown
+   on time, so the registers written in the same VBlank must be too (Die Hard
+   Arcade writes its colour offsets there; held a frame they lit the
+   background a field after the muzzle flash). Then only registers that
+   stayed the same through the last display are carried: one that changed
+   during it is a raster split, whose line-0 value the game writes after
+   this point (Die Hard's CCCTL). */
+static void Vdp2LinesCatchUp(int vblank_change)
 {
    const u16 *now = (const u16 *)Vdp2Regs;
    const u16 *before = (const u16 *)&vdp2_vblank_regs;
    int last = yabsys.VBlankLineCount < 270 ? yabsys.VBlankLineCount : 270;
-   int i, line;
+   int i, line, scene;
 
    if (!vdp2_vblank_regs_valid)
       return;
    vdp2_vblank_regs_valid = 0;
 
-   if (Vdp2Regs->BGON == vdp2_vblank_regs.BGON || Vdp2Regs->BGON == Vdp2Lines[0].BGON)
+   scene = !(Vdp2Regs->BGON == vdp2_vblank_regs.BGON || Vdp2Regs->BGON == Vdp2Lines[0].BGON);
+   if (!scene && !vblank_change)
       return;
 
    for (i = 0; i < (int)(sizeof(Vdp2) / sizeof(u16)); i++)
@@ -518,6 +527,12 @@ static void Vdp2LinesCatchUp(void)
       u16 old = ((u16 *)&Vdp2Lines[0])[i];
       if (now[i] == before[i] || now[i] == old)
          continue;
+      if (!scene)
+      {
+         for (line = 0; line < last && ((u16 *)&Vdp2Lines[line])[i] == before[i]; line++);
+         if (line < last)
+            continue;
+      }
       for (line = 0; line < last && ((u16 *)&Vdp2Lines[line])[i] == old; line++)
          ((u16 *)&Vdp2Lines[line])[i] = now[i];
    }
@@ -572,7 +587,26 @@ void Vdp2VBlankOUT(void) {
       vdp2_saved_vidcore = NULL;
    }
 
-   Vdp2LinesCatchUp();
+   /* VBlank-IN takes a manual frame change asked for before it; one asked
+      for during the VBlank (Die Hard Arcade: FBCR=3 in its VBlank-IN
+      interrupt) is taken here, before anything is drawn, as Beetle swaps at
+      the first HBlank after the VBlank. Otherwise it waited for the next
+      VBlank-IN while the list was drawn now: the sprites reached the screen
+      a field before the scroll and colour offsets written with the request.
+      Only for the software renderer (VIDDummy, "skip sprites too" frameskip,
+      keeps the old timing). */
+   {
+      int vblank_change = 0;
+      if (Vdp1External.changerequest && VIDCore->id == 2 /* VIDCORE_SOFT */)
+      {
+         extern void VIDSoftVdp1SwapFrameBuffer(void);
+         Vdp1External.changerequest = 0;
+         vdp1_draw_pending = 1;
+         VIDSoftVdp1SwapFrameBuffer();
+         vblank_change = 1;
+      }
+      Vdp2LinesCatchUp(vblank_change);
+   }
 
    if (VIDCore->id == 2 /* VIDCORE_SOFT */)
    {
