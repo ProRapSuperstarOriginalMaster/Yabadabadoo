@@ -4923,6 +4923,23 @@ void system_assemble(int i,struct regstat *i_regs)
     emit_addimm_and_set_flags(CLOCK_DIVIDER*(ccadj[i]+cycles[i]),HOST_CCREG);
     //add_stub(CC_STUB,(int)out,jump_vaddr_reg[slave][t],0,i,-1,TAKEN,0); // FIXME
     //emit_jns(0);
+    if((source[i]&0xFF00)!=0xC300) {
+      // An invalid opcode: its handler may be junk too, and ILLEGAL -> handler ->
+      // ILLEGAL would never reach a cycle check. End the slice here when the
+      // cycles are used up (as do_ccstub does for a register jump).
+      pointer slow=(pointer)out;
+      emit_jns(0);
+      emit_jmp(jump_vaddr_reg[slave][t]);
+      set_jump_target(slow,(pointer)out);
+      emit_writeword(t,slave?(int)&slave_pc:(int)&master_pc);
+      if(slave) {
+        emit_load_return_address(SLAVERA_REG);
+        emit_jmp((pointer)cc_interrupt);
+      }
+      else
+        emit_call((pointer)slave_entry);
+      emit_readword(slave?(int)&slave_pc:(int)&master_pc,t);
+    }
     emit_jmp(jump_vaddr_reg[slave][t]);
   }
 }
@@ -5881,6 +5898,7 @@ int sh2_recompile_block(int addr)
   int i,j;
   int done=0;
   unsigned int type,mode,op,op2,op3;
+  int illegal;
   unsigned int lastconst=0;
   unsigned int writelimit=0xFFFFFFFF;
   u32 p_constmap[SH2_REGS];
@@ -6190,6 +6208,12 @@ int sh2_recompile_block(int addr)
       case 0x0D: strcpy(insn[i],"MOV.L"); type=PCREL; break;
       case 0x0E: strcpy(insn[i],"MOV"); type=IMM8; break;
       default: strcpy(insn[i],"???"); type=NI; break;
+    }
+    // An invalid opcode takes the illegal instruction exception (vector 4), as
+    // in the interpreter: compiled as TRAPA #4. In a delay slot it stays a no-op.
+    illegal=0;
+    if(type==NI&&!(i>0&&(itype[i-1]==UJUMP||itype[i-1]==RJUMP||itype[i-1]==SJUMP))) {
+      strcpy(insn[i],"ILLEGAL"); type=SYSTEM; opcode[i]=op=12; op2=op3=0; illegal=1;
     }
     itype[i]=type;
     addrmode[i]=mode;
@@ -6518,7 +6542,7 @@ int sh2_recompile_block(int addr)
           //rs2[i]=CCREG;
           rs2[i]=VBR;
           rs3[i]=15; // Stack pointer
-          imm[i]=(unsigned int)((unsigned char)source[i]);
+          imm[i]=illegal?4:(unsigned int)((unsigned char)source[i]);
           cycles[i]=8;
         }
         else { // SLEEP
@@ -6670,6 +6694,15 @@ int sh2_recompile_block(int addr)
   }
   slen=i;
   assert(slen>0);
+  // A branch in the delay slot that ends the block (illegal on the SH-2: only
+  // junk does this, e.g. a CPU running through memory being overwritten) has no
+  // slot of its own; compile it as an invalid opcode instead of failing below.
+  if(slen>1&&(itype[slen-1]==UJUMP||itype[slen-1]==SJUMP||itype[slen-1]==RJUMP)
+           &&(itype[slen-2]==UJUMP||itype[slen-2]==SJUMP||itype[slen-2]==RJUMP)) {
+    itype[slen-1]=NI;
+    rs1[slen-1]=rs2[slen-1]=rs3[slen-1]=rt1[slen-1]=rt2[slen-1]=-1;
+    ba[slen-1]=-1;
+  }
 
   /* Pass 2 - Register dependencies and branch targets */
 
