@@ -354,6 +354,11 @@ void nullf(const char *format, ...) {}
 #define inv_debug nullf
 
 
+// The hash_table bin of a block's key (the SH-2 address; the slave's key is
+// address + 1). linkage_arm.s computes the same function in jump_vaddr,
+// jump_vaddr_slave and dyna_linker: keep them in step.
+static INLINE u32 ht_index(u32 vaddr) { return ((vaddr >> 16) ^ vaddr) & 0xFFFF; }
+
 // Get address from virtual address
 // This is called from the recompiled BRAF/BSRF instructions
 void *get_addr(u32 vaddr)
@@ -369,7 +374,7 @@ void *get_addr(u32 vaddr)
     if(head->vaddr==vaddr) {
   //printf("TRACE: count=%d next=%d (get_addr match %x: %x)\n",Count,next_interupt,vaddr,(int)head->addr);
   //printf("TRACE: (get_addr match %x: %x)\n",vaddr,(int)head->addr);
-      u32 *ht_bin=hash_table[((vaddr>>16)^vaddr)&0xFFFF];
+      u32 *ht_bin=hash_table[ht_index(vaddr)];
       ht_bin[3]=ht_bin[1];
       ht_bin[2]=ht_bin[0];
       ht_bin[1]=(int)head->addr;
@@ -419,7 +424,7 @@ void *get_addr(u32 vaddr)
             cached_code_words[((vstart<4194304?vstart:((vstart|0x400000)&0x7fffff))+i)>>5]|=1<<(((vstart+i)>>2)&7);
           }
         }
-        ht_bin=hash_table[((vaddr>>16)^vaddr)&0xFFFF];
+        ht_bin=hash_table[ht_index(vaddr)];
         if(ht_bin[0]==vaddr) {
           ht_bin[1]=(int)head->addr; // Replace existing entry
         }
@@ -444,7 +449,7 @@ void *get_addr_ht(u32 vaddr)
 {
   //printf("TRACE: count=%d next=%d (get_addr_ht %x)\n",Count,next_interupt,vaddr);
   //if(vaddr>>12==0x60a0) printf("TRACE: (get_addr_ht %x)\n",vaddr);
-  u32 *ht_bin=hash_table[((vaddr>>16)^vaddr)&0xFFFF];
+  u32 *ht_bin=hash_table[ht_index(vaddr)];
   //if(vaddr>>12==0x60a0) printf("%x %x %x %x\n",ht_bin[0],ht_bin[1],ht_bin[2],ht_bin[3]);
   if(ht_bin[0]==vaddr) return (void *)ht_bin[1];
   if(ht_bin[2]==vaddr) return (void *)ht_bin[3];
@@ -851,7 +856,7 @@ void *check_addr(u32 vaddr)
 {
   struct ll_entry *head;
   u32 page;
-  u32 *ht_bin=hash_table[((vaddr>>16)^vaddr)&0xFFFF];
+  u32 *ht_bin=hash_table[ht_index(vaddr)];
   if(ht_bin[0]==vaddr) {
     if(((ht_bin[1]-MAX_OUTPUT_BLOCK_SIZE-(u32)out)<<(32-TARGET_SIZE_2))>0x60000000+(MAX_OUTPUT_BLOCK_SIZE<<(32-TARGET_SIZE_2)))
       if(isclean(ht_bin[1])) return (void *)ht_bin[1];
@@ -896,7 +901,7 @@ void *check_addr(u32 vaddr)
 void remove_hash(int vaddr)
 {
   //printf("remove hash: %x\n",vaddr);
-  u32 *ht_bin=hash_table[(((vaddr)>>16)^vaddr)&0xFFFF];
+  u32 *ht_bin=hash_table[ht_index(vaddr)];
   if(ht_bin[2]==vaddr) {
     ht_bin[2]=ht_bin[3]=-1;
   }
@@ -1187,7 +1192,7 @@ void clean_blocks(u32 page)
               //printf("page=%x, addr=%x\n",page,head->vaddr);
               //assert(head->vaddr>>12==(page|0x80000));
               ll_add_nodup(jump_in+page,head->vaddr,clean_addr);
-              ht_bin=hash_table[((head->vaddr>>16)^head->vaddr)&0xFFFF];
+              ht_bin=hash_table[ht_index(head->vaddr)];
               if(ht_bin[0]==head->vaddr) {
                 ht_bin[1]=(int)clean_addr; // Replace existing entry
               }
@@ -8595,7 +8600,7 @@ int sh2_recompile_block(int addr)
         // replace it with the new address.
         // Don't add new entries.  We'll insert the
         // ones that actually get used in check_addr().
-        ht_bin=hash_table[((vaddr>>16)^vaddr)&0xFFFF];
+        ht_bin=hash_table[ht_index(vaddr)];
         if(ht_bin[0]==vaddr) {
           ht_bin[1]=entry_point;
         }
