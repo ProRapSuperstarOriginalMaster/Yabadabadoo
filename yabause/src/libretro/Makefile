@@ -683,8 +683,10 @@ endif
 # LTO=1: whole-core optimisation at link time (LTO_JOBS parallel partitions).
 # PGO=gen: an instrumented core that writes its profile (.gcda files) under PGO_DIR when the
 # process exits; PGO=use: build with that profile. The .gcda names follow the object paths
-# (PGO_DIR/../x.c.gcda for ../x.c.o, so they land in pgo-profile/), and the use build must run
-# in the same directory as the gen build.
+# (PGO_DIR/../x.c.gcda for ../x.c.o, so they land in pgo-profile/); a use build finds them in
+# any tree laid out like the gen build's, and stops (coverage-mismatch) when the source moved on.
+# -fprofile-use also turns on loop unrolling, which changed a few pictures in one test state
+# (unexplained); the use build keeps it off.
 LTO_JOBS ?= 4
 PGO_DIR ?= $(CURDIR)/pgo-profile/o
 ifeq ($(PGO),gen)
@@ -692,8 +694,8 @@ ifeq ($(PGO),gen)
 	CXXFLAGS += -fprofile-generate=$(PGO_DIR) -fprofile-update=atomic
 	LDFLAGS += -fprofile-generate=$(PGO_DIR)
 else ifeq ($(PGO),use)
-	CFLAGS += -fprofile-use=$(PGO_DIR) -fprofile-correction
-	CXXFLAGS += -fprofile-use=$(PGO_DIR) -fprofile-correction
+	CFLAGS += -fprofile-use=$(PGO_DIR) -fprofile-correction -fno-unroll-loops -fno-peel-loops
+	CXXFLAGS += -fprofile-use=$(PGO_DIR) -fprofile-correction -fno-unroll-loops -fno-peel-loops
 endif
 ifeq ($(LTO),1)
 	CFLAGS += -flto
