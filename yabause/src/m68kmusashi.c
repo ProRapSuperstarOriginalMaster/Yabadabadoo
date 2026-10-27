@@ -133,7 +133,8 @@ static int idle_nloops;
 static u32 idle_clock;                   /* counts slices, for replacing the least recently used loop */
 static u32 probe_wait, probe_interval = 16;   /* probe_wait: 68K cycles since the last probe */
 static u32 relearn_interval = IDLE_REPROBE;   /* doubles while relearning fails */
-static u32 relearn_sig = 0xFFFFFFFF;           /* the loop's inputs at the previous slice */
+static u32 relearn_sig = 0xFFFFFFFF;           /* the loop's inputs when last compared */
+static u32 relearn_wait;                       /* 68K cycles run since then */
 
 /* A line's 68K chunks that scsp.c runs one right after the other, with
    nothing else run in between (M68KMusashiIdleChain). Once one of them is
@@ -661,6 +662,7 @@ void M68KMusashiIdleReset(void)
    relearn_interval = IDLE_REPROBE;
    idle_nloops = 0;
    probe_wait = 0;
+   relearn_wait = 0;
    probe_interval = 16;
 }
 
@@ -713,12 +715,17 @@ static s32 FASTCALL M68KMusashiExec(s32 cycle) {
       /* it runs, from where the skipped time has got to */
       idle_resume_all();
       probe_wait += cycle;
-      if (relearn)
+      relearn_wait += cycle;
+      if (relearn && relearn_wait < PROBE_SLICE)
+         relearn = NULL;
+      else if (relearn)
       {
-         /* relearn once its inputs have stayed the same for a slice: while
-            they change, the driver is busy and a probe would not find it
-            idle */
+         /* relearn once its inputs have stayed the same for a line's 68K
+            time: while they change, the driver is busy and a probe would
+            not find it idle (compared every call, a tenth of a line, the
+            probes started in busy code and ran three times as long) */
          u32 sig = 0x9E3779B9;
+         relearn_wait = 0;
          for (i = 0; i < relearn->nreads; i++)
             sig = (sig ^ idle_read(relearn->raddr[i], relearn->rsize[i])) * 0x01000193;
          if (sig != relearn_sig)
