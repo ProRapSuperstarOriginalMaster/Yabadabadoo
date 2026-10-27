@@ -5894,6 +5894,314 @@ void SH2DynarecVramWrite(int r, u32 addr, u32 size)
   }
 }
 
+// Pass 4: cull unused host registers (needed_reg[], and drop allocations
+// that are never used). A host register that holds nothing in the maps a
+// loop below tests (-1 in each) can only be affected through values that
+// are the same for every such register, so those loops work out that
+// effect once per instruction and run their per-register tests only for
+// the occupied registers: the same result in a third of the steps.
+static void cull_unused_regs(void)
+{
+  int i;
+  u64 nr=0;
+  
+  for (i=slen-1;i>=0;i--)
+  {
+    int hr;
+    u32 free_em=0,free_pem=0,m;
+    // free_em: entry and current map both -1; free_pem: also the pre map
+    for(hr=0;hr<HOST_REGS;hr++) {
+      if((regs[i].regmap_entry[hr]&regs[i].regmap[hr])==-1) {
+        free_em|=1<<hr;
+        if(regmap_pre[i][hr]==-1) free_pem|=1<<hr;
+      }
+    }
+    if(itype[i]==RJUMP||itype[i]==UJUMP||itype[i]==CJUMP||itype[i]==SJUMP)
+    {
+      if(ba[i]<start || ba[i]>=(start+slen*2))
+      {
+        // Branch out of this block, don't need anything
+        nr=0;
+      }
+      else
+      {
+        // Internal branch
+        // Need whatever matches the target
+        int t=(ba[i]-start)>>1;
+        nr=0;
+        for(hr=0;hr<HOST_REGS;hr++)
+        {
+          if(regs[i].regmap_entry[hr]>=0) {
+            if(regs[i].regmap_entry[hr]==regs[t].regmap_entry[hr]) nr|=1<<hr;
+          }
+        }
+      }
+      // Conditional branch may need registers for following instructions
+      if(itype[i]==SJUMP)
+      {
+        if(i<slen-2) {
+          nr|=needed_reg[i+2];
+          for(hr=0;hr<HOST_REGS;hr++)
+          {
+            if(regmap_pre[i+2][hr]>=0&&get_reg(regs[i+2].regmap_entry,regmap_pre[i+2][hr])<0) nr&=~(1<<hr);
+            //if((regmap_entry[i+2][hr])>=0) if(!((nr>>hr)&1)) printf("%x-bogus(%d=%d)\n",start+i*2,hr,regmap_entry[i+2][hr]);
+          }
+        }
+      }
+      else if(itype[i]==CJUMP)
+      {
+        if(i<slen-2) {
+          nr|=needed_reg[i+1];
+          for(hr=0;hr<HOST_REGS;hr++)
+          {
+            if(regmap_pre[i+1][hr]>=0&&get_reg(regs[i+1].regmap_entry,regmap_pre[i+1][hr])<0) nr&=~(1<<hr);
+            //if((regmap_entry[i+2][hr])>=0) if(!((nr>>hr)&1)) printf("%x-bogus(%d=%d)\n",start+i*2,hr,regmap_entry[i+2][hr]);
+          }
+        }
+      }
+      // Don't need stuff which is overwritten
+      for(hr=0;hr<HOST_REGS;hr++) {
+        if(regs[i].regmap[hr]!=regmap_pre[i][hr]) nr&=~(1<<hr);
+        if(regs[i].regmap[hr]<0) nr&=~(1<<hr);
+      }
+      // Merge in delay slot
+      if(itype[i]!=CJUMP) {
+      if((rt1[i+1]>=0&&rt1[i+1]==(-1&63))||(rt2[i+1]>=0&&rt2[i+1]==(-1&63))) nr&=~(u64)free_pem;
+      for(m=~free_pem&((1<<HOST_REGS)-1);m;m&=m-1)
+      {
+        hr=__builtin_ctz(m);
+        // These are overwritten by the delay slot
+        if(rt1[i+1]>=0&&rt1[i+1]==(regs[i].regmap[hr]&63)) nr&=~(1<<hr);
+        if(rt2[i+1]>=0&&rt2[i+1]==(regs[i].regmap[hr]&63)) nr&=~(1<<hr);
+        if(rs1[i+1]>=0&&rs1[i+1]==regmap_pre[i][hr]) nr|=1<<hr;
+        if(rs2[i+1]>=0&&rs2[i+1]==regmap_pre[i][hr]) nr|=1<<hr;
+        if(rs3[i+1]>=0&&rs3[i+1]==regmap_pre[i][hr]) nr|=1<<hr;
+        if(rs1[i+1]>=0&&rs1[i+1]==regs[i].regmap_entry[hr]) nr|=1<<hr;
+        if(rs2[i+1]>=0&&rs2[i+1]==regs[i].regmap_entry[hr]) nr|=1<<hr;
+        if(rs3[i+1]>=0&&rs3[i+1]==regs[i].regmap_entry[hr]) nr|=1<<hr;
+        //if(dep1[i+1]&&!((unneeded_reg_upper[i]>>dep1[i+1])&1)) {
+        //  if(dep1[i+1]==(regmap_pre[i][hr]&63)) nr|=1<<hr;
+        //  if(dep2[i+1]==(regmap_pre[i][hr]&63)) nr|=1<<hr;
+        //}
+        //if(dep2[i+1]&&!((unneeded_reg_upper[i]>>dep2[i+1])&1)) {
+        //  if(dep1[i+1]==(regs[i].regmap_entry[hr]&63)) nr|=1<<hr;
+        //  if(dep2[i+1]==(regs[i].regmap_entry[hr]&63)) nr|=1<<hr;
+        //}
+        if(regs[i].regmap_entry[hr]==SR) nr|=1<<hr;
+        if(regs[i].regmap[hr]==SR) nr|=1<<hr;
+        if(regmap_pre[i][hr]==SR) nr|=1<<hr;
+      }
+      }
+    }
+    else if(itype[i]==SYSTEM)
+    {
+      // TRAPA instruction (software interrupt)
+      nr=0;
+      for(hr=0;hr<HOST_REGS;hr++)
+      {
+        // Source registers are needed
+        if(regmap_pre[i][hr]==15) nr|=1<<hr;
+        if(regmap_pre[i][hr]==SR) nr|=1<<hr;
+        if(regmap_pre[i][hr]==VBR) nr|=1<<hr;
+        if(regmap_pre[i][hr]==CCREG) nr|=1<<hr;
+        if(regs[i].regmap_entry[hr]==15) nr|=1<<hr;
+        if(regs[i].regmap_entry[hr]==SR) nr|=1<<hr;
+        if(regs[i].regmap_entry[hr]==VBR) nr|=1<<hr;
+        if(regs[i].regmap_entry[hr]==CCREG) nr|=1<<hr;
+      }
+    }
+    else // Non-branch
+    {
+      if(i<slen-1) {
+        for(hr=0;hr<HOST_REGS;hr++) {
+          if(regs[i].regmap[hr]<0) {nr&=~(1<<hr);continue;}
+          if(regmap_pre[i+1][hr]>=0&&get_reg(regs[i+1].regmap_entry,regmap_pre[i+1][hr])<0) nr&=~(1<<hr);
+          if(regs[i].regmap[hr]!=regmap_pre[i+1][hr]) nr&=~(1<<hr);
+          if(regs[i].regmap[hr]!=regmap_pre[i][hr]) nr&=~(1<<hr);
+        }
+      }
+    }
+    if((rt1[i]>=0&&rt1[i]==(-1&63))||(rt2[i]>=0&&rt2[i]==(-1&63))) nr&=~(u64)free_pem;
+    for(m=~free_pem&((1<<HOST_REGS)-1);m;m&=m-1)
+    {
+      hr=__builtin_ctz(m);
+      // Overwritten registers are not needed
+      if(rt1[i]>=0&&rt1[i]==(regs[i].regmap[hr]&63)) nr&=~(1<<hr);
+      if(rt2[i]>=0&&rt2[i]==(regs[i].regmap[hr]&63)) nr&=~(1<<hr);
+      // Source registers are needed
+      if(rs1[i]>=0&&rs1[i]==regmap_pre[i][hr]) nr|=1<<hr;
+      if(rs2[i]>=0&&rs2[i]==regmap_pre[i][hr]) nr|=1<<hr;
+      if(rs3[i]>=0&&rs3[i]==regmap_pre[i][hr]) nr|=1<<hr;
+      if(rs1[i]>=0&&rs1[i]==regs[i].regmap_entry[hr]) nr|=1<<hr;
+      if(rs2[i]>=0&&rs2[i]==regs[i].regmap_entry[hr]) nr|=1<<hr;
+      if(rs3[i]>=0&&rs3[i]==regs[i].regmap_entry[hr]) nr|=1<<hr;
+      //if(dep1[i]&&!((unneeded_reg_upper[i]>>dep1[i])&1)) {
+      //  if(dep1[i]==(regmap_pre[i][hr]&63)) nr|=1<<hr;
+      //  if(dep1[i]==(regs[i].regmap_entry[hr]&63)) nr|=1<<hr;
+      //}
+      //if(dep2[i]&&!((unneeded_reg_upper[i]>>dep2[i])&1)) {
+      //  if(dep2[i]==(regmap_pre[i][hr]&63)) nr|=1<<hr;
+      //  if(dep2[i]==(regs[i].regmap_entry[hr]&63)) nr|=1<<hr;
+      //}
+      if(regs[i].regmap_entry[hr]==SR) nr|=1<<hr;
+      if(regs[i].regmap[hr]==SR) nr|=1<<hr;
+      if(regmap_pre[i][hr]==SR) nr|=1<<hr;
+      // Don't store a register immediately after writing it,
+      // may prevent dual-issue.
+      // But do so if this is a branch target, otherwise we
+      // might have to load the register before the branch.
+      if(i>0&&!bt[i]&&((regs[i].wasdirty>>hr)&1)) {
+        if(regmap_pre[i][hr]>=0&&!((unneeded_reg[i]>>regmap_pre[i][hr])&1)) {
+          if(rt1[i-1]==(regmap_pre[i][hr]&63)) nr|=1<<hr;
+          if(rt2[i-1]==(regmap_pre[i][hr]&63)) nr|=1<<hr;
+        }
+        if(regs[i].regmap_entry[hr]>=0&&!((unneeded_reg[i]>>regs[i].regmap_entry[hr])&1)) {
+          if(rt1[i-1]==(regs[i].regmap_entry[hr]&63)) nr|=1<<hr;
+          if(rt2[i-1]==(regs[i].regmap_entry[hr]&63)) nr|=1<<hr;
+        }
+      }
+    }
+    // Cycle count is needed at branches.  Assume it is needed at the target too.
+    if(i==0||bt[i]||itype[i]==CJUMP||itype[i]==SJUMP) {
+      if(regmap_pre[i][HOST_CCREG]==CCREG) nr|=1<<HOST_CCREG;
+      if(regs[i].regmap_entry[HOST_CCREG]==CCREG) nr|=1<<HOST_CCREG;
+    }
+    // Save it
+    needed_reg[i]=nr;
+    
+    // Deallocate unneeded registers. Outside branches, a register free in the
+    // entry and current maps is left alone unless every operand and temporary
+    // of the instruction is a register (then -1 matches none of them).
+    m=0;
+    if(itype[i]!=RJUMP&&itype[i]!=UJUMP&&itype[i]!=SJUMP&&itype[i]!=CJUMP) {
+      int temp1=-1,temp2=-1;
+      if(itype[i]==LOAD || itype[i]==STORE || itype[i]==RMW ||
+         itype[i]==PCREL || itype[i]==SYSTEM )
+        temp1=MOREG;
+      if(itype[i]==COMPLEX) {
+        temp1=MACH;
+        temp2=MACL;
+      }
+      else if(itype[i]==SYSTEM) {
+        temp2=CCREG;
+      }
+      if(i==0||rt1[i]==-1||rt2[i]==-1||rs1[i]==-1||rs2[i]==-1||rs3[i]==-1||temp1==-1||temp2==-1)
+        m=free_em;
+    }
+    for(m=~(u32)nr&~m&((1<<HOST_REGS)-1);m;m&=m-1)
+    {
+      hr=__builtin_ctz(m);
+      {
+        if(regs[i].regmap_entry[hr]!=CCREG) regs[i].regmap_entry[hr]=-1;
+        if((regs[i].regmap[hr]&63)!=rs1[i] && (regs[i].regmap[hr]&63)!=rs2[i] &&
+           (regs[i].regmap[hr]&63)!=rt1[i] && (regs[i].regmap[hr]&63)!=rt2[i] &&
+           (regs[i].regmap[hr]&63)!=PTEMP && (regs[i].regmap[hr]&63)!=CCREG)
+        {
+          if(itype[i]==CJUMP) {
+            regs[i].regmap[hr]=-1;
+            regs[i].isdoingcp&=~(1<<hr);
+            if(i<slen-1) {
+              regmap_pre[i+1][hr]=-1;
+              regs[i+1].wasdoingcp&=~(1<<hr);
+            }
+          }
+        }
+        if(itype[i]==RJUMP||itype[i]==UJUMP||itype[i]==SJUMP)
+        {
+          int temp1=-1,temp2=-1;
+          //if(get_reg(regs[i].regmap,rt1[i+1]|64)>=0||get_reg(branch_regs[i].regmap,rt1[i+1]|64)>=0)
+          //{
+          //  d1=dep1[i+1];
+          //  d2=dep2[i+1];
+          //}
+          if(itype[i+1]==LOAD || itype[i+1]==STORE || 
+             itype[i+1]==RMW || itype[i+1]==PCREL ||
+             itype[i+1]==SYSTEM || source[i]==0x002B /* RTE */ )
+            temp1=MOREG;
+          if(itype[i+1]==COMPLEX) {
+            temp1=MACH;
+            temp2=MACL;
+          }
+          if(regs[i].regmap[hr]!=rs1[i] && regs[i].regmap[hr]!=rs2[i] && regs[i].regmap[hr]!=rs3[i] && 
+             regs[i].regmap[hr]!=rt1[i] && regs[i].regmap[hr]!=rt2[i] &&
+             regs[i].regmap[hr]!=rs1[i+1] && regs[i].regmap[hr]!=rs2[i+1] && regs[i].regmap[hr]!=rs3[i+1] &&
+             regs[i].regmap[hr]!=rt1[i+1] && regs[i].regmap[hr]!=rt2[i+1] &&
+             regs[i].regmap[hr]!=RHASH && regs[i].regmap[hr]!=RHTBL &&
+             regs[i].regmap[hr]!=RTEMP && regs[i].regmap[hr]!=PTEMP &&
+             regs[i].regmap[hr]!=CCREG &&
+             regs[i].regmap[hr]!=temp1 && regs[i].regmap[hr]!=temp2 )
+          {
+            regs[i].regmap[hr]=-1;
+            regs[i].isdoingcp&=~(1<<hr);
+            if(branch_regs[i].regmap[hr]!=rs1[i] && branch_regs[i].regmap[hr]!=rs2[i] && branch_regs[i].regmap[hr]!=rs3[i] &&
+               branch_regs[i].regmap[hr]!=rt1[i] && branch_regs[i].regmap[hr]!=rt2[i] &&
+               branch_regs[i].regmap[hr]!=rs1[i+1] && branch_regs[i].regmap[hr]!=rs2[i+1] && branch_regs[i].regmap[hr]!=rs3[i+1] &&
+               branch_regs[i].regmap[hr]!=rt1[i+1] && branch_regs[i].regmap[hr]!=rt2[i+1] &&
+               branch_regs[i].regmap[hr]!=RHASH && branch_regs[i].regmap[hr]!=RHTBL &&
+               branch_regs[i].regmap[hr]!=RTEMP && branch_regs[i].regmap[hr]!=PTEMP &&
+               branch_regs[i].regmap[hr]!=CCREG &&
+               branch_regs[i].regmap[hr]!=temp1 && branch_regs[i].regmap[hr]!=temp2)
+            {
+              branch_regs[i].regmap[hr]=-1;
+              branch_regs[i].regmap_entry[hr]=-1;
+              if(itype[i]!=RJUMP&&itype[i]!=UJUMP)
+              {
+                if(i<slen-2) {
+                  regmap_pre[i+2][hr]=-1;
+                  regs[i+2].wasdoingcp&=~(1<<hr);
+                }
+              }
+            }
+          }
+        }
+        else
+        {
+          // Non-branch
+          if(i>0)
+          {
+            int temp1=-1,temp2=-1;
+            //if(get_reg(regs[i].regmap,rt1[i]|64)>=0)
+            //{
+            //  d1=dep1[i];
+            //  d2=dep2[i];
+            //}
+            if(itype[i]==LOAD || itype[i]==STORE || itype[i]==RMW ||
+               itype[i]==PCREL || itype[i]==SYSTEM )
+              temp1=MOREG;
+            if(itype[i]==COMPLEX) {
+              temp1=MACH;
+              temp2=MACL;
+            }
+            else if(itype[i]==SYSTEM) {
+              temp2=CCREG;
+            }
+            if(regs[i].regmap[hr]!=rt1[i] && regs[i].regmap[hr]!=rt2[i] &&
+               regs[i].regmap[hr]!=rs1[i] && regs[i].regmap[hr]!=rs2[i] &&
+               regs[i].regmap[hr]!=rs3[i] &&
+               regs[i].regmap[hr]!=temp1 && regs[i].regmap[hr]!=temp2 &&
+               regs[i].regmap[hr]!=CCREG)
+            {
+              if(i<slen-1&&!is_ds[i]) {
+                if(regmap_pre[i+1][hr]!=-1 || regs[i].regmap[hr]!=-1)
+                if(regmap_pre[i+1][hr]!=regs[i].regmap[hr])
+                {
+                  printf("fail: %x (%d %d!=%d)\n",start+i*2,hr,regmap_pre[i+1][hr],regs[i].regmap[hr]);
+                  assert(regmap_pre[i+1][hr]==regs[i].regmap[hr]);
+                }
+                regmap_pre[i+1][hr]=-1;
+                if(regs[i+1].regmap_entry[hr]==CCREG) regs[i+1].regmap_entry[hr]=-1;
+                regs[i+1].wasdoingcp&=~(1<<hr);
+              }
+              regs[i].regmap[hr]=-1;
+              regs[i].isdoingcp&=~(1<<hr);
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
 #ifdef YAB_PROFILE
 static int sh2_recompile_block_body(int addr);
 int sh2_recompile_block(int addr) { int r; YAB_PROF_BEGIN(PROF_SH2_COMPILE); r = sh2_recompile_block_body(addr); YAB_PROF_END(PROF_SH2_COMPILE); return r; }
@@ -7250,273 +7558,7 @@ int sh2_recompile_block(int addr)
   
   /* Pass 4 - Cull unused host registers */
   
-  {
-  u64 nr=0;
-  
-  for (i=slen-1;i>=0;i--)
-  {
-    int hr;
-    if(itype[i]==RJUMP||itype[i]==UJUMP||itype[i]==CJUMP||itype[i]==SJUMP)
-    {
-      if(ba[i]<start || ba[i]>=(start+slen*2))
-      {
-        // Branch out of this block, don't need anything
-        nr=0;
-      }
-      else
-      {
-        // Internal branch
-        // Need whatever matches the target
-        int t=(ba[i]-start)>>1;
-        nr=0;
-        for(hr=0;hr<HOST_REGS;hr++)
-        {
-          if(regs[i].regmap_entry[hr]>=0) {
-            if(regs[i].regmap_entry[hr]==regs[t].regmap_entry[hr]) nr|=1<<hr;
-          }
-        }
-      }
-      // Conditional branch may need registers for following instructions
-      if(itype[i]==SJUMP)
-      {
-        if(i<slen-2) {
-          nr|=needed_reg[i+2];
-          for(hr=0;hr<HOST_REGS;hr++)
-          {
-            if(regmap_pre[i+2][hr]>=0&&get_reg(regs[i+2].regmap_entry,regmap_pre[i+2][hr])<0) nr&=~(1<<hr);
-            //if((regmap_entry[i+2][hr])>=0) if(!((nr>>hr)&1)) printf("%x-bogus(%d=%d)\n",start+i*2,hr,regmap_entry[i+2][hr]);
-          }
-        }
-      }
-      else if(itype[i]==CJUMP)
-      {
-        if(i<slen-2) {
-          nr|=needed_reg[i+1];
-          for(hr=0;hr<HOST_REGS;hr++)
-          {
-            if(regmap_pre[i+1][hr]>=0&&get_reg(regs[i+1].regmap_entry,regmap_pre[i+1][hr])<0) nr&=~(1<<hr);
-            //if((regmap_entry[i+2][hr])>=0) if(!((nr>>hr)&1)) printf("%x-bogus(%d=%d)\n",start+i*2,hr,regmap_entry[i+2][hr]);
-          }
-        }
-      }
-      // Don't need stuff which is overwritten
-      for(hr=0;hr<HOST_REGS;hr++) {
-        if(regs[i].regmap[hr]!=regmap_pre[i][hr]) nr&=~(1<<hr);
-        if(regs[i].regmap[hr]<0) nr&=~(1<<hr);
-      }
-      // Merge in delay slot
-      if(itype[i]!=CJUMP) 
-      for(hr=0;hr<HOST_REGS;hr++)
-      {
-        // These are overwritten by the delay slot
-        if(rt1[i+1]>=0&&rt1[i+1]==(regs[i].regmap[hr]&63)) nr&=~(1<<hr);
-        if(rt2[i+1]>=0&&rt2[i+1]==(regs[i].regmap[hr]&63)) nr&=~(1<<hr);
-        if(rs1[i+1]>=0&&rs1[i+1]==regmap_pre[i][hr]) nr|=1<<hr;
-        if(rs2[i+1]>=0&&rs2[i+1]==regmap_pre[i][hr]) nr|=1<<hr;
-        if(rs3[i+1]>=0&&rs3[i+1]==regmap_pre[i][hr]) nr|=1<<hr;
-        if(rs1[i+1]>=0&&rs1[i+1]==regs[i].regmap_entry[hr]) nr|=1<<hr;
-        if(rs2[i+1]>=0&&rs2[i+1]==regs[i].regmap_entry[hr]) nr|=1<<hr;
-        if(rs3[i+1]>=0&&rs3[i+1]==regs[i].regmap_entry[hr]) nr|=1<<hr;
-        //if(dep1[i+1]&&!((unneeded_reg_upper[i]>>dep1[i+1])&1)) {
-        //  if(dep1[i+1]==(regmap_pre[i][hr]&63)) nr|=1<<hr;
-        //  if(dep2[i+1]==(regmap_pre[i][hr]&63)) nr|=1<<hr;
-        //}
-        //if(dep2[i+1]&&!((unneeded_reg_upper[i]>>dep2[i+1])&1)) {
-        //  if(dep1[i+1]==(regs[i].regmap_entry[hr]&63)) nr|=1<<hr;
-        //  if(dep2[i+1]==(regs[i].regmap_entry[hr]&63)) nr|=1<<hr;
-        //}
-        if(regs[i].regmap_entry[hr]==SR) nr|=1<<hr;
-        if(regs[i].regmap[hr]==SR) nr|=1<<hr;
-        if(regmap_pre[i][hr]==SR) nr|=1<<hr;
-      }
-    }
-    else if(itype[i]==SYSTEM)
-    {
-      // TRAPA instruction (software interrupt)
-      nr=0;
-      for(hr=0;hr<HOST_REGS;hr++)
-      {
-        // Source registers are needed
-        if(regmap_pre[i][hr]==15) nr|=1<<hr;
-        if(regmap_pre[i][hr]==SR) nr|=1<<hr;
-        if(regmap_pre[i][hr]==VBR) nr|=1<<hr;
-        if(regmap_pre[i][hr]==CCREG) nr|=1<<hr;
-        if(regs[i].regmap_entry[hr]==15) nr|=1<<hr;
-        if(regs[i].regmap_entry[hr]==SR) nr|=1<<hr;
-        if(regs[i].regmap_entry[hr]==VBR) nr|=1<<hr;
-        if(regs[i].regmap_entry[hr]==CCREG) nr|=1<<hr;
-      }
-    }
-    else // Non-branch
-    {
-      if(i<slen-1) {
-        for(hr=0;hr<HOST_REGS;hr++) {
-          if(regmap_pre[i+1][hr]>=0&&get_reg(regs[i+1].regmap_entry,regmap_pre[i+1][hr])<0) nr&=~(1<<hr);
-          if(regs[i].regmap[hr]!=regmap_pre[i+1][hr]) nr&=~(1<<hr);
-          if(regs[i].regmap[hr]!=regmap_pre[i][hr]) nr&=~(1<<hr);
-          if(regs[i].regmap[hr]<0) nr&=~(1<<hr);
-        }
-      }
-    }
-    for(hr=0;hr<HOST_REGS;hr++)
-    {
-      // Overwritten registers are not needed
-      if(rt1[i]>=0&&rt1[i]==(regs[i].regmap[hr]&63)) nr&=~(1<<hr);
-      if(rt2[i]>=0&&rt2[i]==(regs[i].regmap[hr]&63)) nr&=~(1<<hr);
-      // Source registers are needed
-      if(rs1[i]>=0&&rs1[i]==regmap_pre[i][hr]) nr|=1<<hr;
-      if(rs2[i]>=0&&rs2[i]==regmap_pre[i][hr]) nr|=1<<hr;
-      if(rs3[i]>=0&&rs3[i]==regmap_pre[i][hr]) nr|=1<<hr;
-      if(rs1[i]>=0&&rs1[i]==regs[i].regmap_entry[hr]) nr|=1<<hr;
-      if(rs2[i]>=0&&rs2[i]==regs[i].regmap_entry[hr]) nr|=1<<hr;
-      if(rs3[i]>=0&&rs3[i]==regs[i].regmap_entry[hr]) nr|=1<<hr;
-      //if(dep1[i]&&!((unneeded_reg_upper[i]>>dep1[i])&1)) {
-      //  if(dep1[i]==(regmap_pre[i][hr]&63)) nr|=1<<hr;
-      //  if(dep1[i]==(regs[i].regmap_entry[hr]&63)) nr|=1<<hr;
-      //}
-      //if(dep2[i]&&!((unneeded_reg_upper[i]>>dep2[i])&1)) {
-      //  if(dep2[i]==(regmap_pre[i][hr]&63)) nr|=1<<hr;
-      //  if(dep2[i]==(regs[i].regmap_entry[hr]&63)) nr|=1<<hr;
-      //}
-      if(regs[i].regmap_entry[hr]==SR) nr|=1<<hr;
-      if(regs[i].regmap[hr]==SR) nr|=1<<hr;
-      if(regmap_pre[i][hr]==SR) nr|=1<<hr;
-      // Don't store a register immediately after writing it,
-      // may prevent dual-issue.
-      // But do so if this is a branch target, otherwise we
-      // might have to load the register before the branch.
-      if(i>0&&!bt[i]&&((regs[i].wasdirty>>hr)&1)) {
-        if(regmap_pre[i][hr]>=0&&!((unneeded_reg[i]>>regmap_pre[i][hr])&1)) {
-          if(rt1[i-1]==(regmap_pre[i][hr]&63)) nr|=1<<hr;
-          if(rt2[i-1]==(regmap_pre[i][hr]&63)) nr|=1<<hr;
-        }
-        if(regs[i].regmap_entry[hr]>=0&&!((unneeded_reg[i]>>regs[i].regmap_entry[hr])&1)) {
-          if(rt1[i-1]==(regs[i].regmap_entry[hr]&63)) nr|=1<<hr;
-          if(rt2[i-1]==(regs[i].regmap_entry[hr]&63)) nr|=1<<hr;
-        }
-      }
-    }
-    // Cycle count is needed at branches.  Assume it is needed at the target too.
-    if(i==0||bt[i]||itype[i]==CJUMP||itype[i]==SJUMP) {
-      if(regmap_pre[i][HOST_CCREG]==CCREG) nr|=1<<HOST_CCREG;
-      if(regs[i].regmap_entry[HOST_CCREG]==CCREG) nr|=1<<HOST_CCREG;
-    }
-    // Save it
-    needed_reg[i]=nr;
-    
-    // Deallocate unneeded registers
-    for(hr=0;hr<HOST_REGS;hr++)
-    {
-      if(!((nr>>hr)&1)) {
-        if(regs[i].regmap_entry[hr]!=CCREG) regs[i].regmap_entry[hr]=-1;
-        if((regs[i].regmap[hr]&63)!=rs1[i] && (regs[i].regmap[hr]&63)!=rs2[i] &&
-           (regs[i].regmap[hr]&63)!=rt1[i] && (regs[i].regmap[hr]&63)!=rt2[i] &&
-           (regs[i].regmap[hr]&63)!=PTEMP && (regs[i].regmap[hr]&63)!=CCREG)
-        {
-          if(itype[i]==CJUMP) {
-            regs[i].regmap[hr]=-1;
-            regs[i].isdoingcp&=~(1<<hr);
-            if(i<slen-1) {
-              regmap_pre[i+1][hr]=-1;
-              regs[i+1].wasdoingcp&=~(1<<hr);
-            }
-          }
-        }
-        if(itype[i]==RJUMP||itype[i]==UJUMP||itype[i]==SJUMP)
-        {
-          int temp1=-1,temp2=-1;
-          //if(get_reg(regs[i].regmap,rt1[i+1]|64)>=0||get_reg(branch_regs[i].regmap,rt1[i+1]|64)>=0)
-          //{
-          //  d1=dep1[i+1];
-          //  d2=dep2[i+1];
-          //}
-          if(itype[i+1]==LOAD || itype[i+1]==STORE || 
-             itype[i+1]==RMW || itype[i+1]==PCREL ||
-             itype[i+1]==SYSTEM || source[i]==0x002B /* RTE */ )
-            temp1=MOREG;
-          if(itype[i+1]==COMPLEX) {
-            temp1=MACH;
-            temp2=MACL;
-          }
-          if(regs[i].regmap[hr]!=rs1[i] && regs[i].regmap[hr]!=rs2[i] && regs[i].regmap[hr]!=rs3[i] && 
-             regs[i].regmap[hr]!=rt1[i] && regs[i].regmap[hr]!=rt2[i] &&
-             regs[i].regmap[hr]!=rs1[i+1] && regs[i].regmap[hr]!=rs2[i+1] && regs[i].regmap[hr]!=rs3[i+1] &&
-             regs[i].regmap[hr]!=rt1[i+1] && regs[i].regmap[hr]!=rt2[i+1] &&
-             regs[i].regmap[hr]!=RHASH && regs[i].regmap[hr]!=RHTBL &&
-             regs[i].regmap[hr]!=RTEMP && regs[i].regmap[hr]!=PTEMP &&
-             regs[i].regmap[hr]!=CCREG &&
-             regs[i].regmap[hr]!=temp1 && regs[i].regmap[hr]!=temp2 )
-          {
-            regs[i].regmap[hr]=-1;
-            regs[i].isdoingcp&=~(1<<hr);
-            if(branch_regs[i].regmap[hr]!=rs1[i] && branch_regs[i].regmap[hr]!=rs2[i] && branch_regs[i].regmap[hr]!=rs3[i] &&
-               branch_regs[i].regmap[hr]!=rt1[i] && branch_regs[i].regmap[hr]!=rt2[i] &&
-               branch_regs[i].regmap[hr]!=rs1[i+1] && branch_regs[i].regmap[hr]!=rs2[i+1] && branch_regs[i].regmap[hr]!=rs3[i+1] &&
-               branch_regs[i].regmap[hr]!=rt1[i+1] && branch_regs[i].regmap[hr]!=rt2[i+1] &&
-               branch_regs[i].regmap[hr]!=RHASH && branch_regs[i].regmap[hr]!=RHTBL &&
-               branch_regs[i].regmap[hr]!=RTEMP && branch_regs[i].regmap[hr]!=PTEMP &&
-               branch_regs[i].regmap[hr]!=CCREG &&
-               branch_regs[i].regmap[hr]!=temp1 && branch_regs[i].regmap[hr]!=temp2)
-            {
-              branch_regs[i].regmap[hr]=-1;
-              branch_regs[i].regmap_entry[hr]=-1;
-              if(itype[i]!=RJUMP&&itype[i]!=UJUMP)
-              {
-                if(i<slen-2) {
-                  regmap_pre[i+2][hr]=-1;
-                  regs[i+2].wasdoingcp&=~(1<<hr);
-                }
-              }
-            }
-          }
-        }
-        else
-        {
-          // Non-branch
-          if(i>0)
-          {
-            int temp1=-1,temp2=-1;
-            //if(get_reg(regs[i].regmap,rt1[i]|64)>=0)
-            //{
-            //  d1=dep1[i];
-            //  d2=dep2[i];
-            //}
-            if(itype[i]==LOAD || itype[i]==STORE || itype[i]==RMW ||
-               itype[i]==PCREL || itype[i]==SYSTEM )
-              temp1=MOREG;
-            if(itype[i]==COMPLEX) {
-              temp1=MACH;
-              temp2=MACL;
-            }
-            else if(itype[i]==SYSTEM) {
-              temp2=CCREG;
-            }
-            if(regs[i].regmap[hr]!=rt1[i] && regs[i].regmap[hr]!=rt2[i] &&
-               regs[i].regmap[hr]!=rs1[i] && regs[i].regmap[hr]!=rs2[i] &&
-               regs[i].regmap[hr]!=rs3[i] &&
-               regs[i].regmap[hr]!=temp1 && regs[i].regmap[hr]!=temp2 &&
-               regs[i].regmap[hr]!=CCREG)
-            {
-              if(i<slen-1&&!is_ds[i]) {
-                if(regmap_pre[i+1][hr]!=-1 || regs[i].regmap[hr]!=-1)
-                if(regmap_pre[i+1][hr]!=regs[i].regmap[hr])
-                {
-                  printf("fail: %x (%d %d!=%d)\n",start+i*2,hr,regmap_pre[i+1][hr],regs[i].regmap[hr]);
-                  assert(regmap_pre[i+1][hr]==regs[i].regmap[hr]);
-                }
-                regmap_pre[i+1][hr]=-1;
-                if(regs[i+1].regmap_entry[hr]==CCREG) regs[i+1].regmap_entry[hr]=-1;
-                regs[i+1].wasdoingcp&=~(1<<hr);
-              }
-              regs[i].regmap[hr]=-1;
-              regs[i].isdoingcp&=~(1<<hr);
-            }
-          }
-        }
-      }
-    }
-  }
-  }
+  cull_unused_regs();
   
   /* Pass 5 - Pre-allocate registers */
   
