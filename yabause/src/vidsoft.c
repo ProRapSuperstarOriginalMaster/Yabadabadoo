@@ -2390,8 +2390,10 @@ static INLINE __attribute__((always_inline)) u32 Vdp2ColorRamGetColorCMI(const i
  * Same steps and results as Vdp2DrawRotationCoefLine(). CN is the colour
  * format, BM 1 for a bitmap screen; colormode is passed through for the
  * colour lookup. Used by Panzer Dragoon, Shining Force III (bitmap) and
- * others for their rotating floors and backgrounds. */
-static INLINE __attribute__((always_inline)) void Vdp2DrawRotationKLineBody(const int CN, const int BM, const int colormode,
+ * others for their rotating floors and backgrounds. HR 1 = hi-res: the
+ * rotation is computed for rbg0width (half the screen's) pixels and each is
+ * written to two Titan pixels, as Rbg0PutHiresPixel() does. */
+static INLINE __attribute__((always_inline)) void Vdp2DrawRotationKLineBody(const int CN, const int BM, const int HR, const int colormode,
    vdp2draw_struct *info, vdp2rotationparameterfp_struct *q, screeninfo_struct *qs, fixed32 Xs, fixed32 Ys,
    Vdp2 *regs, u8 *ram, u8 *color_ram, const u8 *wintab, clipping_struct *clip, int j)
 {
@@ -2499,33 +2501,45 @@ static INLINE __attribute__((always_inline)) void Vdp2DrawRotationKLineBody(cons
          pixel = DoColorOffset(info, pixel);
       else if (post_calc == 2)
          pixel = info->PostPixelFetchCalc(info, pixel);
-      line[i].pixel = pixel;
-      line[i].meta = meta;
+      if (HR)
+      {
+         line[2 * i].pixel = line[2 * i + 1].pixel = pixel;
+         line[2 * i].meta = line[2 * i + 1].meta = meta;
+      }
+      else
+      {
+         line[i].pixel = pixel;
+         line[i].meta = meta;
+      }
    }
 }
 
-#define ROT_KLINE_FN(NAME, CN, BM) \
+#define ROT_KLINE_FN(NAME, CN, BM, HR) \
 static void NAME(vdp2draw_struct *info, vdp2rotationparameterfp_struct *q, screeninfo_struct *qs, fixed32 Xs, fixed32 Ys, \
    Vdp2 *regs, u8 *ram, u8 *color_ram, const u8 *wintab, clipping_struct *clip, int j) \
 { \
    switch (Vdp2Internal.ColorMode) \
    { \
-   case 0: Vdp2DrawRotationKLineBody(CN, BM, 0, info, q, qs, Xs, Ys, regs, ram, color_ram, wintab, clip, j); break; \
-   case 1: Vdp2DrawRotationKLineBody(CN, BM, 1, info, q, qs, Xs, Ys, regs, ram, color_ram, wintab, clip, j); break; \
-   case 2: Vdp2DrawRotationKLineBody(CN, BM, 2, info, q, qs, Xs, Ys, regs, ram, color_ram, wintab, clip, j); break; \
-   default: Vdp2DrawRotationKLineBody(CN, BM, 3, info, q, qs, Xs, Ys, regs, ram, color_ram, wintab, clip, j); break; \
+   case 0: Vdp2DrawRotationKLineBody(CN, BM, HR, 0, info, q, qs, Xs, Ys, regs, ram, color_ram, wintab, clip, j); break; \
+   case 1: Vdp2DrawRotationKLineBody(CN, BM, HR, 1, info, q, qs, Xs, Ys, regs, ram, color_ram, wintab, clip, j); break; \
+   case 2: Vdp2DrawRotationKLineBody(CN, BM, HR, 2, info, q, qs, Xs, Ys, regs, ram, color_ram, wintab, clip, j); break; \
+   default: Vdp2DrawRotationKLineBody(CN, BM, HR, 3, info, q, qs, Xs, Ys, regs, ram, color_ram, wintab, clip, j); break; \
    } \
 }
-ROT_KLINE_FN(Vdp2RotKLine4bpp, 0, 0)
-ROT_KLINE_FN(Vdp2RotKLine8bpp, 1, 0)
-ROT_KLINE_FN(Vdp2RotKLine16bppPal, 2, 0)
-ROT_KLINE_FN(Vdp2RotKLine16bppRGB, 3, 0)
-ROT_KLINE_FN(Vdp2RotKLine32bpp, 4, 0)
-ROT_KLINE_FN(Vdp2RotKLine4bppBM, 0, 1)
-ROT_KLINE_FN(Vdp2RotKLine8bppBM, 1, 1)
-ROT_KLINE_FN(Vdp2RotKLine16bppPalBM, 2, 1)
-ROT_KLINE_FN(Vdp2RotKLine16bppRGBBM, 3, 1)
-ROT_KLINE_FN(Vdp2RotKLine32bppBM, 4, 1)
+ROT_KLINE_FN(Vdp2RotKLine4bpp, 0, 0, 0)
+ROT_KLINE_FN(Vdp2RotKLine8bpp, 1, 0, 0)
+ROT_KLINE_FN(Vdp2RotKLine16bppPal, 2, 0, 0)
+ROT_KLINE_FN(Vdp2RotKLine16bppRGB, 3, 0, 0)
+ROT_KLINE_FN(Vdp2RotKLine32bpp, 4, 0, 0)
+ROT_KLINE_FN(Vdp2RotKLine4bppBM, 0, 1, 0)
+ROT_KLINE_FN(Vdp2RotKLine8bppBM, 1, 1, 0)
+ROT_KLINE_FN(Vdp2RotKLine16bppPalBM, 2, 1, 0)
+ROT_KLINE_FN(Vdp2RotKLine16bppRGBBM, 3, 1, 0)
+ROT_KLINE_FN(Vdp2RotKLine32bppBM, 4, 1, 0)
+/* hi-res: only the cases the hi-res games draw (Die Hard Arcade: 4bpp tiles;
+ * Virtua Fighter 2, Fighters Megamix: 8bpp tiles) */
+ROT_KLINE_FN(Vdp2RotKLineHr4bpp, 0, 0, 1)
+ROT_KLINE_FN(Vdp2RotKLineHr8bpp, 1, 0, 1)
 #undef ROT_KLINE_FN
 /* by [bitmap][colour format] */
 static void (*const vdp2_rot_kline[2][5])(vdp2draw_struct *, vdp2rotationparameterfp_struct *, screeninfo_struct *,
@@ -2885,7 +2899,30 @@ static void FASTCALL Vdp2DrawRotationFP(vdp2draw_struct *info, vdp2rotationparam
          wintab = (info->wctl & 0x2a) && rbg0width <= 1024 ? VidsoftWinTable(info->wctl, clip, j, rbg0width, winbuf) : NULL;
          rptab = userpwindow && rbg0width <= 1024 ? VidsoftWinTable(regs->WCTLD, rpwindow, j, rbg0width, rpbuf) : NULL;
 
-         if (!vdp2_x_hires)
+         /* hi-res, coefficients per line (as below), 4bpp or 8bpp tiles, and a
+          * rotation parameter window, if any, the same along the line: one
+          * parameter for the line, chosen as the loop below chooses it per
+          * pixel; the per-line loop for half the width, each pixel written
+          * twice. Not with special priority mode 1: the priority is per tile,
+          * which that loop takes once per line. */
+         if (vdp2_x_hires && p->deltaKAx == 0 && (p2 == NULL || !p2->coefenab || p2->deltaKAx == 0) && !dotlc &&
+             !info->isbitmap && info->colornumber <= 1 && info->priority != 0 && info->specialprimode != 1 &&
+             (!userpwindow || (rptab != NULL && !memchr(rptab, !rptab[0], rbg0width))))
+         {
+            void (*const hr)(vdp2draw_struct *, vdp2rotationparameterfp_struct *, screeninfo_struct *, fixed32, fixed32,
+                             Vdp2 *, u8 *, u8 *, const u8 *, clipping_struct *, int) =
+               info->colornumber == 0 ? Vdp2RotKLineHr4bpp : Vdp2RotKLineHr8bpp;
+            if (userpwindow ? rptab[0] : !p->msb)
+            {
+               if (!p->msb)
+                  hr(info, p, &sinfo, mulfixed(p->A, xmul) + mulfixed(p->B, ymul) + C,
+                     mulfixed(p->D, xmul) + mulfixed(p->E, ymul) + F, regs, ram, color_ram, wintab, clip, j);
+            }
+            else if (p2 != NULL && !(p2->coefenab && p2->msb))
+               hr(info, p2, &sinfo2, mulfixed(p2->A, xmul2) + mulfixed(p2->B, ymul2) + C2,
+                  mulfixed(p2->D, xmul2) + mulfixed(p2->E, ymul2) + F2, regs, ram, color_ram, wintab, clip, j);
+         }
+         else if (!vdp2_x_hires)
          {
             struct RotCoefLine L;
             L.info = info; L.p = p; L.p2 = p2; L.sinfo = &sinfo; L.sinfo2 = &sinfo2;
