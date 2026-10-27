@@ -109,6 +109,7 @@ void M68KStop(void);
 void ScspReset(void);
 int ScspChangeVideoFormat(int type);
 void M68KExec(s32 cycles);
+void M68KExecLater(s32 cycles);  // the recompiler's decilines: run at the next M68KExec or touch of the sound side
 void ScspExec(void);
 void ScspConvert32uto16s(s32 *srcL, s32 *srcR, s16 *dst, u32 len);
 void ScspReceiveCDDA(const u8 *sector);

@@ -291,6 +291,7 @@ cc_interrupt_master:
 	bhi	.A0
 	ldr	r0, [fp, #m68kcycles-dynarec_local]
 	ldr	r1, [fp, #m68kcenticycles-dynarec_local]
+	mov	r2, #0
 	bl	DynarecM68KDeciline
 .A0:
 	ldr	r0, [fp, #decilinecount-dynarec_local]
@@ -393,6 +394,7 @@ nextline:
 	str	r10, [r5] /* usecfrac */
 	ldr	r0, [fp, #m68kcycles-dynarec_local]
 	ldr	r1, [fp, #m68kcenticycles-dynarec_local]
+	mov	r2, #1
 	bl	DynarecM68KDeciline /* the line's last deciline */
 	ldr	r14, [fp, #master_ip-dynarec_local]
 	eors	r1, r6, r7 /* linecount==maxlinecount ? */

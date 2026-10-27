@@ -1701,11 +1701,25 @@ static volatile u32 m68kq_head, m68kq_tail; // next entry to queue / to run
 static void M68KQueueDrain (void);
 static void M68KThreadStop (void);
 
+/* The 68K chunks the recompiler's frame loop owes (M68KExecLater): one per
+   deciline since the 68K last ran. They run, still one Musashi call each (a
+   merged call is not the same: an interrupt's cycles are charged at the end of
+   the call), before anything touches sound RAM, the SCSP or the 68K
+   (M68KJobWait; M68KQueuePush of other work) and before the line's last chunk
+   (M68KExec): the same as running the 68K after every deciline, as the
+   interpreter's loop does, at one queue entry a line instead of ten. */
+#define M68K_OWED_MAX 10
+static s32 m68k_owed_c[M68K_OWED_MAX];
+static int m68k_owed_n;
+static void M68KPayOwed (void);
+
 /* Called by everything on the emulation thread that touches sound RAM, the
    SCSP or the 68K */
 static INLINE void
 M68KJobWait (void)
 {
+  if (UNLIKELY(m68k_owed_n))
+    M68KPayOwed();
   if (UNLIKELY(m68kq_head != __atomic_load_n(&m68kq_tail, __ATOMIC_ACQUIRE) ||
                __atomic_load_n(&m68k_pending_mint, __ATOMIC_ACQUIRE)))
     M68KQueueDrain();
@@ -5303,7 +5317,7 @@ M68KExecInline (s32 cycles)
 // delivered at the next drain, and the pipeline then turns itself off for
 // the session. YAB_M68K_THREAD=0/1 overrides the option (tests).
 
-enum { M68KQ_TIMER, M68KQ_TIMER_ONLY, M68KQ_GEN, M68KQ_EXEC };
+enum { M68KQ_TIMER, M68KQ_TIMER_ONLY, M68KQ_GEN, M68KQ_EXEC, M68KQ_EXECS };
 /* the frame's sample rendering, queued (M68KQ_GEN, arg = slot) */
 #define M68KQ_GENS 8
 static struct { u32 pos, len, cdstart, cdlen; } m68kq_gen[M68KQ_GENS];
@@ -5341,6 +5355,13 @@ M68KQueueRunOne (void)
   case M68KQ_EXEC:
     M68KExecInline(arg);
     break;
+  case M68KQ_EXECS:  // owed chunks (M68KPayOwed): count, which ones are 1 longer, base length
+  {
+    s32 i, n = arg & 15, longer = (arg >> 4) & 0x3FF, base = arg >> 16;
+    for (i = 0; i < n; i++)
+      M68KExecInline(base + ((longer >> i) & 1));
+    break;
+  }
   case M68KQ_TIMER:
     scsp_update_timer(arg);
     scsp_update_monitor();
@@ -5516,7 +5537,10 @@ M68KQueueDrainTo (u32 idx)
 static INLINE void
 M68KQueuePush (s32 type, s32 arg)
 {
-  u32 h = m68kq_head;
+  u32 h;
+  if (type != M68KQ_EXEC && type != M68KQ_EXECS && m68k_owed_n)
+    M68KPayOwed();  // the 68K's owed chunks come first
+  h = m68kq_head;
   if (h - __atomic_load_n(&m68kq_tail, __ATOMIC_ACQUIRE) >= M68KQ_SIZE)
     M68KQueueDrain();
   m68kq[h % M68KQ_SIZE].type = type;
@@ -5566,6 +5590,8 @@ M68KExec (s32 cycles)
 #undef M68KExec
 #endif
 {
+  if (m68k_owed_n)
+    M68KPayOwed();
   if (UNLIKELY(m68k_thread_on < 0))
     M68KThreadDecide();
   if (m68k_thread_on && !__atomic_load_n(&m68k_pending_mint, __ATOMIC_ACQUIRE))
@@ -5575,6 +5601,41 @@ M68KExec (s32 cycles)
   }
   M68KJobWait();
   M68KExecInline(cycles);
+}
+
+void
+M68KExecLater (s32 cycles)
+{
+  if (m68k_owed_n == M68K_OWED_MAX)
+    M68KPayOwed();
+  m68k_owed_c[m68k_owed_n++] = cycles;
+}
+
+static void
+M68KPayOwed (void)
+{
+  s32 i, n = m68k_owed_n, base = m68k_owed_c[0], longer = 0, fits = 1;
+  m68k_owed_n = 0;
+  if (UNLIKELY(m68k_thread_on < 0))
+    M68KThreadDecide();
+  for (i = 1; i < n; i++)
+    if (m68k_owed_c[i] < base)
+      base = m68k_owed_c[i];
+  for (i = 0; i < n; i++)
+  {
+    if (m68k_owed_c[i] - base > 1)
+      fits = 0;  // one entry holds chunks of base or base + 1 cycles (71/72)
+    longer |= (m68k_owed_c[i] - base) << i;
+  }
+  if (m68k_thread_on && !__atomic_load_n(&m68k_pending_mint, __ATOMIC_ACQUIRE) &&
+      fits && base >= 0 && base < 0x8000)
+  {
+    M68KQueuePush(M68KQ_EXECS, (base << 16) | (longer << 4) | n);
+    return;
+  }
+  M68KJobWait();
+  for (i = 0; i < n; i++)
+    M68KExecInline(m68k_owed_c[i]);
 }
 
 void new_scsp_run_sample()
