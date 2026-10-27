@@ -2527,6 +2527,11 @@ ROT_KLINE_FN(Vdp2RotKLine16bppPalBM, 2, 1)
 ROT_KLINE_FN(Vdp2RotKLine16bppRGBBM, 3, 1)
 ROT_KLINE_FN(Vdp2RotKLine32bppBM, 4, 1)
 #undef ROT_KLINE_FN
+/* by [bitmap][colour format] */
+static void (*const vdp2_rot_kline[2][5])(vdp2draw_struct *, vdp2rotationparameterfp_struct *, screeninfo_struct *,
+                                          fixed32, fixed32, Vdp2 *, u8 *, u8 *, const u8 *, clipping_struct *, int) = {
+   { Vdp2RotKLine4bpp, Vdp2RotKLine8bpp, Vdp2RotKLine16bppPal, Vdp2RotKLine16bppRGB, Vdp2RotKLine32bpp },
+   { Vdp2RotKLine4bppBM, Vdp2RotKLine8bppBM, Vdp2RotKLine16bppPalBM, Vdp2RotKLine16bppRGBBM, Vdp2RotKLine32bppBM } };
 
 static void FASTCALL Vdp2DrawRotationFP(vdp2draw_struct *info, vdp2rotationparameterfp_struct *parameter, Vdp2* lines, Vdp2* regs, u8* ram, u8* color_ram, struct CellScrollData * cell_data)
 {
@@ -2575,6 +2580,15 @@ static void FASTCALL Vdp2DrawRotationFP(vdp2draw_struct *info, vdp2rotationparam
             ReadLineWindowClip(info->islinewindow, clip, &linewnd0addr, &linewnd1addr, ram, regs);
             wintab = (info->wctl & 0x2a) && rbg0width <= 1024 ? VidsoftWinTable(info->wctl, clip, j, rbg0width, winbuf) : NULL;
 
+            /* The coefficient loop's per-line loops give the same pixels:
+             * their running dX sum is mulfixed(dX, tofixed(i)) modulo 2^32,
+             * and with screen-over 0/1 they mask the position as this loop
+             * does (Sega Rally's road-side backgrounds) */
+            if (!vdp2_x_hires && p->screenover <= 1 && info->colornumber <= 4 && info->priority != 0)
+               vdp2_rot_kline[info->isbitmap ? 1 : 0][info->colornumber](info, p, &sinfo,
+                  mulfixed(p->A, xmul) + mulfixed(p->B, ymul) + C, mulfixed(p->D, xmul) + mulfixed(p->E, ymul) + F,
+                  regs, ram, color_ram, wintab, clip, j);
+            else
             for (i = 0; i < rbg0width; i++)
             {
                u32 color, dot;
@@ -2779,13 +2793,7 @@ static void FASTCALL Vdp2DrawRotationFP(vdp2draw_struct *info, vdp2rotationparam
                   q = p2; qs = &sinfo2; Xs = L.Xsp2; Ys = L.Ysp2;
                }
                if (q != NULL)
-               {
-                  static void (*const kline[2][5])(vdp2draw_struct *, vdp2rotationparameterfp_struct *, screeninfo_struct *,
-                                                    fixed32, fixed32, Vdp2 *, u8 *, u8 *, const u8 *, clipping_struct *, int) = {
-                     { Vdp2RotKLine4bpp, Vdp2RotKLine8bpp, Vdp2RotKLine16bppPal, Vdp2RotKLine16bppRGB, Vdp2RotKLine32bpp },
-                     { Vdp2RotKLine4bppBM, Vdp2RotKLine8bppBM, Vdp2RotKLine16bppPalBM, Vdp2RotKLine16bppRGBBM, Vdp2RotKLine32bppBM } };
-                  kline[info->isbitmap ? 1 : 0][info->colornumber](info, q, qs, Xs, Ys, regs, ram, color_ram, wintab, clip, j);
-               }
+                  vdp2_rot_kline[info->isbitmap ? 1 : 0][info->colornumber](info, q, qs, Xs, Ys, regs, ram, color_ram, wintab, clip, j);
             }
             else
             switch (info->colornumber)
