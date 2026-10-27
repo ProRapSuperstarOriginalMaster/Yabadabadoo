@@ -1215,6 +1215,17 @@ void clean_blocks(u32 page)
 }
 
 
+// The address a PC-relative instruction (MOV.W/MOV.L @(disp,PC), MOVA) at
+// index i computes from, as if it sat there: its own, except in the delay
+// slot of BRA/BSR, where PC reads as the branch target+2 (SH-2 manual,
+// Beetle; Mortal Kombat Trilogy's sprite colour modes, U44), as if the slot
+// sat at target-2. The interpreter does the same (sh2int.c SH2delay).
+static u32 pcrel_pc(int i)
+{
+  if(i>0&&itype[i-1]==UJUMP) return ba[i-1]-2;
+  return start+i*2;
+}
+
 void do_consts(int i,u32 *isconst,u32 *constmap)
 {
   switch(itype[i]) {
@@ -1234,13 +1245,13 @@ void do_consts(int i,u32 *isconst,u32 *constmap)
     case RMW:
       break;
     case PCREL:
-      if(opcode[i]==12) sh2_set_const(isconst,constmap,rt1[i],((start+i*2+4)&~3)+imm[i]); // MOVA
+      if(opcode[i]==12) sh2_set_const(isconst,constmap,rt1[i],((pcrel_pc(i)+4)&~3)+imm[i]); // MOVA
       else { // PC-relative load (constant pool)
-        u32 addr=((start+i*2+4)&~3)+imm[i];
+        u32 addr=((pcrel_pc(i)+4)&~3)+imm[i];
         if((u32)((addr-start)>>1)<slen) {
           int value;
-          if(opcode[i]==9) value=(s16)source[((start+i*2+4)+imm[i]-start)>>1]; // MOV.W
-          else value=(source[(((start+i*2+4)&~3)+imm[i]-start)>>1]<<16)+source[(((start+i*2+4)&~3)+imm[i]+2-start)>>1]; // MOV.L
+          if(opcode[i]==9) value=(s16)source[((pcrel_pc(i)+4)+imm[i]-start)>>1]; // MOV.W
+          else value=(source[(addr-start)>>1]<<16)+source[(addr+2-start)>>1]; // MOV.L
           sh2_set_const(isconst,constmap,rt1[i],value);
         }
         else sh2_clear_const(isconst,constmap,rt1[i]);
@@ -1642,12 +1653,12 @@ void pcrel_alloc(struct regstat *current,int i)
 {
   u32 addr;
   alloc_reg(current,i,rt1[i]);
-  addr=((start+i*2+4)&~3)+imm[i];
+  addr=((pcrel_pc(i)+4)&~3)+imm[i];
   if(opcode[i]==12) { // MOVA, address generation only
     set_const(current,rt1[i],addr);
   }else if((unsigned)((addr-start)>>1)<slen) {
     if(opcode[i]==9) { // MOV.W
-      addr=(start+i*2+4)+imm[i];
+      addr=(pcrel_pc(i)+4)+imm[i];
       set_const(current,rt1[i],(s16)source[(addr-start)>>1]);
     }
     else // MOV.L
@@ -2718,8 +2729,8 @@ void pcrel_assemble(int i,struct regstat *i_regs)
       int jaddr=0;
       // This is to handle the exceptional case where we can not do constant propagation
       assert(opcode[i]!=12); // MOVA should always be able to do constant propagation
-      constaddr=((start+i*2+4)&~3)+imm[i];
-      if(opcode[i]==9) constaddr=(start+i*2+4)+imm[i]; // MOV.W
+      constaddr=((pcrel_pc(i)+4)&~3)+imm[i];
+      if(opcode[i]==9) constaddr=(pcrel_pc(i)+4)+imm[i]; // MOV.W
       assem_debug("Can't do constant propagation, doing PC-relatve load\n");
       //int map=get_reg(i_regs->regmap,MOREG);
       //int cache=get_reg(i_regs->regmap,MMREG);
@@ -3024,6 +3035,11 @@ int internal_branch(int addr)
   if(addr&1) return 0; // Indirect (register) jump
   if(addr>=start && addr<start+slen*2-2)
   {
+    int t=(addr-start)>>1;
+    // Entered directly, a PC-relative instruction in a BRA/BSR delay slot
+    // addresses from itself, not from the branch target (pcrel_pc): run it
+    // as the start of its own block
+    if(t>0&&itype[t]==PCREL&&itype[t-1]==UJUMP) return 0;
     return 1;
   }
   return 0;
@@ -4341,7 +4357,7 @@ static int idle_loop(int i)
       }
       else if((op&0xF000)==0xD000) { // MOV.L @(disp,PC),Rn
         idle_call_desc=IDLE_CALL_ABS;
-        idle_call_addr=((start+w*2+4)&~3)+(op&0xFF)*4;
+        idle_call_addr=((pcrel_pc(w)+4)&~3)+(op&0xFF)*4;
       }
       else return 0;
     }
@@ -6288,10 +6304,10 @@ int sh2_recompile_block(int addr)
         else imm[i]<<=2;
         // Extend block to include consts
         // FIXME: Don't go past limit
-        if (op==9 && lastconst < (start+i*2+4)+imm[i]) // MOV.W
-          lastconst = (start+i*2+4)+imm[i];
-        if (op==13 && lastconst < ((start+i*2+4)&~3)+imm[i]+2) // MOV.L
-          lastconst = ((start+i*2+4)&~3)+imm[i]+2;
+        if (op==9 && lastconst < (pcrel_pc(i)+4)+imm[i]) // MOV.W
+          lastconst = (pcrel_pc(i)+4)+imm[i];
+        if (op==13 && lastconst < ((pcrel_pc(i)+4)&~3)+imm[i]+2) // MOV.L
+          lastconst = ((pcrel_pc(i)+4)&~3)+imm[i]+2;
         //printf("lastconst=%x\n",lastconst);
         break;
       case MOV:
