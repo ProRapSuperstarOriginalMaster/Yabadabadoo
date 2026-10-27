@@ -40,6 +40,7 @@
 #include "yabause.h"
 #include "movie.h"
 #include "osdcore.h"
+#include "titan/titan.h"
 
 u8 * Vdp2Ram;
 u32 Vdp2RamDirty[4];
@@ -109,12 +110,15 @@ u32 vdp2_frame_number = 0;  /* counts VBlank-OUTs */
    turns it off, 1 also logs how many fields were skipped, 2 checks it: every
    field is drawn and libretro.c compares the picture with the last one where
    the inputs said "same" (Vdp2ExactSkipVerifyPicture). */
-u8 vdp2_vram_changed = 1, vdp2_cram_changed = 1;
+u8 vdp2_vram_changed = 1;
+u8 vdp2_cram_changed = 3;                  /* bit 0 exact skip, bit 1 sprite layer reuse */
 static u8 exactskip_lines_changed = 1;
 static u8 exactskip_cells_untracked = 1;  /* a line's cell scroll data wasn't compared */
 static int exactskip_mode = -1;           /* YAB_EXACTSKIP: 0 off, 1 on, 2 check */
 static int exactskip_log;
 static int exactskip_valid;               /* the copies below are of a drawn field */
+static int sprreuse_valid;                /* see Vdp2SpriteLayerDecide */
+static void Vdp2SpriteLayerVerify(void);
 static int exactskip_allowed = 1;         /* Vdp2SetExactSkipAllowed */
 static Vdp2 exactskip_regs;
 static u32 exactskip_vdp1_gen;
@@ -207,8 +211,8 @@ u32 FASTCALL Vdp2ColorRamReadLong(u32 addr) {
 
 void FASTCALL Vdp2ColorRamWriteByte(u32 addr, u8 val) {
    addr &= 0xFFF;
-   if (!vdp2_cram_changed && T2ReadByte(Vdp2ColorRam, addr) != val)
-      vdp2_cram_changed = 1;
+   if (vdp2_cram_changed != 3 && T2ReadByte(Vdp2ColorRam, addr) != val)
+      vdp2_cram_changed = 3;
    T2WriteByte(Vdp2ColorRam, addr, val);
 }
 
@@ -216,8 +220,8 @@ void FASTCALL Vdp2ColorRamWriteByte(u32 addr, u8 val) {
 
 void FASTCALL Vdp2ColorRamWriteWord(u32 addr, u16 val) {
    addr &= 0xFFF;
-   if (!vdp2_cram_changed && T2ReadWord(Vdp2ColorRam, addr) != val)
-      vdp2_cram_changed = 1;
+   if (vdp2_cram_changed != 3 && T2ReadWord(Vdp2ColorRam, addr) != val)
+      vdp2_cram_changed = 3;
    T2WriteWord(Vdp2ColorRam, addr, val);
 //   if (Vdp2Internal.ColorMode == 0)
 //      T1WriteWord(Vdp2ColorRam, addr + 0x800, val);
@@ -227,8 +231,8 @@ void FASTCALL Vdp2ColorRamWriteWord(u32 addr, u16 val) {
 
 void FASTCALL Vdp2ColorRamWriteLong(u32 addr, u32 val) {
    addr &= 0xFFF;
-   if (!vdp2_cram_changed && T2ReadLong(Vdp2ColorRam, addr) != val)
-      vdp2_cram_changed = 1;
+   if (vdp2_cram_changed != 3 && T2ReadLong(Vdp2ColorRam, addr) != val)
+      vdp2_cram_changed = 3;
    T2WriteLong(Vdp2ColorRam, addr, val);
 }
 
@@ -457,6 +461,7 @@ void Vdp2VBlankIN(void) {
       }
    }
    VIDCore->Vdp2DrawEnd();
+   Vdp2SpriteLayerVerify();
    if (VIDCore->id == 2 /* VIDCORE_SOFT */ && vdp2_skip_draw != 1)
       vdp2_picture_frame = vdp2_frame_number;
    /* this should be done after a frame change or a plot trigger */
@@ -521,7 +526,7 @@ void Vdp2HBlankOUT(void) {
       /* exact skip: is this display line what the last one drawn had? (Not
          worth asking once VRAM or colour RAM changed: the field is drawn.) */
       const int display = yabsys.LineCount < yabsys.VBlankLineCount;
-      const int shown = display && !(exactskip_lines_changed | vdp2_vram_changed | vdp2_cram_changed);
+      const int shown = display && !(exactskip_lines_changed | vdp2_vram_changed | (vdp2_cram_changed & 1));
       if (shown && !Vdp2PictureRegsSame(Vdp2Lines + yabsys.LineCount, Vdp2Regs))
          exactskip_lines_changed = 1;
       memcpy(Vdp2Lines + yabsys.LineCount, Vdp2Regs, sizeof(Vdp2));
@@ -696,7 +701,7 @@ static void Vdp2ExactSkipDecide(void)
       return;
 
    same = exactskip_valid && exactskip_allowed && !vdp2_interlace &&
-          !vdp2_vram_changed && !vdp2_cram_changed && !exactskip_lines_changed &&
+          !vdp2_vram_changed && !(vdp2_cram_changed & 1) && !exactskip_lines_changed &&
           !(exactskip_cells_untracked && (Vdp2Regs->SCRCTL & 0x101)) &&
           exactskip_vdp1_gen == vidsoft_vdp1_front_gen && exactskip_vdp1_runs == vdp1_st_run &&
           exactskip_tvmr == (Vdp1Regs->TVMR & 7) && exactskip_fbcr == (Vdp1Regs->FBCR & 0xC) &&
@@ -717,7 +722,8 @@ static void Vdp2ExactSkipDecide(void)
       exactskip_core = VIDCore;
       exactskip_valid = 1;
    }
-   vdp2_vram_changed = vdp2_cram_changed = exactskip_lines_changed = exactskip_cells_untracked = 0;
+   vdp2_vram_changed = exactskip_lines_changed = exactskip_cells_untracked = 0;
+   vdp2_cram_changed &= ~1;
 
    exactskip_fields++;
    if (exactskip_log && exactskip_fields % 100 == 0)
@@ -731,6 +737,7 @@ static void Vdp2ExactSkipDecide(void)
 void Vdp2ExactSkipInvalidate(void)
 {
    exactskip_valid = 0;
+   sprreuse_valid = 0;
    exactskip_verify_same = 0;
    if (vdp2_skip_draw == 2)
       vdp2_skip_draw = 0;
@@ -764,6 +771,167 @@ void Vdp2ExactSkipVerifyPicture(const u16 *pic, int width, int height)
    if (exactskip_verify_same)
       vdp2_exact_dupes++;
    exactskip_verify_same = 0;
+   last = h;
+}
+
+/* Sprite layer reuse: the sprite layer (VidsoftDrawSprite) is not drawn
+   again when everything it reads equals what it read for its last drawn
+   field; its Titan lines are re-stamped instead (games that draw VDP1 at
+   30 fps change it on every other field only). What it reads, and how each
+   is followed:
+   - the shown VDP1 framebuffer and how it is read: vidsoft_vdp1_front_gen
+     (frame change, framebuffer mode change) and vdp1_st_run (deferred draws,
+     the only way into the shown buffer), TVMR, FBCR's interlace bits,
+     Vdp1External.disptoggle;
+   - the live VDP2 registers it reads (sprite_reuse_key below) and, while
+     colour offset is enabled for sprites, each display line's colour offset
+     registers (LoadLineParamsSprite);
+   - colour RAM (palette sprite pixels) and its mode: bit 1 of
+     vdp2_cram_changed, set by the write handlers;
+   - its output: Titan's sprite lines and, with the sprite window on,
+     sprite_window_mask; only the sprite layer writes either.
+   Decided at VBlank-OUT before VIDSoftVdp2DrawScreens (vdp2_sprite_kept, so
+   vidsoft.c, at GCC's inlining limit, only tests a flag); the kept lines are
+   re-stamped after it, once TitanErase has started the new frame.
+   Always drawn: interlace, rotated framebuffer and line windows (they read
+   VDP2 RAM). YAB_SPRREUSE=0 turns it off, 1 also logs counts, 2 checks it:
+   the layer is always drawn and Vdp2SpriteLayerVerify compares it with the
+   last one drawn when the inputs said "same". */
+struct SpriteReuseKey
+{
+   const VideoInterface_struct *core;
+   unsigned long vdp1_runs;
+   u32 vdp1_gen;
+   int disptoggle, colormode;
+   u16 tvmr, fbcr;
+   u16 regs[31];
+};
+static int sprreuse_mode = -1;            /* YAB_SPRREUSE: 0 off, 1 on, 2 check */
+static int sprreuse_log;
+static int sprreuse_decided;              /* this field: 0 not drawn, 1 drawn, 2 kept */
+static int sprreuse_verify;               /* check mode: 1 drawn, 2 drawn with the same inputs */
+static int sprreuse_window;               /* the drawn layer had the sprite window on */
+static u32 sprreuse_titan_frame;          /* Titan frame of the layer's lines */
+static struct SpriteReuseKey sprreuse_key;
+static u16 sprreuse_lines[270][8];
+static u32 sprreuse_fields, sprreuse_kept, sprreuse_misses;
+int vdp2_sprite_kept;
+
+static void Vdp2SpriteLineKey(u16 *k, const Vdp2 *l)
+{
+   k[0] = l->CLOFEN & 0x40; k[1] = l->CLOFSL & 0x40;
+   k[2] = l->COAR; k[3] = l->COAG; k[4] = l->COAB;
+   k[5] = l->COBR; k[6] = l->COBG; k[7] = l->COBB;
+}
+
+/* VBlank-OUT, right before the software renderer draws the field's layers */
+static void Vdp2SpriteLayerDecide(void)
+{
+   extern unsigned long vdp1_st_run;
+   struct SpriteReuseKey k;
+   const Vdp2 *r = Vdp2Regs;
+   int i, n = 0, same;
+   const int clof = r->CLOFEN & 0x40;
+
+   vdp2_sprite_kept = 0;
+   sprreuse_decided = 0;
+   if (VIDCore->id != 2 /* VIDCORE_SOFT */ || vdp2_skip_draw)
+      return;
+
+   if (sprreuse_mode < 0)
+   {
+      const char *env = getenv("YAB_SPRREUSE");
+      sprreuse_mode = env && env[0] >= '0' && env[0] <= '2' ? env[0] - '0' : 1;
+      sprreuse_log = env != NULL;
+   }
+   if (!sprreuse_mode)
+      return;
+
+   memset(&k, 0, sizeof(k));
+   k.core = VIDCore;
+   k.vdp1_runs = vdp1_st_run;
+   k.vdp1_gen = vidsoft_vdp1_front_gen;
+   k.disptoggle = Vdp1External.disptoggle;
+   k.colormode = Vdp2Internal.ColorMode;
+   k.tvmr = Vdp1Regs->TVMR;
+   k.fbcr = Vdp1Regs->FBCR & 0xC;
+   k.regs[n++] = r->TVMD; k.regs[n++] = r->SPCTL; k.regs[n++] = r->CRAOFB;
+   k.regs[n++] = r->LNCLEN & 0x20; k.regs[n++] = r->CCCTL & 0x340;
+   k.regs[n++] = r->PRISA; k.regs[n++] = r->PRISB; k.regs[n++] = r->PRISC; k.regs[n++] = r->PRISD;
+   k.regs[n++] = r->CCRSA; k.regs[n++] = r->CCRSB; k.regs[n++] = r->CCRSC; k.regs[n++] = r->CCRSD;
+   k.regs[n++] = r->CLOFEN & 0x40; k.regs[n++] = r->CLOFSL & 0x40;
+   k.regs[n++] = r->COAR; k.regs[n++] = r->COAG; k.regs[n++] = r->COAB;
+   k.regs[n++] = r->COBR; k.regs[n++] = r->COBG; k.regs[n++] = r->COBB;
+   k.regs[n++] = r->WCTLC >> 8; k.regs[n++] = r->WCTLD >> 8;
+   k.regs[n++] = r->WPSX0; k.regs[n++] = r->WPSY0; k.regs[n++] = r->WPEX0; k.regs[n++] = r->WPEY0;
+   k.regs[n++] = r->WPSX1; k.regs[n++] = r->WPSY1; k.regs[n++] = r->WPEX1; k.regs[n++] = r->WPEY1;
+
+   same = sprreuse_valid && !(vdp2_cram_changed & 2) && !memcmp(&k, &sprreuse_key, sizeof(k));
+   for (i = 0; same && clof && i < 270; i++)
+   {
+      u16 l[8];
+      Vdp2SpriteLineKey(l, Vdp2Lines + i);
+      same = !memcmp(l, sprreuse_lines[i], sizeof(l));
+   }
+
+   sprreuse_fields++;
+   if (sprreuse_log && sprreuse_fields % 100 == 0)
+      fprintf(stderr, "sprreuse: %u fields drawn, sprite layer kept on %u%s\n", sprreuse_fields, sprreuse_kept,
+              sprreuse_mode == 2 ? " (check mode: always drawn)" : "");
+   if (same && sprreuse_mode == 1)
+   {
+      vdp2_sprite_kept = 1;
+      sprreuse_decided = 2;
+      sprreuse_kept++;
+      return;
+   }
+
+   sprreuse_key = k;
+   if (clof)
+      for (i = 0; i < 270; i++)
+         Vdp2SpriteLineKey(sprreuse_lines[i], Vdp2Lines + i);
+   vdp2_cram_changed &= ~2;
+   /* not interlaced (double density), rotated framebuffer or line windows */
+   sprreuse_valid = ((r->TVMD >> 6) & 3) != 3 && !(k.tvmr & 2) &&
+                    !((r->LWTA0.part.U | r->LWTA1.part.U) & 0x8000);
+   sprreuse_decided = 1;
+   sprreuse_verify = 1 + same;
+   sprreuse_window = (r->SPCTL & 0x10) != 0;
+   sprreuse_kept += same;
+}
+
+/* After VIDSoftVdp2DrawScreens: TitanErase started a new frame */
+static void Vdp2SpriteLayerStarted(void)
+{
+   if (!sprreuse_decided)
+      return;
+   if (sprreuse_decided == 2)
+      TitanKeepLayerLines(TITAN_SPRITE, sprreuse_titan_frame);
+   sprreuse_titan_frame = TitanFrame();
+   vdp2_sprite_kept = 0;
+}
+
+/* Check mode, after the field was composited: a layer drawn with the same
+   inputs as the last must equal it */
+static void Vdp2SpriteLayerVerify(void)
+{
+   extern u8 sprite_window_mask[704 * 512];
+   static u32 last;
+   u32 h;
+   int i;
+   if (sprreuse_mode != 2 || !sprreuse_verify)
+      return;
+   h = TitanLayerHash(TITAN_SPRITE);
+   if (sprreuse_window)
+      for (i = 0; i < 704 * 512; i++)
+         h = (h ^ sprite_window_mask[i]) * 0x01000193u;
+   if (sprreuse_verify == 2 && h != last)
+   {
+      sprreuse_misses++;
+      fprintf(stderr, "sprreuse MISS: field %u (VBlank-OUT count): sprite layer differs from the last drawn with the same inputs (%u misses)\n",
+              vdp2_frame_number, sprreuse_misses);
+   }
+   sprreuse_verify = 0;
    last = h;
 }
 
@@ -862,7 +1030,9 @@ void Vdp2VBlankOUT(void) {
          vdp1_draw_pending = 0;
 
       if (Vdp2Regs->TVMD & 0x8000) {
+         Vdp2SpriteLayerDecide();
          VIDCore->Vdp2DrawScreens();
+         Vdp2SpriteLayerStarted();
          if (draw) Vdp1Draw();
       }
       else

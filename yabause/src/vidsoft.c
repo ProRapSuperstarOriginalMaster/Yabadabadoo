@@ -7532,7 +7532,9 @@ void VIDSoftVdp2DrawScreens(void)
       VidsoftBuildPalette(Vdp2ColorRam);
 
    //draw vdp2 sprite layer on a thread if sprite window is not enabled
-   if (CanUseSpriteThread() && vidsoft_num_layer_threads > 0)
+   if (vdp2_sprite_kept)
+      ; /* nothing it reads changed: its lines stay (vdp2.c) */
+   else if (CanUseSpriteThread() && vidsoft_num_layer_threads > 0)
    {
       vidsoft_thread_context.vdp1regs = *Vdp1Regs;
       vidsoft_thread_context.draw_finished[TITAN_SPRITE] = 0;

@@ -445,6 +445,9 @@ void Vdp2SetExternalFrameSkipNext(int next_shown, int lazy);
 void Vdp2ExactSkipInvalidate(void);
 void Vdp2SetExactSkipAllowed(int allowed);
 void Vdp2ExactSkipVerifyPicture(const u16 *pic, int width, int height);
+/* The software renderer doesn't draw the sprite layer this field: nothing it
+   reads changed since it was last drawn, its lines are kept (vdp2.c) */
+extern int vdp2_sprite_kept;
 extern u32 vdp2_exact_dupes;
 void Vdp2RestoreVideoCore(void);
 void Vdp2SetVdp1DrawEveryFrame(int every);

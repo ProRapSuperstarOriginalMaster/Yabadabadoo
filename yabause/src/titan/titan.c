@@ -666,6 +666,38 @@ void TitanSetLayerDirty(int layer)
    tt_context.layer_dirtied[layer] = 1;
 }
 
+u32 TitanFrame(void)
+{
+   return tt_context.frame;
+}
+
+void TitanKeepLayerLines(int layer, u32 from)
+{
+   int y;
+   for (y = 0; y < 512; y++)
+      if (tt_context.line_frame[layer][y] == from)
+      {
+         tt_context.line_frame[layer][y] = tt_context.frame;
+         tt_context.layer_dirtied[layer] = 1;
+      }
+}
+
+u32 TitanLayerHash(int layer)
+{
+   u32 h = 0x811C9DC5u ^ tt_context.layer_dirtied[layer];
+   int x, y;
+   for (y = 0; y < tt_context.vdp2height && y < 512; y++)
+   {
+      const struct PixelData *pd = &tt_context.vdp2framebuffer[layer][y * tt_context.vdp2width];
+      if (tt_context.line_frame[layer][y] != tt_context.frame)
+         continue;
+      h = (h ^ (y | (u32)tt_context.line_maxprio[layer][y] << 16)) * 0x01000193u;
+      for (x = 0; x < tt_context.vdp2width; x++)
+         h = (h ^ pd[x].pixel ^ (u32)pd[x].meta << 7) * 0x01000193u;
+   }
+   return h;
+}
+
 void TitanPutPixel(int priority, s32 x, s32 y, u32 color, int linescreen, vdp2draw_struct* info)
 {
    if (priority == 0) return;

@@ -81,6 +81,14 @@ int TitanClaimLayerLine(int layer, int y);
    maxprio (a claim alone assumes 7). Lets the compositor skip layers. */
 void TitanSetLineMaxPriority(int layer, int y, int maxprio);
 void TitanSetLayerDirty(int layer);
+/* The frame number TitanErase advances (a layer line is valid while its stamp
+   equals it) */
+u32 TitanFrame(void);
+/* Keep a layer's lines written in frame `from` for this frame (re-stamp them,
+   no pixel work), for a layer whose inputs did not change */
+void TitanKeepLayerLines(int layer, u32 from);
+/* Hash of a layer's lines valid this frame (check modes) */
+u32 TitanLayerHash(int layer);
 
 int TitanInit();
 int TitanDeInit();
