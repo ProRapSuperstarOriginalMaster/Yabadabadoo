@@ -5309,7 +5309,7 @@ enum { M68KQ_TIMER, M68KQ_TIMER_ONLY, M68KQ_GEN, M68KQ_EXEC };
 static struct { u32 pos, len, cdstart, cdlen; } m68kq_gen[M68KQ_GENS];
 static u32 m68kq_gens;                    // GEN entries queued so far
 static u32 m68kq_gen_entry;               // queue index of the last one
-#define M68KQ_SIZE 1024                   // > 3 frames of lines
+#define M68KQ_SIZE 8192                   // > 3 frames of decilines (a power of 2)
 static struct { s32 type, arg; } m68kq[M68KQ_SIZE];
 static volatile int m68kq_lock;           // held while an entry runs
 static int m68k_thread_on = -1;           // -1: not decided yet

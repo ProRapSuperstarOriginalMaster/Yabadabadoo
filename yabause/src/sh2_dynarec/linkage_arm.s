@@ -223,8 +223,6 @@ master_handle_interrupts:
 	.word	decilineusec_p
 .ufpptr:
 	.word	UsecFrac_p
-.scptr:
-	.word	saved_centicycles
 .icptr:
 	.word	invalidate_count
 .ccptr:
@@ -286,6 +284,15 @@ cc_interrupt:
 	.global	cc_interrupt_master
 	.type	cc_interrupt_master, %function
 cc_interrupt_master:
+	/* the 68K runs after every deciline, as in the interpreter's loop (yabause.c); the line's
+	   last one at nextline */
+	ldr	r0, [fp, #decilinecount-dynarec_local]
+	cmp	r0, #8
+	bhi	.A0
+	ldr	r0, [fp, #m68kcycles-dynarec_local]
+	ldr	r1, [fp, #m68kcenticycles-dynarec_local]
+	bl	DynarecM68KDeciline
+.A0:
 	ldr	r0, [fp, #decilinecount-dynarec_local]
 	ldr	r6, [fp, #decilinecycles-dynarec_local]
 	cmp	r0, #8
@@ -383,19 +390,10 @@ nextline:
 	lsr	r0, r10, r8
 	and	r10, r10, r9
 	bl	Cs2Exec
-	/*movw	r8, #:lower16:saved_centicycles*/
 	str	r10, [r5] /* usecfrac */
-	/*movt	r8, #:upper16:saved_centicycles*/
-	ldr	r8, .scptr
-	ldr	r1, [fp, #m68kcenticycles-dynarec_local]
-	ldr	r2, [r8]
 	ldr	r0, [fp, #m68kcycles-dynarec_local]
-	add	r2, r2, r1
-	cmp	r2, #100
-	subcs	r2, r2, #100
-	addcs	r0, r0, #1
-	str	r2, [r8] /* saved_centicycles */
-	bl	M68KExec
+	ldr	r1, [fp, #m68kcenticycles-dynarec_local]
+	bl	DynarecM68KDeciline /* the line's last deciline */
 	ldr	r14, [fp, #master_ip-dynarec_local]
 	eors	r1, r6, r7 /* linecount==maxlinecount ? */
 	bne	newline

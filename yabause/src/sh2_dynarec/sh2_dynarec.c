@@ -126,6 +126,22 @@ void DynarecMapDataArrays(void)
 }
 void DynarecWDTExec(u32 cycles) { WDTExec(CurrentSH2, cycles); }
 
+/* The sound CPU runs after every deciline (linkage_arm.s), as in the interpreter's frame loop
+   (yabause.c), not once per line: a line is ~1800 SH-2 cycles, so a CPU polling sound RAM for the
+   68K's answer saw it and replied before the 68K's next instruction (Vampire Savior: the master
+   wrote its next command between the 68K's ack and the store after it; the 68K then never built its
+   sound area map). line_cycles + line_centi/100 = the 68K's cycles per line. */
+void M68KExec(s32 cycles);
+void DynarecM68KDeciline(u32 line_cycles, u32 line_centi)
+{
+  static u32 frac; /* 1/1000 cycles */
+  u32 c;
+  frac += line_cycles * 100 + line_centi;
+  c = frac / 1000;
+  frac -= c * 1000;
+  M68KExec(c);
+}
+
 #ifdef __i386__
 #include "assem_x86.h"
 #endif
