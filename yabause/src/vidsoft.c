@@ -2533,6 +2533,129 @@ static void (*const vdp2_rot_kline[2][5])(vdp2draw_struct *, vdp2rotationparamet
    { Vdp2RotKLine4bpp, Vdp2RotKLine8bpp, Vdp2RotKLine16bppPal, Vdp2RotKLine16bppRGB, Vdp2RotKLine32bpp },
    { Vdp2RotKLine4bppBM, Vdp2RotKLine8bppBM, Vdp2RotKLine16bppPalBM, Vdp2RotKLine16bppRGBBM, Vdp2RotKLine32bppBM } };
 
+/* The values of one tile for Vdp2RotLeanLine() */
+struct RotLeanTile
+{
+   u32 charaddr, fxy, alpha, meta;
+   const u8 *tp;          /* the tile's 64 bytes (ROTLEAN_PAL) */
+   const u32 *palp;       /* its 256 palette entries (ROTLEAN_PAL) */
+   int kind;              /* ROTLEAN_SKIP (priority 0), ROTLEAN_PAL, ROTLEAN_ANY */
+};
+#define ROTLEAN_SKIP 0
+#define ROTLEAN_PAL 1
+#define ROTLEAN_ANY 2
+
+static INLINE __attribute__((always_inline)) void Vdp2RotLeanTileVals(vdp2draw_struct *info, u8 *ram, struct RotLeanTile *t)
+{
+   /* GetAlpha() for special colour calculation mode 0 or 1 */
+   const u32 a = (info->specialcolormode == 1 && !(info->specialcolorfunction & 1)) ? 0x3F : info->alpha;
+   const u32 cb = info->charaddr & 0x7FFFF;
+   t->charaddr = info->charaddr;
+   t->fxy = ((info->flipfunction & 2) ? 0x38 : 0) | ((info->flipfunction & 1) ? 7 : 0);
+   t->alpha = a << 24;
+   t->meta = TitanPackMeta(info->priority, info->linescreen, info->titan_shadow_type, info->titan_shadow_enabled);
+   t->tp = ram + cb;
+   t->palp = vidsoft_pal + ((info->coloroffset + info->paladdr) & vidsoft_pal_mask);
+   /* ROTLEAN_PAL: the tile doesn't wrap at the end of VRAM, so masking its
+    * address once masks each pixel's; and with no bits under the dot in the
+    * palette address and the colour RAM offset, coloroffset + (paladdr | dot)
+    * is their sum + dot, whose entries don't wrap (the mask is 1023 or 2047) */
+   t->kind = info->priority == 0 ? ROTLEAN_SKIP :
+             (cb <= 0x7FFFF - 63 && !((info->coloroffset | info->paladdr) & 0xFF)) ? ROTLEAN_PAL : ROTLEAN_ANY;
+}
+
+/* Vdp2MapCalcXYFast()'s lookup of a new tile, out of the pixel loop */
+static __attribute__((noinline)) void Vdp2RotLeanNewTile(vdp2draw_struct *info, screeninfo_struct *sinfo, Vdp2 *regs, u8 *ram,
+   int x, int y, struct RotLeanTile *t)
+{
+   Vdp2MapCalcXYFast(info, &x, &y, sinfo, regs, ram);
+   Vdp2RotLeanTileVals(info, ram, t);
+}
+
+/* One line of the no-coefficient rotation loop of Vdp2DrawRotationFP() in the
+ * case Sega Rally draws its road-side backgrounds in: 8bpp tiles of one cell,
+ * scale 1.0, no window, special colour calculation mode 0 or 1, no colour
+ * offset, and the palette built for this frame (vidsoft_pal). Same pixels and
+ * the same tile lookup state as that loop: the same position (mulfixed() by
+ * 1.0 is the identity, dX*i is a running sum, the same modulo 2^32) and mask;
+ * the tile's values (character address, palette, flip, alpha and priority,
+ * which special priority mode 1 sets per tile) are taken again when the
+ * position enters another tile, which is when Vdp2MapCalcXY() looks one up.
+ * The pixels of one tile are drawn by an inner loop that keeps its values in
+ * registers: the tile number is (pos >> 19) & (mask >> 3), so the position
+ * is still in the tile while the bits (mask >> 3) << 19 stay the same. */
+static __attribute__((noinline)) void Vdp2RotLeanLine(vdp2draw_struct *info, vdp2rotationparameterfp_struct *p, screeninfo_struct *sinfo,
+   fixed32 Xs, fixed32 Ys, Vdp2 *regs, u8 *ram, int j)
+{
+   const u32 dX = (u32)p->dX, dY = (u32)p->dY;
+   const u32 xmask = sinfo->xmask, ymask = sinfo->ymask;
+   const u32 xbits = (xmask >> 3) << 19, ybits = (ymask >> 3) << 19;
+   const u32 opaque_zero = info->transparencyenable ? 0 : 0x100;
+   const int width = rbg0width;
+   struct PixelData *const line = TitanGetLayerLine(info->titan_which_layer, j);
+   int claimed = 0;
+   struct RotLeanTile t;
+   u32 ax = (u32)Xs + (u32)p->Xp, ay = (u32)Ys + (u32)p->Yp;
+   int old = sinfo->oldcellcheck;
+   int i = 0;
+
+   Vdp2RotLeanTileVals(info, ram, &t);
+   while (i < width)
+   {
+      const u32 x = (ax >> 16) & xmask, y = (ay >> 16) & ymask;
+      const int check = ((y >> 3) << 16) | (x >> 3);
+      if (check != old)
+      {
+         Vdp2RotLeanNewTile(info, sinfo, regs, ram, x, y, &t);
+         old = check;
+      }
+      if (claimed && t.kind == ROTLEAN_PAL)
+      {
+         /* the rest of the pixels in this tile */
+         const u8 *const tp = t.tp;
+         const u32 *const palp = t.palp;
+         const u32 fxy = t.fxy, alpha = t.alpha, meta = t.meta;
+         const u32 ax0 = ax, ay0 = ay;
+         struct PixelData *out = line + i, *const end = line + width;
+         do
+         {
+            const u32 dot = tp[(((ax >> 16) & 7) | ((ay >> 13) & 0x38)) ^ fxy];
+            if (dot | opaque_zero)
+            {
+               out->pixel = alpha | (palp[dot] & 0xFFFFFF);
+               out->meta = meta;
+            }
+            out++;
+            ax += dX;
+            ay += dY;
+         } while (out < end && !(((ax ^ ax0) & xbits) | ((ay ^ ay0) & ybits)));
+         i = out - line;
+         continue;
+      }
+      /* one pixel */
+      if (t.kind != ROTLEAN_SKIP)
+      {
+         const u32 dot = T1ReadByte(ram, (t.charaddr + ((((y & 7) << 3) | (x & 7)) ^ t.fxy)) & 0x7FFFF);
+         if (dot | opaque_zero)
+         {
+            if (!claimed)
+            {
+               /* TitanPutPixel() clears a line that is stale from an earlier
+                * frame on its first write */
+               claimed = 1;
+               if (TitanClaimLayerLine(info->titan_which_layer, j))
+                  memset(line, 0, sizeof(struct PixelData) * vdp2width);
+            }
+            line[i].pixel = t.alpha | (vidsoft_pal[(info->coloroffset + (info->paladdr | dot)) & vidsoft_pal_mask] & 0xFFFFFF);
+            line[i].meta = t.meta;
+         }
+      }
+      ax += dX;
+      ay += dY;
+      i++;
+   }
+}
+
 static void FASTCALL Vdp2DrawRotationFP(vdp2draw_struct *info, vdp2rotationparameterfp_struct *parameter, Vdp2* lines, Vdp2* regs, u8* ram, u8* color_ram, struct CellScrollData * cell_data)
 {
    int i, j;
@@ -2580,11 +2703,17 @@ static void FASTCALL Vdp2DrawRotationFP(vdp2draw_struct *info, vdp2rotationparam
             ReadLineWindowClip(info->islinewindow, clip, &linewnd0addr, &linewnd1addr, ram, regs);
             wintab = (info->wctl & 0x2a) && rbg0width <= 1024 ? VidsoftWinTable(info->wctl, clip, j, rbg0width, winbuf) : NULL;
 
+            if (!vdp2_x_hires && !info->isbitmap && info->colornumber == 1 && info->patternwh == 1 && info->cellw == 8 &&
+                p->kx == tofixed(1) && p->ky == tofixed(1) && (info->wctl & 0xaa) == 0 && info->specialcolormode <= 1 &&
+                info->PostPixelFetchCalc == &DoNothing && Vdp2Internal.ColorMode == vidsoft_pal_mode && color_ram == vidsoft_pal_src)
+               Vdp2RotLeanLine(info, p, &sinfo, mulfixed(p->A, xmul) + mulfixed(p->B, ymul) + C,
+                  mulfixed(p->D, xmul) + mulfixed(p->E, ymul) + F, regs, ram, j);
             /* The coefficient loop's per-line loops give the same pixels:
              * their running dX sum is mulfixed(dX, tofixed(i)) modulo 2^32,
              * and with screen-over 0/1 they mask the position as this loop
-             * does (Sega Rally's road-side backgrounds) */
-            if (!vdp2_x_hires && p->screenover <= 1 && info->colornumber <= 4 && info->priority != 0)
+             * does. They take the priority once per line, so not with
+             * special priority mode 1 (a priority bit per tile). */
+            else if (!vdp2_x_hires && p->screenover <= 1 && info->colornumber <= 4 && info->priority != 0 && info->specialprimode != 1)
                vdp2_rot_kline[info->isbitmap ? 1 : 0][info->colornumber](info, p, &sinfo,
                   mulfixed(p->A, xmul) + mulfixed(p->B, ymul) + C, mulfixed(p->D, xmul) + mulfixed(p->E, ymul) + F,
                   regs, ram, color_ram, wintab, clip, j);
