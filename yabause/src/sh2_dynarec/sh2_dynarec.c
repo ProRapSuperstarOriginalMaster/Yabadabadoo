@@ -5126,6 +5126,7 @@ void clean_registers(int istart,int iend,int wr)
 {
   int i;
   int r;
+  u32 freem,m;
   u32 will_dirty_i,will_dirty_next,temp_will_dirty;
   u32 wont_dirty_i,wont_dirty_next,temp_wont_dirty;
   if(iend==slen-1) {
@@ -5477,7 +5478,19 @@ void clean_registers(int istart,int iend,int wr)
     }
     will_dirty_next=will_dirty_i;
     wont_dirty_next=wont_dirty_i;
-    for(r=0;r<HOST_REGS;r++) {
+    // A register free in the current map (-1) ends up not "will dirty", and
+    // "won't dirty" only if an instruction's target is (-1&63): no need to
+    // test each one
+    freem=0;
+    for(r=0;r<HOST_REGS;r++)
+      if(r!=EXCLUDE_REG&&regs[i].regmap[r]==-1) freem|=1<<r;
+    will_dirty_i&=~freem;
+    if(rt1[i]==(-1&63)||rt2[i]==(-1&63)||
+       (i>istart&&itype[i]!=RJUMP&&itype[i]!=UJUMP&&itype[i]!=CJUMP&&itype[i]!=SJUMP&&
+        (rt1[i-1]==(-1&63)||rt2[i-1]==(-1&63))))
+      wont_dirty_i|=freem;
+    for(m=~freem&((1<<HOST_REGS)-1);m;m&=m-1) {
+      r=__builtin_ctz(m);
       if(r!=EXCLUDE_REG) {
         if((regs[i].regmap[r]&63)==rt1[i]) will_dirty_i|=1<<r;
         if((regs[i].regmap[r]&63)==rt2[i]) will_dirty_i|=1<<r;
@@ -5556,7 +5569,17 @@ void clean_registers(int istart,int iend,int wr)
     // Deal with changed mappings
     temp_will_dirty=will_dirty_i;
     temp_wont_dirty=wont_dirty_i;
-    for(r=0;r<HOST_REGS;r++) {
+    // registers free in both maps keep their will/won't bits: only wasdirty
+    // changes for them, the same way for all
+    freem=0;
+    for(r=0;r<HOST_REGS;r++)
+      if(r!=EXCLUDE_REG&&(regs[i].regmap[r]&regmap_pre[i][r])==-1) freem|=1<<r;
+    if(wr) {
+      regs[i].wasdirty&=wont_dirty_i|~freem;
+      regs[i].wasdirty|=will_dirty_i&freem;
+    }
+    for(m=~freem&((1<<HOST_REGS)-1);m;m&=m-1) {
+      r=__builtin_ctz(m);
       if(r!=EXCLUDE_REG) {
         int nr;
         if(regs[i].regmap[r]==regmap_pre[i][r]) {
