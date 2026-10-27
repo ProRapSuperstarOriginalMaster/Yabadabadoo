@@ -103,6 +103,7 @@ void VIDSoftGetGlSize(int *width, int *height);
 void VIDSoftVdp1SwapFrameBuffer(void);
 void VIDSoftVdp1EraseFrameBuffer(Vdp1* regs, u8 * back_framebuffer);
 void VidsoftDrawSprite(Vdp2 * vdp2_regs, u8 * sprite_window_mask, u8* vdp1_front_framebuffer, u8 * vdp2_ram, Vdp1* vdp1_regs, Vdp2* vdp2_lines, u8*color_ram);
+int VidsoftDrawSprite8(Vdp2 *regs, u8 *fb, Vdp1 *vdp1_regs, Vdp2 *lines, u8 *color_ram, int vdp1width); /* vidsoftsprite8.c */
 void VIDSoftGetNativeResolution(int *width, int *height, int*interlace);
 void VIDSoftVdp2DispOff(void);
 
@@ -3929,7 +3930,8 @@ void VidsoftSpriteThread(void * data)
       {
          vidsoft_thread_context.need_draw[TITAN_SPRITE] = 0;
          YAB_PROF_TBEGIN(PROF_T_SPRITE);
-         VidsoftDrawSprite(&vidsoft_thread_context.regs, sprite_window_mask, vdp1frontframebuffer, vidsoft_thread_context.ram, &vidsoft_thread_context.vdp1regs, vidsoft_thread_context.lines, vidsoft_thread_context.color_ram);
+         if (!(vdp1pixelsize == 1 && VidsoftDrawSprite8(&vidsoft_thread_context.regs, vdp1frontframebuffer, &vidsoft_thread_context.vdp1regs, vidsoft_thread_context.lines, vidsoft_thread_context.color_ram, vdp1width)))
+            VidsoftDrawSprite(&vidsoft_thread_context.regs, sprite_window_mask, vdp1frontframebuffer, vidsoft_thread_context.ram, &vidsoft_thread_context.vdp1regs, vidsoft_thread_context.lines, vidsoft_thread_context.color_ram);
          YAB_PROF_TEND(PROF_T_SPRITE);
          YabFlagSet(vidsoft_thread_context.draw_finished[TITAN_SPRITE], 1);
          YabFlagNotify();
@@ -7579,7 +7581,8 @@ void VIDSoftVdp2DrawScreens(void)
       YabThreadWake(YAB_THREAD_VIDSOFT_LAYER_SPRITE);
       num_threads_dispatched++;
    }
-   else
+   /* the common 8-bit framebuffer case has a lean loop (same output) */
+   else if (!(vdp1pixelsize == 1 && VidsoftDrawSprite8(Vdp2Regs, vdp1frontframebuffer, Vdp1Regs, Vdp2Lines, Vdp2ColorRam, vdp1width)))
    {
       VidsoftDrawSprite(Vdp2Regs, sprite_window_mask, vdp1frontframebuffer, Vdp2Ram, Vdp1Regs, Vdp2Lines, Vdp2ColorRam);
    }

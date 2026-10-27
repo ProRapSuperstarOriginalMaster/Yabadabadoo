@@ -11,6 +11,7 @@
 #include "../yabause/src/vdp2.c"
 #include "../yabause/src/vidshared.c"
 #include "../yabause/src/vidsoft.c"
+#include "../yabause/src/vidsoftsprite8.c"
 #include "../yabause/src/yabause.c"
 
 #include "libretro.c"
