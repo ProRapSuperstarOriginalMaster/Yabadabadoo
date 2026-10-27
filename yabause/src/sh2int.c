@@ -231,6 +231,21 @@ static void FASTCALL SH2delay(SH2_struct * sh, u32 addr)
       sh->instruction = ((fetchfunc *)sh->fetchlist)[(addr >> 20) & 0x0FF](sh, addr);
    }
 
+   // A PC-relative instruction in the delay slot of a taken branch computes
+   // its address from the branch target: PC reads as target+2 (SH-2 manual,
+   // MOV.L @(disp,PC); Beetle), so MOV.W @(disp,PC) reads target+2+disp*2
+   // and MOV.L/MOVA ((target+2)&~3)+disp*4, as if the slot sat at
+   // target-2 (they add 4 to PC themselves). Mortal Kombat Trilogy's sprite
+   // colour modes come from such a load (U44).
+   if ((sh->instruction & 0xB000) == 0x9000 || (sh->instruction & 0xFF00) == 0xC700)
+   {
+      u32 target = sh->regs.PC;
+      sh->regs.PC = target - 2;
+      ((opcodefunc *)sh->opcodes)[sh->instruction](sh);
+      sh->regs.PC = target;
+      return;
+   }
+
    // Execute it
    ((opcodefunc *)sh->opcodes)[sh->instruction](sh);
    sh->regs.PC -= 2;
