@@ -1707,7 +1707,14 @@ static void M68KThreadStop (void);
    the call), before anything touches sound RAM, the SCSP or the 68K
    (M68KJobWait; M68KQueuePush of other work) and before the line's last chunk
    (M68KExec): the same as running the 68K after every deciline, as the
-   interpreter's loop does, at one queue entry a line instead of ten. */
+   interpreter's loop does, at one queue entry a line instead of ten. They run
+   one right after the other, so once one is an idle skip the rest are too
+   (M68KMusashiIdleChain). */
+#ifdef HAVE_MUSASHI
+#define M68K_IDLE_CHAIN(on) M68KMusashiIdleChain(on)
+#else
+#define M68K_IDLE_CHAIN(on)
+#endif
 #define M68K_OWED_MAX 10
 static s32 m68k_owed_c[M68K_OWED_MAX];
 static int m68k_owed_n;
@@ -5358,8 +5365,10 @@ M68KQueueRunOne (void)
   case M68KQ_EXECS:  // owed chunks (M68KPayOwed): count, which ones are 1 longer, base length
   {
     s32 i, n = arg & 15, longer = (arg >> 4) & 0x3FF, base = arg >> 16;
+    M68K_IDLE_CHAIN(1);
     for (i = 0; i < n; i++)
       M68KExecInline(base + ((longer >> i) & 1));
+    M68K_IDLE_CHAIN(0);
     break;
   }
   case M68KQ_TIMER:
@@ -5634,8 +5643,10 @@ M68KPayOwed (void)
     return;
   }
   M68KJobWait();
+  M68K_IDLE_CHAIN(1);
   for (i = 0; i < n; i++)
     M68KExecInline(m68k_owed_c[i]);
+  M68K_IDLE_CHAIN(0);
 }
 
 void new_scsp_run_sample()

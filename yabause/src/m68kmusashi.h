@@ -28,5 +28,6 @@ extern M68K_struct M68KMusashi;
 extern int m68k_idle_skip;
 void M68KMusashiIdleReset(void);
 void M68KMusashiIdleSync(void);
+void M68KMusashiIdleChain(int on);
 
 #endif
