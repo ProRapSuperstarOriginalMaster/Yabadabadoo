@@ -679,6 +679,29 @@ else
 	endif
 endif
 
+# Link-time and profile-guided optimisation (GCC; off by default).
+# LTO=1: whole-core optimisation at link time (LTO_JOBS parallel partitions).
+# PGO=gen: an instrumented core that writes its profile (.gcda files) under PGO_DIR when the
+# process exits; PGO=use: build with that profile. The .gcda names follow the object paths
+# (PGO_DIR/../x.c.gcda for ../x.c.o, so they land in pgo-profile/), and the use build must run
+# in the same directory as the gen build.
+LTO_JOBS ?= 4
+PGO_DIR ?= $(CURDIR)/pgo-profile/o
+ifeq ($(PGO),gen)
+	CFLAGS += -fprofile-generate=$(PGO_DIR) -fprofile-update=atomic
+	CXXFLAGS += -fprofile-generate=$(PGO_DIR) -fprofile-update=atomic
+	LDFLAGS += -fprofile-generate=$(PGO_DIR)
+else ifeq ($(PGO),use)
+	CFLAGS += -fprofile-use=$(PGO_DIR) -fprofile-correction
+	CXXFLAGS += -fprofile-use=$(PGO_DIR) -fprofile-correction
+endif
+ifeq ($(LTO),1)
+	CFLAGS += -flto
+	CXXFLAGS += -flto
+	# code is generated at link time: the link gets the compile's -O/-f/-m flags
+	LDFLAGS += $(filter -O% -f% -m%,$(CFLAGS)) -flto=$(LTO_JOBS) -fuse-linker-plugin
+endif
+
 all: $(TARGET)
 
 generate-files:
