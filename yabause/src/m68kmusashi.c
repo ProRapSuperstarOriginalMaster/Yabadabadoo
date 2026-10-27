@@ -88,6 +88,9 @@ int m68k_idle_skip = 1;
 #define PROBE_CYCLES    3000    /* give up a probe after this many cycles */
 #define PROBE_WAIT_CYCLES 30000 /* or, waiting to relearn a loop, after this many */
 #define IDLE_REPROBE    4       /* slices between probes while in a loop whose values changed */
+#define PROBE_SLICE     716     /* the probe intervals count 68K time in slices of a line (they were
+                                   tuned with one call a line; the recompiler now calls ten times a
+                                   line, and probing ten times as often doubled the 68K's cost) */
 
 typedef struct
 {
@@ -128,7 +131,7 @@ static u32 stat_steps_found, stat_steps_fail, stat_fail_reason[4];
 static double stat_now(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return ts.tv_sec + ts.tv_nsec * 1e-9; }
 static int idle_nloops;
 static u32 idle_clock;                   /* counts slices, for replacing the least recently used loop */
-static u32 probe_wait, probe_interval = 16;
+static u32 probe_wait, probe_interval = 16;   /* probe_wait: 68K cycles since the last probe */
 static u32 relearn_interval = IDLE_REPROBE;   /* doubles while relearning fails */
 static u32 relearn_sig = 0xFFFFFFFF;           /* the loop's inputs at the previous slice */
 
@@ -671,7 +674,7 @@ static s32 FASTCALL M68KMusashiExec(s32 cycle) {
       }
       /* it runs, from where the skipped time has got to */
       idle_resume_all();
-      ++probe_wait;
+      probe_wait += cycle;
       if (relearn)
       {
          /* relearn once its inputs have stayed the same for a slice: while
@@ -686,7 +689,7 @@ static s32 FASTCALL M68KMusashiExec(s32 cycle) {
             relearn = NULL;
          }
       }
-      if (probe_wait >= probe_interval || (relearn && probe_wait >= relearn_interval))
+      if (probe_wait >= probe_interval * PROBE_SLICE || (relearn && probe_wait >= relearn_interval * PROBE_SLICE))
       {
          probe_wait = 0;
          if (cycle + idle_debt > 0)
