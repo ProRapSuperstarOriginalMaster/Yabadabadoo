@@ -1701,8 +1701,12 @@ static volatile u32 m68kq_head, m68kq_tail; // next entry to queue / to run
 static void M68KQueueDrain (void);
 static void M68KThreadStop (void);
 
-/* The 68K chunks the recompiler's frame loop owes (M68KExecLater): one per
-   deciline since the 68K last ran. They run, still one Musashi call each (a
+/* The 68K chunks the recompiler's frame loop owes: one per deciline since the
+   68K last ran (linkage_arm.s counts them in m68k_owed_decilines; their
+   lengths follow from the 68K's cycles a line, m68k_line_cycles = cycles and
+   hundredths, set at each frame's start, in the order they were owed, so they
+   are the same as when they were worked out at each deciline, without a call
+   from the recompiler's loop for each). They run, still one Musashi call each (a
    merged call is not the same: an interrupt's cycles are charged at the end of
    the call), before anything touches sound RAM, the SCSP or the 68K
    (M68KJobWait; M68KQueuePush of other work) and before the line's last chunk
@@ -1716,16 +1720,29 @@ static void M68KThreadStop (void);
 #define M68K_IDLE_CHAIN(on)
 #endif
 #define M68K_OWED_MAX 10
-static s32 m68k_owed_c[M68K_OWED_MAX];
-static int m68k_owed_n;
+u32 m68k_owed_decilines;
+u32 m68k_line_cycles[2] = { 716, 20 };
+static u32 m68k_deciline_frac;             // 1/1000 cycles
 static void M68KPayOwed (void);
+
+/* the length of the next deciline's chunk; inc = the 68K's cycles a
+   deciline in 1/1000 */
+static INLINE s32
+M68KDecilineCycles (u32 inc)
+{
+  u32 c;
+  m68k_deciline_frac += inc;
+  c = m68k_deciline_frac / 1000;
+  m68k_deciline_frac -= c * 1000;
+  return c;
+}
 
 /* Called by everything on the emulation thread that touches sound RAM, the
    SCSP or the 68K */
 static INLINE void
 M68KJobWait (void)
 {
-  if (UNLIKELY(m68k_owed_n))
+  if (UNLIKELY(m68k_owed_decilines))
     M68KPayOwed();
   if (UNLIKELY(m68kq_head != __atomic_load_n(&m68kq_tail, __ATOMIC_ACQUIRE) ||
                __atomic_load_n(&m68k_pending_mint, __ATOMIC_ACQUIRE)))
@@ -5547,7 +5564,7 @@ static INLINE void
 M68KQueuePush (s32 type, s32 arg)
 {
   u32 h;
-  if (type != M68KQ_EXEC && type != M68KQ_EXECS && m68k_owed_n)
+  if (type != M68KQ_EXEC && type != M68KQ_EXECS && m68k_owed_decilines)
     M68KPayOwed();  // the 68K's owed chunks come first
   h = m68kq_head;
   if (h - __atomic_load_n(&m68kq_tail, __ATOMIC_ACQUIRE) >= M68KQ_SIZE)
@@ -5599,7 +5616,7 @@ M68KExec (s32 cycles)
 #undef M68KExec
 #endif
 {
-  if (m68k_owed_n)
+  if (m68k_owed_decilines)
     M68KPayOwed();
   if (UNLIKELY(m68k_thread_on < 0))
     M68KThreadDecide();
@@ -5612,40 +5629,41 @@ M68KExec (s32 cycles)
   M68KExecInline(cycles);
 }
 
+/* The recompiler's line end (linkage_arm.s nextline): the line's last
+   deciline, after the owed ones */
 void
-M68KExecLater (s32 cycles)
+M68KExecLastDeciline (void)
 {
-  if (m68k_owed_n == M68K_OWED_MAX)
+  if (m68k_owed_decilines)
     M68KPayOwed();
-  m68k_owed_c[m68k_owed_n++] = cycles;
+  M68KExec(M68KDecilineCycles(m68k_line_cycles[0] * 100 + m68k_line_cycles[1]));
 }
 
 static void
 M68KPayOwed (void)
 {
-  s32 i, n = m68k_owed_n, base = m68k_owed_c[0], longer = 0, fits = 1;
-  m68k_owed_n = 0;
+  const u32 inc = m68k_line_cycles[0] * 100 + m68k_line_cycles[1];
+  const s32 base = inc / 1000;   // a chunk is base or base + 1 cycles (71/72)
+  u32 i, n = m68k_owed_decilines;
+  m68k_owed_decilines = 0;
   if (UNLIKELY(m68k_thread_on < 0))
     M68KThreadDecide();
-  for (i = 1; i < n; i++)
-    if (m68k_owed_c[i] < base)
-      base = m68k_owed_c[i];
-  for (i = 0; i < n; i++)
+  if (m68k_thread_on && !__atomic_load_n(&m68k_pending_mint, __ATOMIC_ACQUIRE) && base < 0x8000)
   {
-    if (m68k_owed_c[i] - base > 1)
-      fits = 0;  // one entry holds chunks of base or base + 1 cycles (71/72)
-    longer |= (m68k_owed_c[i] - base) << i;
-  }
-  if (m68k_thread_on && !__atomic_load_n(&m68k_pending_mint, __ATOMIC_ACQUIRE) &&
-      fits && base >= 0 && base < 0x8000)
-  {
-    M68KQueuePush(M68KQ_EXECS, (base << 16) | (longer << 4) | n);
+    while (n)
+    {
+      u32 k = n < M68K_OWED_MAX ? n : M68K_OWED_MAX, longer = 0;
+      for (i = 0; i < k; i++)
+        longer |= (M68KDecilineCycles(inc) - base) << i;
+      M68KQueuePush(M68KQ_EXECS, (base << 16) | (longer << 4) | k);
+      n -= k;
+    }
     return;
   }
   M68KJobWait();
   M68K_IDLE_CHAIN(1);
   for (i = 0; i < n; i++)
-    M68KExecInline(m68k_owed_c[i]);
+    M68KExecInline(M68KDecilineCycles(inc));
   M68K_IDLE_CHAIN(0);
 }
 

@@ -122,6 +122,8 @@ YabauseDynarecOneFrameExec:
 	ldr	r12, .dlptr
 	str	r0, [r12, #m68kcycles-dynarec_local-28]
 	str	r1, [r12, #m68kcenticycles-dynarec_local-28]
+	ldr	r2, .m68klcptr
+	stmia	r2, {r0, r1} /* m68k_line_cycles (scsp.c): the owed 68K chunks' lengths */
 	mov	r2, #0
 	stmia	r12, {r4, r5, r6, r7, r8, r9, sl, fp, lr}
 	sub	fp, r12, #28
@@ -225,6 +227,10 @@ master_handle_interrupts:
 	.word	UsecFrac_p
 .icptr:
 	.word	invalidate_count
+.m68kodptr:
+	.word	m68k_owed_decilines
+.m68klcptr:
+	.word	m68k_line_cycles
 .ccptr:
 	.word	cached_code
 	.size	YabauseDynarecOneFrameExec, .-YabauseDynarecOneFrameExec
@@ -284,16 +290,15 @@ cc_interrupt:
 	.global	cc_interrupt_master
 	.type	cc_interrupt_master, %function
 cc_interrupt_master:
-	/* the 68K runs after every deciline, as in the interpreter's loop (yabause.c); the line's
-	   last one at nextline */
+	/* the 68K runs after every deciline, as in the interpreter's loop (yabause.c): decilines
+	   0-8 are owed (m68k_owed_decilines++, scsp.c runs them when due), the line's last one
+	   runs at nextline */
 	ldr	r0, [fp, #decilinecount-dynarec_local]
 	cmp	r0, #8
-	bhi	.A0
-	ldr	r0, [fp, #m68kcycles-dynarec_local]
-	ldr	r1, [fp, #m68kcenticycles-dynarec_local]
-	mov	r2, #0
-	bl	DynarecM68KDeciline
-.A0:
+	ldrls	r1, .m68kodptr
+	ldrls	r0, [r1]
+	addls	r0, r0, #1
+	strls	r0, [r1]
 	ldr	r0, [fp, #decilinecount-dynarec_local]
 	ldr	r6, [fp, #decilinecycles-dynarec_local]
 	cmp	r0, #8
@@ -392,10 +397,7 @@ nextline:
 	and	r10, r10, r9
 	bl	Cs2Exec
 	str	r10, [r5] /* usecfrac */
-	ldr	r0, [fp, #m68kcycles-dynarec_local]
-	ldr	r1, [fp, #m68kcenticycles-dynarec_local]
-	mov	r2, #1
-	bl	DynarecM68KDeciline /* the line's last deciline */
+	bl	M68KExecLastDeciline /* the owed decilines, then the line's last */
 	ldr	r14, [fp, #master_ip-dynarec_local]
 	eors	r1, r6, r7 /* linecount==maxlinecount ? */
 	bne	newline
