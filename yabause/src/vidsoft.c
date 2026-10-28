@@ -25,6 +25,7 @@
 */
 
 #include "vidsoft.h"
+#include "vidsoftquad.h"
 #include "yabprof.h"
 #include "ygl.h"
 #include "vidshared.h"
@@ -237,11 +238,7 @@ int bad_cycle_setting[6] = { 0 };
  * register; they fit easily in the static TLS space glibc keeps for dlopen),
  * and the arrays are plain statics with one copy per drawing thread,
  * picked by vdp1_tid. */
-#if defined(__GNUC__) || defined(__clang__)
-#define VDP1_TLS __thread __attribute__((tls_model("initial-exec")))
-#else
-#define VDP1_TLS
-#endif
+/* VDP1_TLS: vidsoftquad.h */
 
 /* framebuffer rows this thread draws (all when not split) */
 static VDP1_TLS int vdp1_row_lo = INT_MIN, vdp1_row_hi = INT_MAX;
@@ -4678,10 +4675,7 @@ static INLINE u32 alphablend16(u32 d, u32 s, u32 level)
 	return r|g|b;
 }
 
-typedef struct _COLOR_PARAMS
-{
-	double r,g,b;
-} COLOR_PARAMS;
+/* COLOR_PARAMS: vidsoftquad.h */
 
 VDP1_TLS COLOR_PARAMS leftColumnColor;
 
@@ -5170,6 +5164,7 @@ typedef struct {
    int dil_skip;     /* y parity that CheckDil() rejects, or -1 */
    int user_clip;    /* user clipping: 0 off, 1 inside, 2 outside */
    int fb8;          /* 8-bit framebuffer (putpixel8() instead of putpixel()) */
+   int rev;          /* drawn last line first (vidsoftquad.c) */
 } Vdp1QuadState;
 
 static int Vdp1QuadSetup(Vdp1QuadState *st, Vdp1 *regs, vdp1cmd_struct *cmd)
@@ -5248,26 +5243,7 @@ static INLINE __attribute__((always_inline)) int Vdp1QuadPut(const int drawmode,
 static u32 quad_pt_buf[2][2048];
 #define QUAD_PT(X, Y) (((u32)(X) & 0xFFFF) | ((u32)(Y) << 16))
 
-/* per-line values for QuadPlotPoints(), passed by value so they stay in
- * registers */
-typedef struct {
-   const u32 *pts;
-   u16 *fb;
-   u8 *fb8;
-   u8 *ram;
-   Vdp1 *regs;
-   vdp1cmd_struct *cmd;
-   u32 rowaddr, colorbank, colorlut;
-   int colormode, drawmode, flip, SPD, endcodes, isTextured, untexturedColor;
-   int mesh, msbon, dil_skip, cw, interlace, width, noclip, n, user_clip;
-   int step_q, step_r, linelength, row_lo, row_hi;
-   double texturestep, xredstep, xgreenstep, xbluestep;
-} QuadLine;
-
-typedef struct {
-   int cp, vis;
-   double lr, lg, lb;
-} QuadPen;
+/* QuadLine and QuadPen: vidsoftquad.h */
 
 /* DrawLineCallback(), i.e. getpixel() then putpixel() (putpixel8() if F8),
  * for each point of a line. CM and DM are a constant colour and drawing mode
@@ -6128,16 +6104,19 @@ static void DrawLineQuad(const Vdp1QuadState *st, int x1, int y1, int x2, int y2
    }
    quad_pt[n++] = QUAD_PT(x2, y2);
 
+   if (st->rev)
+   {
+      /* drawn last line first (vidsoftquad.c) */
+      QuadRevLine(vdp1_tid, n, rowaddr, noclip, int_step, step_q, step_r, linelength, x1, y1, x2, y2,
+                  texturestep, xredstep, xgreenstep, xbluestep);
+      return;
+   }
+
    {
       QuadLine L;
       QuadPen pen;
       int lean;
 
-      if (!int_step)
-      {
-         DrawLine(x1, y1, x2, y2, 1, linenumber, texturestep, xredstep, xgreenstep, xbluestep, regs, cmd, ram, back_framebuffer);
-         return;
-      }
       L.pts = quad_pt; L.fb = fb; L.fb8 = back_framebuffer; L.ram = ram; L.regs = regs; L.cmd = cmd;
       L.rowaddr = rowaddr; L.colorbank = colorbank; L.colorlut = colorlut;
       L.colormode = colormode; L.drawmode = st->drawmode; L.flip = flip; L.SPD = SPD;
@@ -6149,6 +6128,11 @@ static void DrawLineQuad(const Vdp1QuadState *st, int x1, int y1, int x2, int y2
       L.texturestep = texturestep; L.xredstep = xredstep; L.xgreenstep = xgreenstep; L.xbluestep = xbluestep;
       pen.cp = currentPixel; pen.vis = currentPixelIsVisible;
       pen.lr = leftColumnColor.r; pen.lg = leftColumnColor.g; pen.lb = leftColumnColor.b;
+      if (!int_step)
+      {
+         DrawLine(x1, y1, x2, y2, 1, linenumber, texturestep, xredstep, xgreenstep, xbluestep, regs, cmd, ram, back_framebuffer);
+         return;
+      }
 
       if (st->fb8)
       {
@@ -6355,6 +6339,7 @@ static void drawQuad(s16 tl_x, s16 tl_y, s16 bl_x, s16 bl_y, s16 tr_x, s16 tr_y,
 
 	Vdp1QuadState quad_state;
 	int quad_fast;
+	int miny, maxy, ii;
 
    if (is_pre_clipped(tl_x, tl_y, bl_x, bl_y, tr_x, tr_y, br_x, br_y, regs))
    {
@@ -6365,7 +6350,7 @@ static void drawQuad(s16 tl_x, s16 tl_y, s16 bl_x, s16 bl_y, s16 tr_x, s16 tr_y,
    {
       /* every point drawn lies within the corners' box: nothing to do if
        * that is all in rows another thread draws */
-      int miny = tl_y, maxy = tl_y;
+      miny = tl_y; maxy = tl_y;
       if (bl_y < miny) miny = bl_y; if (bl_y > maxy) maxy = bl_y;
       if (tr_y < miny) miny = tr_y; if (tr_y > maxy) maxy = tr_y;
       if (br_y < miny) miny = br_y; if (br_y > maxy) maxy = br_y;
@@ -6390,6 +6375,7 @@ static void drawQuad(s16 tl_x, s16 tl_y, s16 bl_x, s16 bl_y, s16 tr_x, s16 tr_y,
 	characterWidth = ((cmd->CMDSIZE >> 8) & 0x3F) * 8;
    characterHeight = cmd->CMDSIZE & 0xFF;
    quad_fast = Vdp1QuadSetup(&quad_state, regs, cmd);
+   quad_state.rev = 0;
 
 	intarrays[0] = xleft; intarrays[1] = yleft;
    totalleft = iterateOverLine(tl_x, tl_y, bl_x, bl_y, 0, intarrays, storeLineCoords, regs, cmd, ram, back_framebuffer);
@@ -6434,7 +6420,16 @@ static void drawQuad(s16 tl_x, s16 tl_y, s16 bl_x, s16 bl_y, s16 tr_x, s16 tr_y,
 		leftLineStep = (double)totalleft / totalright;
 	}
 
-	for(i = 0; i < total; i++) {
+   /* a quad whose mode never reads the framebuffer is drawn last line first,
+    * skipping the points a later line wrote (vidsoftquad.c) */
+#ifndef YAB_VDP1LOG
+   if (quad_fast)
+      quad_state.rev = QuadRevStart(vdp1_tid, cmd, regs, ram, back_framebuffer, quad_state.fb8, quad_state.dil_skip,
+                                    characterWidth, vdp1interlace, vdp1width, vdp1_row_lo, vdp1_row_hi,
+                                    VDP1_ROW(miny), VDP1_ROW(maxy), quad_pt_buf[vdp1_tid]);
+#endif
+
+	for(ii = 0; ii < total; ii++) {
 
 		int xlinelength;
 
@@ -6445,6 +6440,7 @@ static void drawQuad(s16 tl_x, s16 tl_y, s16 bl_x, s16 bl_y, s16 tr_x, s16 tr_y,
 
 		COLOR_PARAMS leftToRightStep = {0,0,0};
 
+		i = quad_state.rev ? total - 1 - ii : ii;
 		{
 			/* skip lines that are all in rows another thread draws */
 			int ya = yleft[(int)(i*leftLineStep)], yb = yright[(int)(i*rightLineStep)];
