@@ -24,6 +24,7 @@
 
 #include <stdlib.h>
 #include "sh2core.h"
+#include "sh2divu.h"
 #include "yabprof.h"
 #include "debug.h"
 #include "memory.h"
@@ -1696,9 +1697,6 @@ void FASTCALL OnchipWriteLong(SH2_struct *sh, u32 addr, u32 val)  {
       case 0x114:
       case 0x134: { // 64-bit / 32-bit divide operation
          s32 divisor = (s32) sh->onchip.DVSR;
-         s64 dividend = sh->onchip.DVDNTH;
-         dividend <<= 32;
-         dividend |= val;
 
          if (divisor == 0)
          {
@@ -1722,32 +1720,17 @@ void FASTCALL OnchipWriteLong(SH2_struct *sh, u32 addr, u32 val)  {
          }
          else
          {
-            s64 quotient = dividend / divisor;
-            s32 remainder = dividend % divisor;
+            // the former s64 / s32 and % (a libgcc call on 32-bit ARM), bit for bit: sh2divu.h
+            u32 nl, nh;
+            int overflow = SH2DivS64by32(sh->onchip.DVSR, sh->onchip.DVDNTH, val, &nl, &nh);
 
-            if (quotient > 0x7FFFFFFF)
-            {
+            if (overflow)
                sh->onchip.DVCR |= 1;
-               sh->onchip.DVDNTL = 0x7FFFFFFF;
-               sh->onchip.DVDNTH = 0xFFFFFFFE; // fix me
+            sh->onchip.DVDNTL = nl;
+            sh->onchip.DVDNTH = nh; // fix me (on overflow)
 
-               if (sh->onchip.DVCR & 0x2)
-                  SH2SendInterrupt(sh, sh->onchip.VCRDIV & 0x7F, (MSH2->onchip.IPRA >> 12) & 0xF);
-            }
-            else if ((s32)(quotient >> 32) < -1)
-            {
-               sh->onchip.DVCR |= 1;
-               sh->onchip.DVDNTL = 0x80000000;
-               sh->onchip.DVDNTH = 0xFFFFFFFE; // fix me
-
-               if (sh->onchip.DVCR & 0x2)
-                  SH2SendInterrupt(sh, sh->onchip.VCRDIV & 0x7F, (MSH2->onchip.IPRA >> 12) & 0xF);
-            }
-            else
-            {
-               sh->onchip.DVDNTL = quotient;
-               sh->onchip.DVDNTH = remainder;
-            }
+            if (overflow && (sh->onchip.DVCR & 0x2))
+               SH2SendInterrupt(sh, sh->onchip.VCRDIV & 0x7F, (MSH2->onchip.IPRA >> 12) & 0xF);
 
             sh->onchip.DVDNTUL = sh->onchip.DVDNTL;
             sh->onchip.DVDNTUH = sh->onchip.DVDNTH;
