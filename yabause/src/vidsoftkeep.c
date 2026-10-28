@@ -1019,8 +1019,12 @@ int VidsoftKeepRot(vdp2draw_struct *info, vdp2rotationparameterfp_struct *q, scr
 
 /* What one drawn rotated row reads: every pixel's position as its loop
    computes it (the window is left out: a superset), the tile there
-   (Vdp2MapCalcXYFast + Vdp2PatternAddr), the dot (Vdp2RotKLine*'s fetch)
-   and its palette entry */
+   (Vdp2MapCalcXYFast + Vdp2PatternAddr) and, for tiles, the whole tile's
+   character data and the palette entries its colour format can reach from
+   its palette number (per dot only with 16-bit palette indices, and for a
+   bitmap: the dot (Vdp2RotKLine*'s fetch) and its palette entry). Per tile,
+   not per dot: walking every dot cost about what drawing the row does
+   (Panzer Dragoon, which changes every second field, got slower). */
 static void KeepWalkRot(vdp2draw_struct *info, const s32 *g, const screeninfo_struct *qs, const Vdp2 *regs, u8 *ram,
                         u32 *vm, u32 *cm)
 {
@@ -1029,6 +1033,9 @@ static void KeepWalkRot(vdp2draw_struct *info, const s32 *g, const screeninfo_st
    const int pagesize_bits = info->pagewh_bits * 2;
    const int cellwh = 2 + info->patternwh;
    const int cellw = info->cellw, transparent = info->transparencyenable;
+   /* a tile's character bytes (8x8 dots, 2x2 cells for 16x16) */
+   const u32 tilebytes = (cn == 0 ? 32u : cn == 1 ? 64u : cn <= 3 ? 128u : 256u) << (info->patternwh == 2 ? 2 : 0);
+   const int pertile = !bm && cn != 2;
    u32 charaddr = info->charaddr, paladdr = info->paladdr;
    int flipfunction = 0, lastcell = -1, i;
    for (i = 0; i < w; i++)
@@ -1080,7 +1087,21 @@ static void KeepWalkRot(vdp2draw_struct *info, const s32 *g, const screeninfo_st
             if (!(regs->VRSIZE & 0x8000))
                charaddr &= 0x3FFF;
             charaddr *= 0x20;
+            if (pertile)
+            {
+               u32 k;
+               for (k = 0; k < tilebytes; k += 1u << VDP2_VCHG_SHIFT)
+                  KeepMarkV(vm, charaddr + k);
+               KeepMarkV(vm, charaddr + tilebytes - 1);
+               /* coloroffset + (paladdr | dot): 16 or 256 entries from an
+                  aligned base (a block = 16 entries, 8 in colour mode 2) */
+               if (cn <= 1)
+                  for (k = 0; k < (cn == 0 ? 16u : 256u); k += 8)
+                     KeepMarkC(cm, colormode, info->coloroffset + paladdr + k);
+            }
          }
+         if (pertile)
+            continue;
          /* the pixel in the tile (Vdp2MapCalcXYFast) */
          x &= qs->planepixelwidth_mask;
          y &= qs->planepixelheight_mask;
