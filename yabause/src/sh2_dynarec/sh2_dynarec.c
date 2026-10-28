@@ -2114,7 +2114,7 @@ void alu_assemble(int i,struct regstat *i_regs)
   if(opcode[i]==6) { // NOT/SWAP/NEG
     int s=get_reg(i_regs->regmap,rs1[i]);
     int t=get_reg(i_regs->regmap,rt1[i]);
-    if(s<0) {
+    if(s<0&&t>=0) { // (no result register: the result is not needed)
       // FIXME: Preload?
       emit_loadreg(rs1[i],t);
       s=t;
@@ -2129,6 +2129,12 @@ void alu_assemble(int i,struct regstat *i_regs)
       int sr=get_reg(i_regs->regmap,SR);
       if(i_regs->u&(1LL<<rt1[i])) t=-1;
       assert(sr>=0);
+      #ifdef HOST_TEMPREG
+      if(s<0) {
+        emit_loadreg(rs1[i],HOST_TEMPREG);
+        s=HOST_TEMPREG;
+      }
+      #endif
       emit_negc(s,t,sr);
     }
   }
