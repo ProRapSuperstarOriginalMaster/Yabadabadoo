@@ -4062,6 +4062,7 @@ void rjump_assemble(int i,struct regstat *i_regs)
 {
   signed char *i_regmap=i_regs->regmap;
   int temp;
+  int target_saved=0;
   int rs,cc,adj,rh,ht;
   u64 bc_unneeded;
   rs=get_reg(branch_regs[i].regmap,rs1[i]);
@@ -4084,6 +4085,12 @@ void rjump_assemble(int i,struct regstat *i_regs)
       else
         emit_mov(rs,temp);
       rs=temp;
+      // A COMPLEX slot calls a function, which can overwrite the copy:
+      // keep it in memory meanwhile
+      if(itype[i+1]==COMPLEX) {
+        emit_writeword(temp,slave?(pointer)&slave_pc:(pointer)&master_pc);
+        target_saved=1;
+      }
     }
   }
   address_generation(i+1,i_regs,regs[i].regmap_entry);
@@ -4129,6 +4136,7 @@ void rjump_assemble(int i,struct regstat *i_regs)
   wb_invalidate_moved(regs[i].regmap,branch_regs[i].regmap,regs[i].dirty,branch_regs[i].dirty,
                 bc_unneeded);
   load_regs_moved(regs[i].regmap,branch_regs[i].regmap,rs1[i],CCREG,CCREG);
+  if(target_saved) emit_readword(slave?(pointer)&slave_pc:(pointer)&master_pc,rs);
   if(rt1[i]==PR) {
     int rt,return_address;
     rt=get_reg(branch_regs[i].regmap,rt1[i]);
@@ -7543,6 +7551,8 @@ int sh2_recompile_block(int addr)
             #endif
           }
           #endif
+          // BRAF/BSRF: PC + Rm (a COMPLEX delay slot has freed RTEMP)
+          if(opcode[i-1]==0&&opcode2[i-1]==3) alloc_reg(&branch_regs[i-1],i-1,RTEMP);
           if(opcode[i-1]==0&&opcode2[i-1]==11&&opcode3[i-1]==2) { // RTE
             alloc_reg(&branch_regs[i-1],i-1,SR); // SR will be loaded from stack
             dirty_reg(&branch_regs[i-1],SR);
