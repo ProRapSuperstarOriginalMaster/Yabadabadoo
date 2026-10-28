@@ -81,6 +81,7 @@ static struct VidsoftKeepLine vidsoft_keep_line[5][256];
 
 #define KEEP_NREG (sizeof(Vdp2) / 2)
 #define KEEP_LINES 256
+#define VW VDP2_VCHG_WORDS   /* words of a VRAM page mask */
 
 static int keep_mode = -1;      /* YAB_LNKEEP */
 static int keep_log;
@@ -99,7 +100,7 @@ static u32 keep_cells[KEEP_HIST][KEEP_LINES][2];
 static int keep_glob[KEEP_HIST];
 static u32 keep_hframe[KEEP_HIST];
 static int keep_hpar[KEEP_HIST];
-static u32 keep_vchg[KEEP_HIST][4], keep_cchg[KEEP_HIST][4];
+static u32 keep_vchg[KEEP_HIST][VW], keep_cchg[KEEP_HIST][4];
 static u32 keep_seq;
 static int keep_cur;
 static int keep_active;         /* between VidsoftKeepFrame and VidsoftKeepFrameEnd */
@@ -110,7 +111,7 @@ static u32 keep_frame;          /* TitanFrame() of this field */
 struct KeepRow
 {
    u32 frame;
-   u32 vm[4], cm[4];
+   u32 vm[VW], cm[4];
 };
 static struct KeepRow keep_row[5][2 * KEEP_LINES];   /* [parity * 256 + row] */
 static int keep_layer_ok[5];    /* KeepBegin: rows of this layer may be recorded */
@@ -347,7 +348,7 @@ static void KeepBegin(int layer, vdp2draw_struct *info)
    const int n = KeepRows(), w = vdp2width, s0 = KeepSlot0();
    const u32 prev = keep_frame - back;
    u32 *bits = vidsoft_keep_bits[layer];
-   u32 vchg[4], cchg[4];
+   u32 vchg[VW], cchg[4];
    int y, wctl, cells, k;
 
    keep_layer_began[layer] = 0;
@@ -381,20 +382,23 @@ static void KeepBegin(int layer, vdp2draw_struct *info)
        keep_glob[keep_cur] != keep_glob[pi] || !KeepRegsSame(layer, fr, pfr))
       return;
    /* written since the field that drew the rows */
-   for (k = 0; k < 4; k++)
-   {
+   for (k = 0; k < VW; k++)
       vchg[k] = keep_vchg[keep_cur][k] | (back == 2 ? keep_vchg[(keep_seq - 1) % KEEP_HIST][k] : 0);
+   for (k = 0; k < 4; k++)
       cchg[k] = keep_cchg[keep_cur][k] | (back == 2 ? keep_cchg[(keep_seq - 1) % KEEP_HIST][k] : 0);
-   }
    cells = (layer == TITAN_NBG0 || layer == TITAN_NBG1) && (fr->SCRCTL & 0x101);
    for (y = 0; y < n; y++)
    {
       const struct KeepRow *R = &keep_row[layer][s0 + y];
       if (R->frame != prev || TitanLineFrame(layer, y) != prev)
          continue;
-      if ((R->vm[0] & vchg[0]) | (R->vm[1] & vchg[1]) | (R->vm[2] & vchg[2]) | (R->vm[3] & vchg[3]) |
-          (R->cm[0] & cchg[0]) | (R->cm[1] & cchg[1]) | (R->cm[2] & cchg[2]) | (R->cm[3] & cchg[3]))
-         continue;
+      {
+         u32 d = (R->cm[0] & cchg[0]) | (R->cm[1] & cchg[1]) | (R->cm[2] & cchg[2]) | (R->cm[3] & cchg[3]);
+         for (k = 0; k < VW; k++)
+            d |= R->vm[k] & vchg[k];
+         if (d)
+            continue;
+      }
       if (!KeepLineOk(layer, &lines[y]) || !KeepRegsSame(layer, &lines[y], &plines[y]))
          continue;
       if (cells && (keep_cells[keep_cur][y][0] != keep_cells[pi][y][0] ||
@@ -417,7 +421,7 @@ static void KeepBegin(int layer, vdp2draw_struct *info)
 static INLINE void KeepMarkV(u32 *vm, u32 a)
 {
    a &= 0x7FFFF;
-   vm[a >> 17] |= 1u << ((a >> 12) & 31);
+   vm[a >> (VDP2_VCHG_SHIFT + 5)] |= 1u << ((a >> VDP2_VCHG_SHIFT) & 31);
 }
 
 static INLINE void KeepMarkVRange(u32 *vm, u32 a, u32 size)
@@ -578,7 +582,7 @@ static void KeepEnd(int layer, vdp2draw_struct *info, u8 *ram)
    const int n = KeepRows(), w = vdp2width, s0 = KeepSlot0();
    const int par = vdp2_interlace ? vdp2_is_odd_frame : 0;   /* Vdp2GetInterlaceInfo's start_line */
    const u32 *bits = vidsoft_keep_bits[layer];
-   u32 lw[4] = { 0, 0, 0, 0 };
+   u32 lw[VW];
    const int record = keep_layer_idle[layer] < KEEP_IDLE || (keep_frame & 3) == 0;
    int y;
 
@@ -590,12 +594,13 @@ static void KeepEnd(int layer, vdp2draw_struct *info, u8 *ram)
       memset(keep_row[layer], 0, sizeof(keep_row[layer]));
       return;
    }
+   memset(lw, 0, sizeof(lw));
    /* the line scroll table, read for every line before the line loop (to where it stopped) */
    if (info->islinescroll)
    {
       const u32 lsta = layer == TITAN_NBG0 ? fr->LSTA0.all : fr->LSTA1.all;
       u32 a = (lsta & 0x7FFFE) << 1, end = info->linescrolltbl + 4;
-      for (; a < end; a += 0x1000)
+      for (; a < end; a += 1u << VDP2_VCHG_SHIFT)
          KeepMarkV(lw, a);
       KeepMarkV(lw, end);
    }

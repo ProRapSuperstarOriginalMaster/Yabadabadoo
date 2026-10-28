@@ -111,7 +111,7 @@ u32 vdp2_frame_number = 0;  /* counts VBlank-OUTs */
    field is drawn and libretro.c compares the picture with the last one where
    the inputs said "same" (Vdp2ExactSkipVerifyPicture). */
 u8 vdp2_vram_changed = 1;
-u32 vdp2_vram_vchg[4] = { ~0u, ~0u, ~0u, ~0u }, vdp2_cram_vchg[4] = { ~0u, ~0u, ~0u, ~0u };
+u32 vdp2_vram_vchg[VDP2_VCHG_WORDS], vdp2_cram_vchg[4] = { ~0u, ~0u, ~0u, ~0u }; /* VRAM: VDP2_RAM_MARK_ALL */
 u8 vdp2_cram_changed = 3;                  /* bit 0 exact skip, bit 1 sprite layer reuse */
 static u8 exactskip_lines_changed = 1;
 static u8 exactskip_cells_untracked = 1;  /* a line's cell scroll data wasn't compared */

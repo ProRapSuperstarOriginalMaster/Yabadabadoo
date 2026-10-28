@@ -32,10 +32,14 @@ extern u32 Vdp2RamDirty[4];
 #define VDP2_RAM_MARK(addr) (Vdp2RamDirty[((addr) >> 17) & 3] |= 1u << (((addr) >> 12) & 31))
 #define VDP2_RAM_MARK_ALL() (memset(Vdp2RamDirty, 0xFF, sizeof(Vdp2RamDirty)), \
                              memset(vdp2_vram_vchg, 0xFF, sizeof(vdp2_vram_vchg)))
-/* 4 KB pages of VDP2 RAM and 32-byte blocks of colour RAM written with a
+/* Pages of VDP2 RAM (VDP2_VCHG_SHIFT) and 32-byte blocks of colour RAM written with a
    changed value since the last drawn field (layer-line reuse, vidsoftkeep.c) */
-extern u32 vdp2_vram_vchg[4], vdp2_cram_vchg[4];
-#define VDP2_VRAM_VCHG(addr) (vdp2_vram_vchg[((addr) >> 17) & 3] |= 1u << (((addr) >> 12) & 31))
+#ifndef VDP2_VCHG_SHIFT
+#define VDP2_VCHG_SHIFT 8   /* VRAM granularity: 256 bytes (4 KB pages were too coarse: VF2, Megamix and Sega Rally NBG2) */
+#endif
+#define VDP2_VCHG_WORDS (0x80000 >> VDP2_VCHG_SHIFT >> 5)
+extern u32 vdp2_vram_vchg[VDP2_VCHG_WORDS], vdp2_cram_vchg[4];
+#define VDP2_VRAM_VCHG(addr) (vdp2_vram_vchg[((addr) & 0x7FFFF) >> (VDP2_VCHG_SHIFT + 5)] |= 1u << (((addr) >> VDP2_VCHG_SHIFT) & 31))
 #define VDP2_CRAM_VCHG(addr) (vdp2_cram_vchg[((addr) >> 10) & 3] |= 1u << (((addr) >> 5) & 31))
 extern u8 * Vdp2ColorRam;
 
