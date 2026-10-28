@@ -36,6 +36,10 @@ typedef int FASTCALL (*TitanTransFunc)(u32 pixel);
 void TitanRenderLines(pixel_t * dispbuffer, int start_line, int end_line);
 extern int vdp2_interlace;
 
+/* rows of the VDP2 layers' buffers: both interlaced fields + one for lines
+   past a field (TitanRow) */
+#define TITAN_ROWS 513
+
 int vidsoft_num_priority_threads = 0;
 
 static struct TitanContext {
@@ -57,15 +61,15 @@ static struct TitanContext {
     * in the current frame (line_frame == frame); otherwise it reads as empty.
     * This avoids a full memset of every drawn layer each frame. */
    u32 frame;
-   u32 line_frame[6][512];
+   u32 line_frame[6][TITAN_ROWS];
    /* Double-density interlace: the VDP2 layers' lines of the odd field are kept
       in rows 256-511, apart from the even field's, so that a line kept by the
       layer-line reuse (vidsoftkeep.c) survives the other field. Row of line y
-      = y + row_base[layer]; set by TitanErase. */
+      = y + row_base[layer] (TitanRow); set by TitanErase. */
    int row_base[6];
    /* upper bound of the pixel priorities in each layer line (valid when
     * line_frame matches); 7 unless the writer said otherwise */
-   u8 line_maxprio[6][512];
+   u8 line_maxprio[6][TITAN_ROWS];
    int blend_mode;       /* TITAN_BLEND_*, selects blend/trans below */
    u16 line_ccctl;       /* see TitanSetLineColorCalc */
 } tt_context = {
@@ -98,9 +102,20 @@ static INLINE u32 TitanLineColor(const struct PixelData *pd, int pos, int y)
 /* stands in for layer lines not written this frame */
 static struct PixelData titan_empty_line[704];
 
+/* The buffer row of a layer's line y. Lines from 256 on are never composited
+   (a field has at most 256); an interlaced rotation layer draws up to the
+   frame's height (448/480) anyway: those go to a row of their own (512), as
+   they did beyond the field's rows before, never into another layer's. */
+static INLINE int TitanRow(int layer, int y)
+{
+   if (layer == TITAN_SPRITE)
+      return y;
+   return y < 256 ? y + tt_context.row_base[layer] : TITAN_ROWS - 1;
+}
+
 static INLINE struct PixelData *TitanReadLine(int layer, int layer_y)
 {
-   layer_y += tt_context.row_base[layer];
+   layer_y = TitanRow(layer, layer_y);
    if (tt_context.line_frame[layer][layer_y] != tt_context.frame)
       return titan_empty_line;
    return &tt_context.vdp2framebuffer[layer][layer_y * tt_context.vdp2width];
@@ -471,7 +486,7 @@ static INLINE u32 TitanDigPixel(const int mode, int sprite_window, struct PixelD
 /* rows of a layer buffer: the VDP2 layers keep both interlaced fields (row_base) */
 static int TitanLayerRows(int layer)
 {
-   return layer == TITAN_SPRITE ? 256 : 512;
+   return layer == TITAN_SPRITE ? 256 : TITAN_ROWS;
 }
 
 /* public */
@@ -659,12 +674,12 @@ u32 *TitanGetDotLineColors(int n)
 
 struct PixelData *TitanGetLayerLine(int layer, int y)
 {
-   return &tt_context.vdp2framebuffer[layer][(y + tt_context.row_base[layer]) * tt_context.vdp2width];
+   return &tt_context.vdp2framebuffer[layer][TitanRow(layer, y) * tt_context.vdp2width];
 }
 
 int TitanClaimLayerLine(int layer, int y)
 {
-   y += tt_context.row_base[layer];
+   y = TitanRow(layer, y);
    tt_context.layer_dirtied[layer] = 1;
    tt_context.line_maxprio[layer][y] = 7;
    if (tt_context.line_frame[layer][y] == tt_context.frame)
@@ -675,7 +690,7 @@ int TitanClaimLayerLine(int layer, int y)
 
 void TitanSetLineMaxPriority(int layer, int y, int maxprio)
 {
-   tt_context.line_maxprio[layer][y + tt_context.row_base[layer]] = maxprio;
+   tt_context.line_maxprio[layer][TitanRow(layer, y)] = maxprio;
 }
 
 void TitanSetLayerDirty(int layer)
@@ -701,18 +716,18 @@ void TitanKeepLayerLines(int layer, u32 from)
 
 void TitanKeepLayerLine(int layer, int y)
 {
-   tt_context.line_frame[layer][y + tt_context.row_base[layer]] = tt_context.frame;
+   tt_context.line_frame[layer][TitanRow(layer, y)] = tt_context.frame;
    tt_context.layer_dirtied[layer] = 1;
 }
 
 u32 TitanLineFrame(int layer, int y)
 {
-   return tt_context.line_frame[layer][y + tt_context.row_base[layer]];
+   return tt_context.line_frame[layer][TitanRow(layer, y)];
 }
 
 int TitanLineMaxPriority(int layer, int y)
 {
-   return tt_context.line_maxprio[layer][y + tt_context.row_base[layer]];
+   return tt_context.line_maxprio[layer][TitanRow(layer, y)];
 }
 
 u32 TitanLayerHash(int layer)
@@ -894,7 +909,7 @@ static INLINE void TitanRenderLinesM(const int mode, pixel_t * dispbuffer, int s
       for (i = 0; i < tt_context.num_active_layers; i++)
       {
          int layer = tt_context.active_layers[i];
-         const int ly = layer_y + tt_context.row_base[layer];
+         const int ly = TitanRow(layer, layer_y);
          if (tt_context.line_frame[layer][ly] == tt_context.frame)
          {
             int tie = 7 - num_rows;
