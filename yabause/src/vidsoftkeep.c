@@ -893,6 +893,14 @@ static INLINE int RotPos(const s32 *g, const screeninfo_struct *qs, int i, int *
    return 1;
 }
 
+/* the same before the mask */
+static INLINE void RotRaw(const s32 *g, int i, int *px, int *py)
+{
+   const u32 cx = (u32)g[0] + (u32)g[6] * (u32)i, cy = (u32)g[1] + (u32)g[7] * (u32)i;
+   *px = touint(mulfixed(g[2], (fixed32)cx) + g[4]);
+   *py = touint(mulfixed(g[3], (fixed32)cy) + g[5]);
+}
+
 /* the pixel loop's window test (a table, or one answer for the line) */
 static INLINE int RotWin(const vdp2draw_struct *info, const u8 *wintab, int i)
 {
@@ -1101,7 +1109,26 @@ static void KeepWalkRot(vdp2draw_struct *info, const s32 *g, const screeninfo_st
             }
          }
          if (pertile)
+         {
+            /* step ahead while the row stays in this tile: the position moves
+               monotonically along the row (mulfixed of a linear term), so when
+               both ends of a step are in the tile and less than 8 apart before
+               the mask, every pixel between is in it too */
+            int rx, ry;
+            RotRaw(g, i, &rx, &ry);
+            while (i + 8 < w)
+            {
+               int rx2, ry2, x2, y2;
+               RotRaw(g, i + 8, &rx2, &ry2);
+               if (abs(rx2 - rx) >= 8 || abs(ry2 - ry) >= 8 || !RotPos(g, qs, i + 8, &x2, &y2) ||
+                   ((((y2 >> cellwh) << 16) | (x2 >> cellwh)) != lastcell))
+                  break;
+               i += 8;
+               rx = rx2;
+               ry = ry2;
+            }
             continue;
+         }
          /* the pixel in the tile (Vdp2MapCalcXYFast) */
          x &= qs->planepixelwidth_mask;
          y &= qs->planepixelheight_mask;
