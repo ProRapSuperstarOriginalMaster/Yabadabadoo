@@ -682,6 +682,22 @@ void TitanKeepLayerLines(int layer, u32 from)
       }
 }
 
+void TitanKeepLayerLine(int layer, int y)
+{
+   tt_context.line_frame[layer][y] = tt_context.frame;
+   tt_context.layer_dirtied[layer] = 1;
+}
+
+u32 TitanLineFrame(int layer, int y)
+{
+   return tt_context.line_frame[layer][y];
+}
+
+int TitanLineMaxPriority(int layer, int y)
+{
+   return tt_context.line_maxprio[layer][y];
+}
+
 u32 TitanLayerHash(int layer)
 {
    u32 h = 0x811C9DC5u ^ tt_context.layer_dirtied[layer];

@@ -37,7 +37,7 @@ set(yabause_SOURCES
 	peripheral.c profile.c
 	scspdsp.c scu.c sh2core.c sh2d.c sh2iasm.c sh2idle.c sh2int.c sh2trace.c smpc.c snddummy.c
 	titan/titan.c
-	vdp1.c vdp2.c vdp2debug.c vidogl.c vidshared.c vidsoft.c vidsoftsprite8.c vidsoftquad.c
+	vdp1.c vdp2.c vdp2debug.c vidogl.c vidshared.c vidsoft.c vidsoftkeep.c vidsoftsprite8.c vidsoftquad.c
 	yabause.c ygles.c yglshaderes.c sh2cache.c sh7034.c ygr.c cd_drive.c tsunami/yab_tsunami.c tsunami/Tsunami.c mpeg_card.c)
 
 option(YAB_USE_CXX "Allow C++ in the emulation core.")

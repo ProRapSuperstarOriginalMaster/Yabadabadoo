@@ -30,7 +30,13 @@ extern u8 * Vdp2Ram;
    brought up to date (one bit a page; see VidsoftSyncRamCopy) */
 extern u32 Vdp2RamDirty[4];
 #define VDP2_RAM_MARK(addr) (Vdp2RamDirty[((addr) >> 17) & 3] |= 1u << (((addr) >> 12) & 31))
-#define VDP2_RAM_MARK_ALL() memset(Vdp2RamDirty, 0xFF, sizeof(Vdp2RamDirty))
+#define VDP2_RAM_MARK_ALL() (memset(Vdp2RamDirty, 0xFF, sizeof(Vdp2RamDirty)), \
+                             memset(vdp2_vram_vchg, 0xFF, sizeof(vdp2_vram_vchg)))
+/* 4 KB pages of VDP2 RAM and 32-byte blocks of colour RAM written with a
+   changed value since the last drawn field (layer-line reuse, vidsoftkeep.c) */
+extern u32 vdp2_vram_vchg[4], vdp2_cram_vchg[4];
+#define VDP2_VRAM_VCHG(addr) (vdp2_vram_vchg[((addr) >> 17) & 3] |= 1u << (((addr) >> 12) & 31))
+#define VDP2_CRAM_VCHG(addr) (vdp2_cram_vchg[((addr) >> 10) & 3] |= 1u << (((addr) >> 5) & 31))
 extern u8 * Vdp2ColorRam;
 
 u8 FASTCALL     Vdp2RamReadByte(u32);

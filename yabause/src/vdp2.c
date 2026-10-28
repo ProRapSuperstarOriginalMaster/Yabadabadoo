@@ -111,6 +111,7 @@ u32 vdp2_frame_number = 0;  /* counts VBlank-OUTs */
    field is drawn and libretro.c compares the picture with the last one where
    the inputs said "same" (Vdp2ExactSkipVerifyPicture). */
 u8 vdp2_vram_changed = 1;
+u32 vdp2_vram_vchg[4] = { ~0u, ~0u, ~0u, ~0u }, vdp2_cram_vchg[4] = { ~0u, ~0u, ~0u, ~0u };
 u8 vdp2_cram_changed = 3;                  /* bit 0 exact skip, bit 1 sprite layer reuse */
 static u8 exactskip_lines_changed = 1;
 static u8 exactskip_cells_untracked = 1;  /* a line's cell scroll data wasn't compared */
@@ -157,8 +158,11 @@ u32 FASTCALL Vdp2RamReadLong(u32 addr) {
 
 void FASTCALL Vdp2RamWriteByte(u32 addr, u8 val) {
    addr &= 0x7FFFF;
-   if (!vdp2_vram_changed && T1ReadByte(Vdp2Ram, addr) != val)
+   if (T1ReadByte(Vdp2Ram, addr) != val)
+   {
       vdp2_vram_changed = 1;
+      VDP2_VRAM_VCHG(addr);
+   }
    VDP2_RAM_MARK(addr);
    T1WriteByte(Vdp2Ram, addr, val);
    SH2_DYNAREC_VRAM_WRITE(1, addr, 1);
@@ -168,8 +172,11 @@ void FASTCALL Vdp2RamWriteByte(u32 addr, u8 val) {
 
 void FASTCALL Vdp2RamWriteWord(u32 addr, u16 val) {
    addr &= 0x7FFFF;
-   if (!vdp2_vram_changed && T1ReadWord(Vdp2Ram, addr) != val)
+   if (T1ReadWord(Vdp2Ram, addr) != val)
+   {
       vdp2_vram_changed = 1;
+      VDP2_VRAM_VCHG(addr);
+   }
    VDP2_RAM_MARK(addr);
    T1WriteWord(Vdp2Ram, addr, val);
    SH2_DYNAREC_VRAM_WRITE(1, addr, 2);
@@ -179,8 +186,11 @@ void FASTCALL Vdp2RamWriteWord(u32 addr, u16 val) {
 
 void FASTCALL Vdp2RamWriteLong(u32 addr, u32 val) {
    addr &= 0x7FFFF;
-   if (!vdp2_vram_changed && T1ReadLong(Vdp2Ram, addr) != val)
+   if (T1ReadLong(Vdp2Ram, addr) != val)
+   {
       vdp2_vram_changed = 1;
+      VDP2_VRAM_VCHG(addr);
+   }
    VDP2_RAM_MARK(addr);
    T1WriteLong(Vdp2Ram, addr, val);
    SH2_DYNAREC_VRAM_WRITE(1, addr, 4);
@@ -211,8 +221,11 @@ u32 FASTCALL Vdp2ColorRamReadLong(u32 addr) {
 
 void FASTCALL Vdp2ColorRamWriteByte(u32 addr, u8 val) {
    addr &= 0xFFF;
-   if (vdp2_cram_changed != 3 && T2ReadByte(Vdp2ColorRam, addr) != val)
+   if (T2ReadByte(Vdp2ColorRam, addr) != val)
+   {
       vdp2_cram_changed = 3;
+      VDP2_CRAM_VCHG(addr);
+   }
    T2WriteByte(Vdp2ColorRam, addr, val);
 }
 
@@ -220,8 +233,11 @@ void FASTCALL Vdp2ColorRamWriteByte(u32 addr, u8 val) {
 
 void FASTCALL Vdp2ColorRamWriteWord(u32 addr, u16 val) {
    addr &= 0xFFF;
-   if (vdp2_cram_changed != 3 && T2ReadWord(Vdp2ColorRam, addr) != val)
+   if (T2ReadWord(Vdp2ColorRam, addr) != val)
+   {
       vdp2_cram_changed = 3;
+      VDP2_CRAM_VCHG(addr);
+   }
    T2WriteWord(Vdp2ColorRam, addr, val);
 //   if (Vdp2Internal.ColorMode == 0)
 //      T1WriteWord(Vdp2ColorRam, addr + 0x800, val);
@@ -231,8 +247,11 @@ void FASTCALL Vdp2ColorRamWriteWord(u32 addr, u16 val) {
 
 void FASTCALL Vdp2ColorRamWriteLong(u32 addr, u32 val) {
    addr &= 0xFFF;
-   if (vdp2_cram_changed != 3 && T2ReadLong(Vdp2ColorRam, addr) != val)
+   if (T2ReadLong(Vdp2ColorRam, addr) != val)
+   {
       vdp2_cram_changed = 3;
+      VDP2_CRAM_VCHG(addr);
+   }
    T2WriteLong(Vdp2ColorRam, addr, val);
 }
 
@@ -461,6 +480,11 @@ void Vdp2VBlankIN(void) {
       }
    }
    VIDCore->Vdp2DrawEnd();
+   if (VIDCore->id == 2 /* VIDCORE_SOFT */)
+   {
+      extern void VidsoftKeepFrameEnd(void);
+      VidsoftKeepFrameEnd();
+   }
    Vdp2SpriteLayerVerify();
    if (VIDCore->id == 2 /* VIDCORE_SOFT */ && vdp2_skip_draw != 1)
       vdp2_picture_frame = vdp2_frame_number;
@@ -1031,6 +1055,11 @@ void Vdp2VBlankOUT(void) {
 
       if (Vdp2Regs->TVMD & 0x8000) {
          Vdp2SpriteLayerDecide();
+         if (VIDCore->id == 2 /* VIDCORE_SOFT */ && !vdp2_skip_draw)
+         {
+            extern void VidsoftKeepFrame(void);
+            VidsoftKeepFrame();
+         }
          VIDCore->Vdp2DrawScreens();
          Vdp2SpriteLayerStarted();
          if (draw) Vdp1Draw();
@@ -1736,6 +1765,7 @@ int Vdp2LoadState(const void * stream, UNUSED int version, int size)
 
    // Read CRAM
    MemStateRead((void *)Vdp2ColorRam, 0x1000, 1, stream);
+   memset(vdp2_cram_vchg, 0xFF, sizeof(vdp2_cram_vchg));
 
    // Read internal variables
    MemStateRead((void *)&Vdp2Internal, sizeof(Vdp2Internal_struct), 1, stream);

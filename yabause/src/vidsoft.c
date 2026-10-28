@@ -32,6 +32,7 @@
 #include "debug.h"
 #include "vdp2.h"
 #include "titan/titan.h"
+#include "vidsoftkeep.h"
 
 #ifdef HAVE_LIBGL
 #define USE_OPENGL
@@ -1926,6 +1927,16 @@ static void FASTCALL Vdp2DrawScroll(vdp2draw_struct *info, Vdp2* lines, Vdp2* re
       if (!info->enable)
          continue;
 
+      /* layer-line reuse (vidsoftkeep.c): nothing this line reads changed
+       * since the last field drew it, so its Titan row was kept; the cell
+       * cache starts afresh after it */
+      if (VidsoftKeepRow(info, output_y, Y, linescrollx))
+      {
+         sinfo.oldcellcheck = -1;
+         output_y++;
+         continue;
+      }
+
       {
          /* Loop invariants for this line, hoisted out of the pixel loop. With
           * no window enabled TestBothWindow() gives the same answer for every
@@ -2119,6 +2130,7 @@ transparent:
       }
       output_y++;
    }    
+   VidsoftKeepDrawn(info, ram);
 }
 
 //////////////////////////////////////////////////////////////////////////////
