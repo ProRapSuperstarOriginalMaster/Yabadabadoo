@@ -33,7 +33,7 @@
     line are distinct pixels.
 
     The loops here are the lean loops of vidsoft.c (QuadPlotCM1Gouraud(),
-    QuadPlotLeanBody(), QuadPlotLeanRGBPlain(), QuadPlotLean8Body()) with the
+    QuadPlotLeanBody(), QuadPlotLeanRGBPlain()) with the
     stamp test before the texel read and the stamp written with the pixel;
     keep them the same as those. In a file of their own because vidsoft.c sits
     at GCC's per-file inlining limit.
@@ -63,21 +63,16 @@ static INLINE int QuadRevGouraud(int color, int tableValue)
 
 /* Which quads can be drawn last line first: every line of them, once its
  * texture step is exact (int_step in DrawLineQuad()), goes to one of the loops
- * below, and none reads the framebuffer: on the 16-bit framebuffer the lean
- * loops of vidsoft.c (replace or Gouraud, textured, no end codes, mesh, MSB-on,
- * double interlace or user clipping "outside"); on the 8-bit one the lean8
- * loops (putpixel8() only replaces; no Gouraud steps, mesh or user clipping,
- * end codes only for 128 colours, whose texel never equals its end code).
- * Untextured quads stay as they are: their points cost no more than a stamp. */
+ * below, and none reads the framebuffer: the lean loops of vidsoft.c on the
+ * 16-bit framebuffer (replace or Gouraud, textured, no end codes, mesh,
+ * MSB-on, double interlace or user clipping "outside"). Untextured quads stay
+ * as they are: their points cost no more than a stamp. Not the 8-bit
+ * framebuffer: Virtua Fighter 2's quads there overlap little, and drawn last
+ * line first it ran 1.5 % slower (device, 2026-10-28). */
 static int QuadRevMode(int fb8, int colormode, int drawmode, int isTextured, int endcodes, int mesh, int msbon,
-                int dil_skip, int user_clip)
+                       int dil_skip, int user_clip)
 {
-   if (!isTextured || mesh)
-      return 0;
-   if (fb8)
-      return !user_clip && !(drawmode & 4) && !(endcodes && colormode != 3) &&
-             (colormode == 0 || colormode == 1 || colormode == 3 || colormode == 4);
-   if (msbon || dil_skip >= 0 || user_clip == 2 || endcodes)
+   if (fb8 || !isTextured || mesh || msbon || dil_skip >= 0 || user_clip == 2 || endcodes)
       return 0;
    if (colormode == 5)
       return drawmode == 0 || drawmode == 4;
@@ -85,21 +80,20 @@ static int QuadRevMode(int fb8, int colormode, int drawmode, int isTextured, int
           (drawmode == 4 && colormode == 1);
 }
 
-/* one stamp per framebuffer position (16-bit: pixel, 8-bit: byte) and VDP1
- * thread; a quad's stamp is the next value of gen, the buffer is cleared
+/* one stamp per framebuffer pixel and VDP1 thread; a quad's stamp is the next value of gen, the buffer is cleared
  * (where quads stamped) when gen wraps */
-static u8 quad_rev_stamp[2][0x40000];
+static u8 quad_rev_stamp[2][0x20000];
 static u32 quad_rev_gen[2];
-static int quad_rev_lo[2] = { 0x40000, 0x40000 }, quad_rev_hi[2];
+static int quad_rev_lo[2] = { 0x20000, 0x20000 }, quad_rev_hi[2];
 
-static u8 *QuadRevBegin(int tid, int fb8, int width, int xmax, int miny, int maxy, u32 *gen)
+static u8 *QuadRevBegin(int tid, int width, int xmax, int miny, int maxy, u32 *gen)
 {
    int lo, hi;
    if (++quad_rev_gen[tid] > 0xFF)
    {
       if (quad_rev_hi[tid] > quad_rev_lo[tid])
          memset(quad_rev_stamp[tid] + quad_rev_lo[tid], 0, quad_rev_hi[tid] - quad_rev_lo[tid]);
-      quad_rev_lo[tid] = 0x40000;
+      quad_rev_lo[tid] = 0x20000;
       quad_rev_hi[tid] = 0;
       quad_rev_gen[tid] = 1;
    }
@@ -108,8 +102,8 @@ static u8 *QuadRevBegin(int tid, int fb8, int width, int xmax, int miny, int max
     * the system clip (which may be wider than the framebuffer) */
    lo = miny < 0 ? 0 : miny * width;
    hi = maxy * width + (xmax > width ? xmax : width) + 1;
-   if (hi > (fb8 ? 0x40000 : 0x20000))
-      hi = fb8 ? 0x40000 : 0x20000;
+   if (hi > 0x20000)
+      hi = 0x20000;
    if (lo < quad_rev_lo[tid]) quad_rev_lo[tid] = lo;
    if (hi > quad_rev_hi[tid]) quad_rev_hi[tid] = hi;
    *gen = quad_rev_gen[tid];
@@ -118,7 +112,6 @@ static u8 *QuadRevBegin(int tid, int fb8, int width, int xmax, int miny, int max
 
 /* the line template of each VDP1 thread's current last-line-first quad */
 static QuadLine quad_rev_line[2];
-static int quad_rev_fb8[2];
 static int quad_rev_inbuf[2];   /* 16-bit: every point inside the clip area and rows is below 0x20000 */
 
 /* drawQuad(), for a quad on the fast path: whether to draw it last line
@@ -149,13 +142,12 @@ int QuadRevStart(int tid, const vdp1cmd_struct *cmd, Vdp1 *regs, u8 *ram, u8 *fb
    L->untexturedColor = 0; L->mesh = 0; L->msbon = 0; L->dil_skip = dil_skip; L->cw = cw;
    L->interlace = interlace; L->width = width; L->user_clip = user_clip;
    L->row_lo = row_lo; L->row_hi = row_hi;
-   quad_rev_fb8[tid] = fb8;
    {
       int ymax = regs->systemclipY2 < row_hi - 1 ? regs->systemclipY2 : row_hi - 1;
-      quad_rev_inbuf[tid] = !fb8 && ymax < 0x20000 && regs->systemclipX2 < 0x20000 &&
+      quad_rev_inbuf[tid] = ymax < 0x20000 && regs->systemclipX2 < 0x20000 &&
                             (s64)ymax * width + regs->systemclipX2 < 0x20000;
    }
-   L->stamp = QuadRevBegin(tid, fb8, width, regs->systemclipX2, miny, maxy, &L->gen);
+   L->stamp = QuadRevBegin(tid, width, regs->systemclipX2, miny, maxy, &L->gen);
    return 1;
 }
 
@@ -433,103 +425,6 @@ static INLINE __attribute__((always_inline)) QuadPen QuadRevRGBBody(const int DM
 static __attribute__((noinline)) QuadPen QuadRevRGB(const QuadLine *Lp, QuadPen pen) { return QuadRevRGBBody(0, Lp, pen); }
 static __attribute__((noinline)) QuadPen QuadRevRGBG(const QuadLine *Lp, QuadPen pen) { return QuadRevRGBBody(4, Lp, pen); }
 
-/* QuadPlotLean8Body(): the 8-bit framebuffer (replace only) */
-static INLINE __attribute__((always_inline)) QuadPen QuadRevLean8Body(const int CM, const QuadLine *Lp, QuadPen pen)
-{
-   const u32 *const pts = Lp->pts;
-   u8 *const fb8 = Lp->fb8;
-   u8 *const stamp = Lp->stamp;
-   const u32 gen = Lp->gen;
-   const u8 *const ram = Lp->ram;
-   const u32 rowaddr = Lp->rowaddr, colorlut = Lp->colorlut, colorbank = Lp->colorbank;
-   const int SPD = Lp->SPD, width = Lp->width, n = Lp->n;
-   const int flip = Lp->flip & 1, cwm1 = Lp->cw - 1;
-   const int step_q = Lp->step_q, step_r = Lp->step_r, linelength = Lp->linelength;
-   const double texturestep = Lp->texturestep;
-   const int il = Lp->interlace == 2, dil = Lp->dil_skip;
-   const int xhi = Lp->regs->systemclipX2, yhi = Lp->regs->systemclipY2;
-   const int rlo = Lp->row_lo, rhi = Lp->row_hi;
-   int cp = pen.cp, k, k0 = 0, k1 = n - 1, quot, rem, read = 0;
-
-#define LEAN8_IN(pt) ((s16)(pt) >= 0 && (s16)(pt) <= xhi && ((s32)(pt) >> 16) >= 0 && ((s32)(pt) >> 16) <= yhi && \
-                      (il ? ((s32)(pt) >> 17) : ((s32)(pt) >> 16)) >= rlo && (il ? ((s32)(pt) >> 17) : ((s32)(pt) >> 16)) < rhi)
-   while (k0 < n && !LEAN8_IN(pts[k0]))
-      k0++;
-   while (k1 >= k0 && !LEAN8_IN(pts[k1]))
-      k1--;
-#undef LEAN8_IN
-
-   quot = k0 * step_q + (k0 * step_r) / (linelength > 0 ? linelength : 1);
-   rem = (k0 * step_r) % (linelength > 0 ? linelength : 1);
-
-   for (k = k0; k <= k1; k++)
-   {
-      const u32 pt = pts[k];
-      const int px = (s16)pt, py = (s32)pt >> 16;
-      int cs, pos, yy;
-      u32 idx, t;
-
-      if (rem == 0 && step_r != 0)
-         cs = (int)k * texturestep;
-      else
-         cs = quot;
-      quot += step_q;
-      rem += step_r;
-      if (rem >= linelength)
-      {
-         rem -= linelength;
-         quot++;
-      }
-      if ((py & 1) == dil)
-         continue;
-      yy = il ? py >> 1 : py;
-      pos = yy * width + px;
-      if (pos >= 0x40000)
-         continue;
-      read = 1;
-      if (stamp[pos] == gen)
-         continue;                                     /* a later line wrote it */
-      idx = flip ? (u32)(cwm1 - cs) : (u32)cs;
-      if (CM == 0 || CM == 1)
-      {
-         u32 dots = ram[(rowaddr + (idx >> 1)) & 0x7FFFF];
-         t = (idx & 1) ? (dots & 0xF) : (dots >> 4);
-      }
-      else if (CM == 3)
-         t = ram[(rowaddr + idx) & 0x7FFFF] & 0x7F;
-      else /* CM == 4 */
-         t = ram[(rowaddr + idx) & 0x7FFFF];
-      if (t == 0 && !SPD)
-      {
-         cp = 0;
-         continue;
-      }
-      if (CM == 0)
-         cp = (colorbank & 0xf0) | t;
-      else if (CM == 1)
-      {
-         cp = T1ReadWord((u8 *)ram, (t * 2 + colorlut) & 0x7FFFF) & 0xFF;
-         if (cp == 0 && !SPD)
-            continue;
-      }
-      else if (CM == 3)
-         cp = (colorbank & 0x80) | t;
-      else
-         cp = t;
-      fb8[pos] = cp;
-      stamp[pos] = gen;
-   }
-   pen.cp = cp;
-   if (read)
-      pen.vis = CM == 0 ? 0xf : CM == 1 ? 0xffff : CM == 3 ? 0x7f : 0xff;
-   return pen;
-}
-
-static __attribute__((noinline)) QuadPen QuadRevLean8CM0(const QuadLine *Lp, QuadPen pen) { return QuadRevLean8Body(0, Lp, pen); }
-static __attribute__((noinline)) QuadPen QuadRevLean8CM1(const QuadLine *Lp, QuadPen pen) { return QuadRevLean8Body(1, Lp, pen); }
-static __attribute__((noinline)) QuadPen QuadRevLean8CM3(const QuadLine *Lp, QuadPen pen) { return QuadRevLean8Body(3, Lp, pen); }
-static __attribute__((noinline)) QuadPen QuadRevLean8CM4(const QuadLine *Lp, QuadPen pen) { return QuadRevLean8Body(4, Lp, pen); }
-
 /* the texture step where the quotient/remainder count has a remainder of 0:
  * the double product (vidsoft.c's QuadStepExact()) */
 static __attribute__((noinline)) int QuadRevStepExact(int k, double texturestep)
@@ -608,18 +503,8 @@ static __attribute__((noinline)) QuadPen QuadRevCM1F1S1(const QuadLine *Lp, Quad
 
 /* A line of a quad QuadRevMode() accepted, with an exact texture step: the
  * loop DrawLineQuad() would take, with the stamps */
-static QuadPen QuadRevPlot(const QuadLine *Lp, QuadPen pen, int fb8, int inbuf)
+static QuadPen QuadRevPlot(const QuadLine *Lp, QuadPen pen, int inbuf)
 {
-   if (fb8)
-   {
-      switch (Lp->colormode)
-      {
-      case 0: return QuadRevLean8CM0(Lp, pen);
-      case 1: return QuadRevLean8CM1(Lp, pen);
-      case 3: return QuadRevLean8CM3(Lp, pen);
-      default: return QuadRevLean8CM4(Lp, pen);
-      }
-   }
    switch (Lp->colormode * 8 + Lp->drawmode)
    {
    case 0 * 8 + 0: return QuadRevLeanCM0(Lp, pen);
@@ -642,11 +527,11 @@ static QuadPen QuadRevPlot(const QuadLine *Lp, QuadPen pen, int fb8, int inbuf)
 /* A line of such a quad whose texture step isn't exact: DrawLineQuad() then
  * calls DrawLine(x1, y1, x2, y2) with x1, y1 where its own walk ended, and
  * DrawLine() plots the greedy walk from there with currentStep = (int)i *
- * texturestep (getpixel(), then putpixel() or putpixel8(): what the loops
+ * texturestep (getpixel(), then putpixel(): what the loops
  * above do for the same points). The same walk here, then the loop with that
  * step: a remainder step of 1 in 1 makes every point take the double product.
  * Lp->pts is DrawLineQuad()'s point buffer, free again at this point. */
-static QuadPen QuadRevDrawLine(QuadLine *Lp, int x1, int y1, int x2, int y2, QuadPen pen, int fb8, int inbuf)
+static QuadPen QuadRevDrawLine(QuadLine *Lp, int x1, int y1, int x2, int y2, QuadPen pen, int inbuf)
 {
    u32 *const pt = (u32 *)Lp->pts;
    int a = 0, ax, ay, dx = x2 - x1, dy = y2 - y1, n = 0;
@@ -688,7 +573,7 @@ static QuadPen QuadRevDrawLine(QuadLine *Lp, int x1, int y1, int x2, int y2, Qua
    Lp->step_r = 1;
    Lp->linelength = 1;
    Lp->noclip = 0;
-   return QuadRevPlot(Lp, pen, fb8, inbuf);
+   return QuadRevPlot(Lp, pen, inbuf);
 }
 
 /* DrawLineQuad(), for a line of a quad QuadRevStart() accepted: the line's
@@ -700,7 +585,6 @@ void QuadRevLine(int tid, int n, u32 rowaddr, int noclip, int int_step, int step
                  double xbluestep)
 {
    QuadLine *L = &quad_rev_line[tid];
-   const int fb8 = quad_rev_fb8[tid];
    QuadPen pen;
    pen.cp = currentPixel;
    pen.vis = currentPixelIsVisible;
@@ -710,8 +594,8 @@ void QuadRevLine(int tid, int n, u32 rowaddr, int noclip, int int_step, int step
    L->n = n; L->rowaddr = rowaddr; L->noclip = noclip;
    L->step_q = step_q; L->step_r = step_r; L->linelength = linelength;
    L->texturestep = texturestep; L->xredstep = xredstep; L->xgreenstep = xgreenstep; L->xbluestep = xbluestep;
-   pen = int_step ? QuadRevPlot(L, pen, fb8, quad_rev_inbuf[tid]) :
-                    QuadRevDrawLine(L, x1, y1, x2, y2, pen, fb8, quad_rev_inbuf[tid]);
+   pen = int_step ? QuadRevPlot(L, pen, quad_rev_inbuf[tid]) :
+                    QuadRevDrawLine(L, x1, y1, x2, y2, pen, quad_rev_inbuf[tid]);
    currentPixel = pen.cp;
    currentPixelIsVisible = pen.vis;
    leftColumnColor.r = pen.lr;
