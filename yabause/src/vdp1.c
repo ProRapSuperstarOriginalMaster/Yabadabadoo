@@ -48,6 +48,7 @@ u32 Vdp1RamDirty[4];
    change). Yabause draws the whole list at once, so the draw is repeated
    at the next VBlank-OUT (vdp2.c). */
 int Vdp1ListIncomplete;
+int Vdp1FakeClipX2, Vdp1FakeClipY2;
 u8 * Vdp1FrameBuffer;
 
 VideoInterface_struct *VIDCore=NULL;
@@ -579,6 +580,9 @@ void Vdp1FakeDrawCommands(u8 * ram, Vdp1 * regs)
    u32 commandCounter = 0;
    u32 returnAddr = 0xffffffff;
 
+   Vdp1FakeClipX2 = regs->systemclipX2;
+   Vdp1FakeClipY2 = regs->systemclipY2;
+
    while (!(command & 0x8000) && commandCounter < 2000) { // fix me
       // First, process the command
       if (!(command & 0x4000)) { // if (!skip)
@@ -599,6 +603,8 @@ void Vdp1FakeDrawCommands(u8 * ram, Vdp1 * regs)
             break;
          case 9: // system clipping coordinates
             VIDCore->Vdp1SystemClipping(ram, regs);
+            if (regs->systemclipX2 > Vdp1FakeClipX2) Vdp1FakeClipX2 = regs->systemclipX2;
+            if (regs->systemclipY2 > Vdp1FakeClipY2) Vdp1FakeClipY2 = regs->systemclipY2;
             break;
          case 10: // local coordinate
             VIDCore->Vdp1LocalCoordinate(ram, regs);

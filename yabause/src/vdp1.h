@@ -128,6 +128,9 @@ void FASTCALL Sh2Vdp1FrameBufferWriteLong(SH2_struct *sh, u32, u32);
 
 void Vdp1DrawCommands(u8 * ram, Vdp1 * regs, u8* back_framebuffer);
 void Vdp1FakeDrawCommands(u8 * ram, Vdp1 * regs);
+/* The largest system clip (X2, Y2) the last Vdp1FakeDrawCommands list drew
+   with: the one it started with or one its clip commands set */
+extern int Vdp1FakeClipX2, Vdp1FakeClipY2;
 
 /* Renderer log (debug builds only, -DYAB_VDP1LOG; YAB_VDP1LOG=file at run time): for every
  * entry the renderer walks, the 16 command words as read, the pixels written and, when none

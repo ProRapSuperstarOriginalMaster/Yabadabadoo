@@ -458,6 +458,7 @@ typedef struct
    Vdp1 regs;
    u8 *ram;          /* snapshot of VDP1 RAM at capture */
    u32 stale[4];     /* pages of ram older than Vdp1Ram */
+   int clipx, clipy; /* the largest system clip its list draws with */
 } Vdp1Job;
 static Vdp1Job vdp1_job[2];               /* per vdp1framebuffer[] index */
 static u32 vdp1_ctx_stale[4];             /* the same for vidsoft_vdp1_thread_context.ram */
@@ -4440,26 +4441,28 @@ static int VidsoftModeKey(const Vdp1 *regs)
 
 /* May a new erasing job replace the pending one without drawing it? Only
  * if its erase window covers everything the old job could have changed:
- * the old erase window and the old system clip rectangle. */
+ * the old erase window and the framebuffer rows and columns inside the
+ * largest system clip its list draws with. */
 /* One past the last column VidsoftVdp1Erase clears: 8-bit framebuffers
- * count the right edge in units of 16 pixels. Double-density interlace keeps
- * the 16-bit reading (its rows are not checked here). */
+ * count the right edge in units of 16 pixels. */
 static int VidsoftEraseRight(const Vdp1 *r)
 {
-   if ((r->TVMR & 1) && !(r->FBCR & 8))
+   if (r->TVMR & 1)
       return (r->EWRR >> 9) * 16;
    return ((r->EWRR >> 6) & 0x3F8) + 8;
 }
 
-static int VidsoftEraseCovers(const Vdp1 *nw, const Vdp1 *old, int old_erase)
+static int VidsoftEraseCovers(const Vdp1 *nw, const Vdp1Job *old)
 {
    int nx0 = (nw->EWLR >> 6) & 0x1F8, ny0 = nw->EWLR & 0x1FF;
    int nx1 = VidsoftEraseRight(nw), ny1 = (nw->EWRR & 0x1FF) + 1;
+   /* double interlace draws VDP1 line y into framebuffer row y / 2 */
+   int rows = ((old->regs.FBCR & 8) ? old->clipy / 2 : old->clipy) + 1;
    if (nx0 > 0 || ny0 > 0)
       return 0;
-   if (nx1 < old->systemclipX2 + 1 || ny1 < old->systemclipY2 + 1)
+   if (nx1 < old->clipx + 1 || ny1 < rows)
       return 0;
-   if (old_erase && (nx1 < VidsoftEraseRight(old) || ny1 < (old->EWRR & 0x1FF) + 1))
+   if (old->erase && (nx1 < VidsoftEraseRight(&old->regs) || ny1 < (old->regs.EWRR & 0x1FF) + 1))
       return 0;
    return 1;
 }
@@ -4473,7 +4476,7 @@ static void VidsoftVdp1Capture(int erase)
    if ((vdp1_job[other].pending && VidsoftModeKey(&vdp1_job[other].regs) != VidsoftModeKey(Vdp1Regs)))
       VidsoftVdp1RunJob(other);
    if (j->pending && (VidsoftModeKey(&j->regs) != VidsoftModeKey(Vdp1Regs) ||
-                      !erase || !VidsoftEraseCovers(Vdp1Regs, &j->regs, j->erase)))
+                      !erase || !VidsoftEraseCovers(Vdp1Regs, j)))
       VidsoftVdp1RunJob(idx);   /* the new draw goes on top of it */
    else if (j->pending)
       vdp1_st_replaced++;
@@ -4607,7 +4610,7 @@ void VIDSoftVdp1DrawStart()
          if (vdp1_job[idx].pending)
          {
             if (erase && VidsoftModeKey(&vdp1_job[idx].regs) == VidsoftModeKey(Vdp1Regs) &&
-                VidsoftEraseCovers(Vdp1Regs, &vdp1_job[idx].regs, vdp1_job[idx].erase))
+                VidsoftEraseCovers(Vdp1Regs, &vdp1_job[idx]))
             {
                vdp1_job[idx].pending = 0;
                vdp1_st_replaced++;
@@ -4635,6 +4638,11 @@ void VIDSoftVdp1DrawStart()
          Vdp1External.manualerase = 0;   /* as the erase itself does */
 
       Vdp1FakeDrawCommands(Vdp1Ram, Vdp1Regs);
+      {
+         Vdp1Job *j = &vdp1_job[VidsoftFbIndex(vdp1backframebuffer)];
+         j->clipx = Vdp1FakeClipX2;   /* read only while the job is pending */
+         j->clipy = Vdp1FakeClipY2;
+      }
    }
    else
    {
