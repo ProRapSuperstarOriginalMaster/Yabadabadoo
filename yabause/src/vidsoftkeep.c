@@ -458,12 +458,13 @@ static void KeepWalkLine(int layer, vdp2draw_struct *info, const u32 *planetbl, 
    const int cellwh = 2 + info->patternwh;
    const int y0 = L->y;
    const int bpp_shift = cn == 0 ? -1 : cn == 1 ? 0 : cn <= 3 ? 1 : 2;   /* bytes per dot: 1/2, 1, 2, 4 */
-   int xs, xe, xx, lastblk = -1, lastcell = -1;
+   int xs, xe, xx, step = 1, lastblk = -1, lastcell = -1;
+   const int zoomed = L->zoom != 1.0f;
    u32 charaddr = 0, paladdr = 0;
    int flipfunction = 0;
    (void)layer;
 
-   if (L->zoom != 1.0f)
+   if (zoomed)
    {
       xs = info->x - 1;
       xe = (int)(info->x + (vdp2width - 1) * L->zoom) + 1;
@@ -473,12 +474,21 @@ static void KeepWalkLine(int layer, vdp2draw_struct *info, const u32 *planetbl, 
       xs = info->x;
       xe = info->x + vdp2width - 1;
    }
-   for (xx = xs; xx <= xe; xx++)
+   for (xx = xs; xx <= xe; xx += step)
    {
       int x = xx & xmask, y = y0, tx, ty, i;
       u32 row, len;
       if (L->lsx)
          x = (x + L->lsx) & 0x3FF;
+      /* unzoomed, x steps by one per pixel: go to the next 8-pixel block, or
+         to where xx wraps at the map's width (the line scroll can put that
+         inside a block) */
+      if (!zoomed)
+      {
+         step = 8 - (x & 7);
+         if (step > xmask + 1 - (xx & xmask))
+            step = xmask + 1 - (xx & xmask);
+      }
       if ((x >> 3) == lastblk)
          continue;   /* same 8-pixel block: same tile and row */
       lastblk = x >> 3;
