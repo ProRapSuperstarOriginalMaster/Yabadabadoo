@@ -1044,8 +1044,17 @@ static void KeepWalkRot(vdp2draw_struct *info, const s32 *g, const screeninfo_st
    /* a tile's character bytes (8x8 dots, 2x2 cells for 16x16) */
    const u32 tilebytes = (cn == 0 ? 32u : cn == 1 ? 64u : cn <= 3 ? 128u : 256u) << (info->patternwh == 2 ? 2 : 0);
    const int pertile = !bm && cn != 2;
-   u32 charaddr = info->charaddr, paladdr = info->paladdr;
-   int flipfunction = 0, lastcell = -1, i;
+   u32 charaddr = info->charaddr, paladdr = info->paladdr, lastpal = 0xFFFFFFFF;
+   int flipfunction = 0, lastcell = -1, i, stride = pertile;
+   if (stride)
+   {
+      /* a row that moves 8 or more dots per 8 pixels changes tile at
+         (nearly) every pixel: no steps */
+      int ax, ay, bx, by;
+      RotRaw(g, 0, &ax, &ay);
+      RotRaw(g, 8, &bx, &by);
+      stride = abs(bx - ax) < 8 && abs(by - ay) < 8;
+   }
    for (i = 0; i < w; i++)
    {
       int x, y;
@@ -1103,11 +1112,17 @@ static void KeepWalkRot(vdp2draw_struct *info, const s32 *g, const screeninfo_st
                KeepMarkV(vm, charaddr + tilebytes - 1);
                /* coloroffset + (paladdr | dot): 16 or 256 entries from an
                   aligned base (a block = 16 entries, 8 in colour mode 2) */
-               if (cn <= 1)
+               if (cn <= 1 && paladdr != lastpal)
+               {
+                  /* (tiles mostly share palettes) */
+                  lastpal = paladdr;
                   for (k = 0; k < (cn == 0 ? 16u : 256u); k += 8)
                      KeepMarkC(cm, colormode, info->coloroffset + paladdr + k);
+               }
             }
          }
+         if (pertile && !stride)
+            continue;
          if (pertile)
          {
             /* step ahead while the row stays in this tile: the position moves
