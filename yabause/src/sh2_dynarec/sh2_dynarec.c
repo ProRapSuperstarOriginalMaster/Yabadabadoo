@@ -2170,6 +2170,10 @@ void imm8_assemble(int i,struct regstat *i_regs)
     assert(s>=0);
     assert(sr>=0); // Liveness analysis?
     assert(temp>=0);
+    if((i_regs->wasdoingcp>>s)&1) { // constant not loaded into s yet
+      emit_movimm(cpmap[i][s],temp);
+      s=temp;
+    }
     emit_cmpeqimm(s,imm[i],sr,temp);
   }
   else if(opcode[i]==12) {
@@ -2181,6 +2185,10 @@ void imm8_assemble(int i,struct regstat *i_regs)
       assert(s>=0);
       assert(sr>=0); // Liveness analysis?
       assert(temp>=0);
+      if((i_regs->wasdoingcp>>s)&1) { // constant not loaded into s yet
+        emit_movimm(cpmap[i][s],temp);
+        s=temp;
+      }
       emit_sh2tstimm(s,imm[i],sr,temp);
     }else{
       signed char s,t;
