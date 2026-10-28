@@ -4982,6 +4982,36 @@ void bios_assemble(int i,struct regstat *i_regs)
     emit_call((pointer)master_handle_bios);
 }
 
+// MAC.L and MAC.W read MACH and MACL (the accumulator is not one of their rs*)
+static u64 unneeded_mac(u64 u,int i)
+{
+  if(itype[i]==COMPLEX&&(opcode[i]|4)==4&&opcode2[i]==15) u&=~((1LL<<MACH)|(1LL<<MACL));
+  return u;
+}
+
+// T is a bit of SR (TBIT stands for it alone): an instruction reading SR
+// (DIV1, STC SR, ...) needs T, one reading T needs the SR register
+static u64 unneeded_sr_t(u64 u,int i)
+{
+  if(rs1[i]==SR||rs2[i]==SR||rs3[i]==SR) u&=~(1LL<<TBIT);
+  if(rs1[i]==TBIT||rs2[i]==TBIT||rs3[i]==TBIT) u&=~(1LL<<SR);
+  return u;
+}
+
+// The registers unneeded before instruction i, from those unneeded after it
+// (u): what i writes is unneeded, what it reads is needed
+static u64 unneeded_step(u64 u,int i)
+{
+  if(rt1[i]>=0) u|=1LL<<rt1[i];
+  if(rt2[i]>=0) u|=1LL<<rt2[i];
+  if(rs1[i]>=0) u&=~(1LL<<rs1[i]);
+  if(rs2[i]>=0) u&=~(1LL<<rs2[i]);
+  if(rs3[i]>=0) u&=~(1LL<<rs3[i]);
+  u=unneeded_mac(u,i);
+  u=unneeded_sr_t(u,i);
+  return u;
+}
+
 // Basic liveness analysis for SH2 registers
 void unneeded_registers(int istart,int iend,int r)
 {
@@ -5007,11 +5037,7 @@ void unneeded_registers(int istart,int iend,int r)
         branch_unneeded_reg[i]=u;
         if(itype[i]!=CJUMP) {
           // Merge in delay slot
-          if(rt1[i+1]>=0) u|=1LL<<rt1[i+1];
-          if(rt2[i+1]>=0) u|=1LL<<rt2[i+1];
-          if(rs1[i+1]>=0) u&=~(1LL<<rs1[i+1]);
-          if(rs2[i+1]>=0) u&=~(1LL<<rs2[i+1]);
-          if(rs3[i+1]>=0) u&=~(1LL<<rs3[i+1]);
+          u=unneeded_step(u,i+1);
         }
       }
       else
@@ -5031,17 +5057,9 @@ void unneeded_registers(int istart,int iend,int r)
           }
           if(itype[i]!=CJUMP) {
             // Merge in delay slot
-            if(rt1[i+1]>=0) temp_u|=1LL<<rt1[i+1];
-            if(rt2[i+1]>=0) temp_u|=1LL<<rt2[i+1];
-            if(rs1[i+1]>=0) temp_u&=~(1LL<<rs1[i+1]);
-            if(rs2[i+1]>=0) temp_u&=~(1LL<<rs2[i+1]);
-            if(rs3[i+1]>=0) temp_u&=~(1LL<<rs3[i+1]);
+            temp_u=unneeded_step(temp_u,i+1);
           }
-          if(rt1[i]>=0) temp_u|=1LL<<rt1[i];
-          if(rt2[i]>=0) temp_u|=1LL<<rt2[i];
-          if(rs1[i]>=0) temp_u&=~(1LL<<rs1[i]);
-          if(rs2[i]>=0) temp_u&=~(1LL<<rs2[i]);
-          if(rs3[i]>=0) temp_u&=~(1LL<<rs3[i]);
+          temp_u=unneeded_step(temp_u,i);
           unneeded_reg[i]=temp_u;
           // Only go three levels deep.  This recursion can take an
           // excessive amount of time if there are a lot of nested loops.
@@ -5061,11 +5079,7 @@ void unneeded_registers(int istart,int iend,int r)
         //u=0; // for debugging
         //branch_unneeded_reg[i]=u; // for debugging
             // Merge in delay slot
-            if(rt1[i+1]>=0) u|=1LL<<rt1[i+1];
-            if(rt2[i+1]>=0) u|=1LL<<rt2[i+1];
-            if(rs1[i+1]>=0) u&=~(1LL<<rs1[i+1]);
-            if(rs2[i+1]>=0) u&=~(1LL<<rs2[i+1]);
-            if(rs3[i+1]>=0) u&=~(1LL<<rs3[i+1]);
+            u=unneeded_step(u,i+1);
           } else {
             // Conditional branch
             b=unneeded_reg[(ba[i]-start)>>1];
@@ -5074,11 +5088,7 @@ void unneeded_registers(int istart,int iend,int r)
         //branch_unneeded_reg[i]=b; // for debugging
             // Branch delay slot
             if(itype[i]!=CJUMP) {
-              if(rt1[i+1]>=0) b|=1LL<<rt1[i+1];
-              if(rt2[i+1]>=0) b|=1LL<<rt2[i+1];
-              if(rs1[i+1]>=0) b&=~(1LL<<rs1[i+1]);
-              if(rs2[i+1]>=0) b&=~(1LL<<rs2[i+1]);
-              if(rs3[i+1]>=0) b&=~(1LL<<rs3[i+1]);
+              b=unneeded_step(b,i+1);
             }
             u&=b;
             // Always need stack and status in case of interrupt
@@ -5125,6 +5135,8 @@ void unneeded_registers(int istart,int iend,int r)
     if(rs1[i]>=0) u&=~(1LL<<rs1[i]);
     if(rs2[i]>=0) u&=~(1LL<<rs2[i]);
     if(rs3[i]>=0) u&=~(1LL<<rs3[i]);
+    u=unneeded_mac(u,i);
+    u=unneeded_sr_t(u,i);
     // Source-target dependencies
     //uu&=~(tdep<<dep1[i]);
     //uu&=~(tdep<<dep2[i]);
@@ -7151,6 +7163,7 @@ int sh2_recompile_block(int addr)
         if(rs1[i+1]>=0) current.u&=~(1LL<<rs1[i+1]);
         if(rs2[i+1]>=0) current.u&=~(1LL<<rs2[i+1]);
         if(rs3[i+1]>=0) current.u&=~(1LL<<rs3[i+1]);
+        current.u=unneeded_mac(current.u,i+1);
         if(rs1[i+1]==TBIT||rs2[i+1]==TBIT) current.u&=~(1LL<<SR);
         if(rt1[i+1]==TBIT||rt2[i+1]==TBIT) current.u&=~(1LL<<SR);
         //current.u&=~((1LL<<rs1[i])|(1LL<<rs2[i]));
@@ -7174,6 +7187,7 @@ int sh2_recompile_block(int addr)
         if(rs1[i]>=0) current.u&=~(1LL<<rs1[i]);
         if(rs2[i]>=0) current.u&=~(1LL<<rs2[i]);
         if(rs3[i]>=0) current.u&=~(1LL<<rs3[i]);
+        current.u=unneeded_mac(current.u,i);
         if(rs1[i]==TBIT||rs2[i]==TBIT) current.u&=~(1LL<<SR);
         if(rt1[i]==TBIT||rt2[i]==TBIT) current.u&=~(1LL<<SR);
       } else {
@@ -7191,6 +7205,7 @@ int sh2_recompile_block(int addr)
         current.u=branch_unneeded_reg[i-1];
       }
       current.u&=~((1LL<<rs1[i])|(1LL<<rs2[i]));
+      current.u=unneeded_mac(current.u,i);
       memcpy(&temp,&current,sizeof(current));
       temp.wasdirty=temp.dirty;
       // TODO: Take into account unconditional branches, as below
