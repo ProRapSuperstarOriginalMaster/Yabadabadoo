@@ -4442,15 +4442,25 @@ static int VidsoftModeKey(const Vdp1 *regs)
 /* May a new erasing job replace the pending one without drawing it? Only
  * if its erase window covers everything the old job could have changed:
  * the old erase window and the old system clip rectangle. */
+/* One past the last column VidsoftVdp1Erase clears: 8-bit framebuffers
+ * count the right edge in units of 16 pixels. Double-density interlace keeps
+ * the 16-bit reading (its rows are not checked here). */
+static int VidsoftEraseRight(const Vdp1 *r)
+{
+   if ((r->TVMR & 1) && !(r->FBCR & 8))
+      return (r->EWRR >> 9) * 16;
+   return ((r->EWRR >> 6) & 0x3F8) + 8;
+}
+
 static int VidsoftEraseCovers(const Vdp1 *nw, const Vdp1 *old, int old_erase)
 {
    int nx0 = (nw->EWLR >> 6) & 0x1F8, ny0 = nw->EWLR & 0x1FF;
-   int nx1 = ((nw->EWRR >> 6) & 0x3F8) + 8, ny1 = (nw->EWRR & 0x1FF) + 1;
+   int nx1 = VidsoftEraseRight(nw), ny1 = (nw->EWRR & 0x1FF) + 1;
    if (nx0 > 0 || ny0 > 0)
       return 0;
    if (nx1 < old->systemclipX2 + 1 || ny1 < old->systemclipY2 + 1)
       return 0;
-   if (old_erase && (nx1 < ((old->EWRR >> 6) & 0x3F8) + 8 || ny1 < (old->EWRR & 0x1FF) + 1))
+   if (old_erase && (nx1 < VidsoftEraseRight(old) || ny1 < (old->EWRR & 0x1FF) + 1))
       return 0;
    return 1;
 }
