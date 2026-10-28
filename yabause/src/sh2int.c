@@ -1108,9 +1108,8 @@ static void FASTCALL SH2ldspr(SH2_struct * sh)
 
 static void FASTCALL SH2macl(SH2_struct * sh)
 {
-   u32 RnL,RnH,RmL,RmH,Res0,Res1,Res2;
-   u32 temp0,temp1,temp2,temp3;
-   s32 tempm,tempn,fnLmL;
+   s32 tempm,tempn;
+   u64 sum;
    s32 m = INSTRUCTION_C(sh->instruction);
    s32 n = INSTRUCTION_B(sh->instruction);
 
@@ -1119,80 +1118,14 @@ static void FASTCALL SH2macl(SH2_struct * sh)
    tempm = (s32)sh->MappedMemoryReadLong(sh, sh->regs.R[m]);
    sh->regs.R[m] += 4;
 
-   if ((s32) (tempn^tempm) < 0)
-      fnLmL = -1;
-   else
-      fnLmL = 0;
-   if (tempn < 0)
-      tempn = 0 - tempn;
-   if (tempm < 0)
-      tempm = 0 - tempm;
-
-   temp1 = (u32) tempn;
-   temp2 = (u32) tempm;
-
-   RnL = temp1 & 0x0000FFFF;
-   RnH = (temp1 >> 16) & 0x0000FFFF;
-   RmL = temp2 & 0x0000FFFF;
-   RmH = (temp2 >> 16) & 0x0000FFFF;
-
-   temp0 = RmL * RnL;
-   temp1 = RmH * RnL;
-   temp2 = RmL * RnH;
-   temp3 = RmH * RnH;
-
-   Res2 = 0;
-   Res1 = temp1 + temp2;
-   if (Res1 < temp1)
-      Res2 += 0x00010000;
-
-   temp1 = (Res1 << 16) & 0xFFFF0000;
-   Res0 = temp0 + temp1;
-   if (Res0 < temp0)
-      Res2++;
-
-   Res2=Res2+((Res1>>16)&0x0000FFFF)+temp3;
-
-   if(fnLmL < 0)
-   {
-      Res2=~Res2;
-      if (Res0==0)
-         Res2++;
-      else
-         Res0=(~Res0)+1;
-   }
-   if(sh->regs.SR.part.S == 1)
-   {
-      Res0=sh->regs.MACL+Res0;
-      if (sh->regs.MACL>Res0)
-         Res2++;
-      if (sh->regs.MACH & 0x00008000);
-      else Res2 += sh->regs.MACH | 0xFFFF0000;
-      Res2+=(sh->regs.MACH&0x0000FFFF);
-      if(((s32)Res2<0)&&(Res2<0xFFFF8000))
-      {
-         Res2=0x00008000;
-         Res0=0x00000000;
-      }
-      if(((s32)Res2>0)&&(Res2>0x00007FFF))
-      {
-         Res2=0x00007FFF;
-         Res0=0xFFFFFFFF;
-      };
-
-      sh->regs.MACH=Res2;
-      sh->regs.MACL=Res0;
-   }
-   else
-   {
-      Res0=sh->regs.MACL+Res0;
-      if (sh->regs.MACL>Res0)
-         Res2++;
-      Res2+=sh->regs.MACH;
-
-      sh->regs.MACH=Res2;
-      sh->regs.MACL=Res0;
-   }
+   sum = (((u64)sh->regs.MACH << 32) | sh->regs.MACL) + (u64)((s64)tempn * tempm);
+   /* S: the sum is limited to 48 bits, towards the sign of the product (the
+      programming manual's text, and Mednafen; its sample code saturates
+      negative sums to MACH = 0x00008000) */
+   if (sh->regs.SR.part.S == 1 && sum > 0x00007FFFFFFFFFFFULL && sum < 0xFFFF800000000000ULL)
+      sum = ((tempn ^ tempm) < 0) ? 0xFFFF800000000000ULL : 0x00007FFFFFFFFFFFULL;
+   sh->regs.MACH = (u32)(sum >> 32);
+   sh->regs.MACL = (u32)sum;
 
    sh->regs.PC+=2;
    sh->cycles += 3;
@@ -1202,8 +1135,7 @@ static void FASTCALL SH2macl(SH2_struct * sh)
 
 static void FASTCALL SH2macw(SH2_struct * sh)
 {
-   s32 tempm,tempn,dest,src,ans;
-   u32 templ;
+   s32 tempm,tempn;
    s32 m = INSTRUCTION_C(sh->instruction);
    s32 n = INSTRUCTION_B(sh->instruction);
 
@@ -1211,45 +1143,25 @@ static void FASTCALL SH2macw(SH2_struct * sh)
    sh->regs.R[n]+=2;
    tempm=(s32)sh->MappedMemoryReadWord(sh, sh->regs.R[m]);
    sh->regs.R[m]+=2;
-   templ=sh->regs.MACL;
    tempm=((s32)(s16)tempn*(s32)(s16)tempm);
 
-   if ((s32)sh->regs.MACL>=0)
-      dest=0;
-   else
-      dest=1;
-   if ((s32)tempm>=0)
-   {
-      src=0;
-      tempn=0;
-   }
-   else
-   {
-      src=1;
-      tempn=0xFFFFFFFF;
-   }
-   src+=dest;
-   sh->regs.MACL+=tempm;
-   if ((s32)sh->regs.MACL>=0)
-      ans=0;
-   else
-      ans=1;
-   ans+=dest;
    if (sh->regs.SR.part.S == 1)
    {
-      if (ans==1)
+      /* S: 32-bit accumulate in MACL, limited to 32 bits; an overflow sets
+         bit 0 of MACH (the programming manual's text, and Mednafen) */
+      s64 sum = (s64)(s32)sh->regs.MACL + tempm;
+      if (sum != (s32)sum)
       {
-         if (src==0)
-            sh->regs.MACL=0x7FFFFFFF;
-         if (src==2)
-            sh->regs.MACL=0x80000000;
+         sh->regs.MACH |= 1;
+         sum = tempm < 0 ? (s32)0x80000000 : 0x7FFFFFFF;
       }
+      sh->regs.MACL = (u32)sum;
    }
    else
    {
-      sh->regs.MACH+=tempn;
-      if (templ>sh->regs.MACL)
-         sh->regs.MACH+=1;
+      u64 sum = (((u64)sh->regs.MACH << 32) | sh->regs.MACL) + (u64)(s64)tempm;
+      sh->regs.MACH = (u32)(sum >> 32);
+      sh->regs.MACL = (u32)sum;
    }
    sh->regs.PC+=2;
    sh->cycles += 3;
