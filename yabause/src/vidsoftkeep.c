@@ -42,10 +42,15 @@
     window and line scroll tables. The walk takes a superset where it is
     simpler (whole tile rows, the whole line scroll table).
 
+    RBG0 when it is not rotated (Vdp2DrawRotationFP() hands it to
+    Vdp2DrawScroll()) is kept the same way; its position and zoom come from the
+    rotation parameter tables in VRAM, which every row of it counts as read,
+    and its plane table from the frame registers (not regenerated per line).
+
     Tile layers on the fast path only (no bitmap, mosaic or bad-cycle
     emulation), no sprite window. With double-density interlace each field has
     its own Titan rows (titan.c row_base) and a row is compared with the field
-    before the last, which drew it. Rotation
+    before the last, which drew it. Rotated
     layers are always drawn. In a file of its own: vidsoft.c sits at GCC's
     per-file inlining limit (code added there changes what gets inlined in its
     hot loops); Vdp2DrawScroll only calls VidsoftKeepRow() per line and
@@ -331,7 +336,7 @@ void VidsoftKeepFrameEnd(void)
    line only through the cell cache, which starts afresh after a kept line. */
 static INLINE int KeepLineOk(int l, const Vdp2 *r)
 {
-   static const u16 en[4] = { 0x8, 0x4, 0x2, 0x21 };
+   static const u16 en[5] = { 0x8, 0x4, 0x2, 0x21, 0x10 };
    return (r->BGON & en[l]) != 0;
 }
 
@@ -340,6 +345,13 @@ static INLINE int KeepLineOk(int l, const Vdp2 *r)
 static INLINE int KeepRows(void) { return vdp2_interlace ? vdp2height / 2 : vdp2height; }
 static INLINE int KeepBack(void) { return vdp2_interlace ? 2 : 1; }
 static INLINE int KeepSlot0(void) { return vdp2_interlace && vdp2_is_odd_frame ? KEEP_LINES : 0; }
+
+/* where Vdp2ReadRotationTableFP() reads the rotation parameter tables: A at
+   this address, B at its 0x80 (each up to 0x6C bytes) */
+static INLINE u32 KeepRotTable(const Vdp2 *r)
+{
+   return (r->RPTA.all << 1) & 0x000FFF7C;
+}
 
 static void KeepBegin(int layer, vdp2draw_struct *info)
 {
@@ -353,17 +365,18 @@ static void KeepBegin(int layer, vdp2draw_struct *info)
    int y, wctl, cells, k;
 
    keep_layer_began[layer] = 0;
-   if (!keep_active || layer > TITAN_NBG0 || TitanFrame() != keep_frame || (layer == TITAN_NBG0 && (fr->BGON & 0x20)))
+   if (!keep_active || TitanFrame() != keep_frame || (layer == TITAN_NBG0 && (fr->BGON & 0x20)))
    {
       keep_st_why[layer][!keep_active ? 8 : TitanFrame() != keep_frame ? 9 : 10]++;
-      return;   /* RBG0 / RBG1 (Vdp2DrawRotationFP falls through to Vdp2DrawScroll when not rotated) */
+      return;   /* RBG1 (Vdp2DrawRotationFP falls through to Vdp2DrawScroll when not rotated) */
    }
    keep_layer_began[layer] = 1;
    keep_layer_ok[layer] = 0;
    wctl = info->wctl;
    {
       const int why = n > KEEP_LINES ? 2 : info->isbitmap ? 3 : info->mosaicxmask != 1 ? 4 :
-                      (keep_glob[keep_cur] & 0x200) ? 5 : (wctl & 0x20) || (fr->WCTLD & 0x2000) ? 6 : 0;
+                      (keep_glob[keep_cur] & 0x200) ? 5 : (wctl & 0x20) || (fr->WCTLD & 0x2000) ? 6 :
+                      layer == TITAN_RBG0 && KeepRotTable(fr) + 0x100 > 0x80000 ? 11 : 0;
       if (why)
       {
          keep_st_why[layer][why]++;
@@ -371,7 +384,7 @@ static void KeepBegin(int layer, vdp2draw_struct *info)
       }
    }
    for (y = 0; y < n; y++)
-      if (!(lines[y].BGON & (layer == TITAN_NBG0 ? 0x21 : 8 >> layer)))
+      if (!(lines[y].BGON & (layer == TITAN_RBG0 ? 0x10 : layer == TITAN_NBG0 ? 0x21 : 8 >> layer)))
       {
          keep_st_why[layer][7]++;
          return;   /* a line without this layer: the rows shift (Vdp2DrawScroll's output_y) */
@@ -620,6 +633,13 @@ static void KeepEnd(int layer, vdp2draw_struct *info, u8 *ram)
          KeepMarkV(lw, a);
       KeepMarkV(lw, end);
    }
+   /* RBG0: its position and zoom (the rotation parameter tables) */
+   if (layer == TITAN_RBG0)
+   {
+      const u32 a = KeepRotTable(fr);
+      KeepMarkVRange(lw, a, 0x6C);
+      KeepMarkVRange(lw, a | 0x80, 0x6C);
+   }
    for (y = 0; y < n; y++)
    {
       struct KeepRow *R = &keep_row[layer][s0 + y];
@@ -662,7 +682,7 @@ static void KeepEnd(int layer, vdp2draw_struct *info, u8 *ram)
          int i;
          for (i = 0; i < info->mapwh * info->mapwh; i++)
          {
-            info->PlaneAddr(info, i, (Vdp2 *)&lines[y]);
+            info->PlaneAddr(info, i, (Vdp2 *)(layer == TITAN_RBG0 ? fr : &lines[y]));
             planetbl[i] = info->addr;
          }
          memcpy(R->vm, lw, sizeof(lw));
@@ -682,7 +702,7 @@ int VidsoftKeepRow(vdp2draw_struct *info, int row, int y, int lsx)
 {
    const int layer = info->titan_which_layer;
    struct VidsoftKeepLine *L;
-   if (layer > TITAN_NBG0)
+   if (layer > TITAN_RBG0)
       return 0;
    if (keep_layer_frame[layer] != keep_frame)
    {
@@ -699,6 +719,6 @@ int VidsoftKeepRow(vdp2draw_struct *info, int row, int y, int lsx)
 void VidsoftKeepDrawn(vdp2draw_struct *info, u8 *ram)
 {
    const int layer = info->titan_which_layer;
-   if (layer <= TITAN_NBG0 && keep_layer_began[layer])
+   if (layer <= TITAN_RBG0 && keep_layer_began[layer])
       KeepEnd(layer, info, ram);
 }
