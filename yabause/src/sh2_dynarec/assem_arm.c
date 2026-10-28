@@ -1158,6 +1158,14 @@ void emit_shrdimm(int rs,int rs2,unsigned int imm,int rt)
   assem_debug("shrd %%%s,%%%s,%d\n",regname[rt],regname[rs2],imm);
   assert(imm>0);
   assert(imm<32);
+  if(rs==rs2) { // XTRCT Rn,Rn
+    emit_rorimm(rs,imm,rt);
+    return;
+  }
+  if(rs2==rt) { // rt is written first
+    emit_mov(rs2,HOST_TEMPREG);
+    rs2=HOST_TEMPREG;
+  }
   //if(imm==1) ...
   assem_debug("lsr %s,%s,#%d\n",regname[rt],regname[rs],imm);
   output_w32(0xe1a00020|rd_rn_rm(rt,0,rs)|(imm<<7));
