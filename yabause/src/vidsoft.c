@@ -478,18 +478,6 @@ static void VidsoftWaitForLayerThreads(void);
 
 typedef struct { s16 x; s16 y; } vdp1vertex;
 
-typedef struct
-{
-   int pagepixelwh, pagepixelwh_bits, pagepixelwh_mask;
-   int planepixelwidth, planepixelwidth_bits, planepixelwidth_mask;
-   int planepixelheight, planepixelheight_bits, planepixelheight_mask;
-   int screenwidth;
-   int screenheight;
-   int oldcellx, oldcelly, oldcellcheck;
-   int xmask, ymask;
-   u32 planetbl[16];
-} screeninfo_struct;
-
 //////////////////////////////////////////////////////////////////////////////
 
 static INLINE u32 FASTCALL Vdp2ColorRamGetColorCM(int colormode, u32 addr, u8* vdp2_color_ram)
@@ -2596,6 +2584,15 @@ static __attribute__((noinline)) void Vdp2RotLeanNewTile(vdp2draw_struct *info, 
    Vdp2RotLeanTileVals(info, ram, t);
 }
 
+/* For the layer-line reuse (vidsoftkeep.c): the tile lookup at (x, y) of a
+ * rotated line, which leaves the cell cache as the pixel loop does there */
+void VidsoftRotLookup(vdp2draw_struct *info, screeninfo_struct *sinfo, Vdp2 *regs, u8 *ram, int x, int y)
+{
+   struct RotLeanTile t;
+   sinfo->oldcellcheck = -1;
+   Vdp2RotLeanNewTile(info, sinfo, regs, ram, x, y, &t);
+}
+
 /* One line of the no-coefficient rotation loop of Vdp2DrawRotationFP() in the
  * case Sega Rally draws its road-side backgrounds in: 8bpp tiles of one cell,
  * scale 1.0, no window, special colour calculation mode 0 or 1, no colour
@@ -2968,7 +2965,8 @@ static void FASTCALL Vdp2DrawRotationFP(vdp2draw_struct *info, vdp2rotationparam
                {
                   q = p2; qs = &sinfo2; Xs = L.Xsp2; Ys = L.Ysp2;
                }
-               if (q != NULL)
+               /* (layer-line reuse, vidsoftkeep.c: 1 = the row was kept) */
+               if (q != NULL && !VidsoftKeepRot(info, q, qs, Xs, Ys, regs, ram, wintab, j))
                   vdp2_rot_kline[info->isbitmap ? 1 : 0][info->colornumber](info, q, qs, Xs, Ys, regs, ram, color_ram, wintab, clip, j);
             }
             else
@@ -3790,6 +3788,7 @@ static void Vdp2DrawRBG0(Vdp2* lines, Vdp2* regs, u8* ram, u8* color_ram, struct
    info.LoadLineParams = (void(*)(void *, void*, int, Vdp2*)) LoadLineParamsRBG0;
 
    Vdp2DrawRotationFP(&info, parameter, lines, regs, ram, color_ram, cell_data);
+   VidsoftKeepRotDrawn(&info, ram);
 }
 
 //////////////////////////////////////////////////////////////////////////////

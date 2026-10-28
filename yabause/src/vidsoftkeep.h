@@ -22,6 +22,19 @@
 
 #include "vidshared.h"
 
+/* vidsoft.c's per-screen state of a tile layer draw */
+typedef struct
+{
+   int pagepixelwh, pagepixelwh_bits, pagepixelwh_mask;
+   int planepixelwidth, planepixelwidth_bits, planepixelwidth_mask;
+   int planepixelheight, planepixelheight_bits, planepixelheight_mask;
+   int screenwidth;
+   int screenheight;
+   int oldcellx, oldcelly, oldcellcheck;
+   int xmask, ymask;
+   u32 planetbl[16];
+} screeninfo_struct;
+
 /* Layer-line reuse (vidsoftkeep.c). From vdp2.c, for the software
    renderer: before VIDSoftVdp2DrawScreens draws a field, and after DrawEnd */
 void VidsoftKeepFrame(void);
@@ -33,5 +46,14 @@ int VidsoftKeepRow(vdp2draw_struct *info, int row, int y, int lsx);
 /* At the end of Vdp2DrawScroll (ram = the VDP2 RAM it drew from): note what
    the drawn rows read */
 void VidsoftKeepDrawn(vdp2draw_struct *info, u8 *ram);
+/* From Vdp2DrawRotationFP, before a rotated RBG0 line's per-line loop
+   (Vdp2RotKLine*: parameter q, its screen qs, the line's start Xs/Ys, its
+   window table): 1 = the row was kept, don't draw it */
+int VidsoftKeepRot(vdp2draw_struct *info, vdp2rotationparameterfp_struct *q, screeninfo_struct *qs,
+                   fixed32 Xs, fixed32 Ys, Vdp2 *regs, u8 *ram, const u8 *wintab, int j);
+/* From Vdp2DrawRBG0 after the rotation draw: note what the drawn rows read */
+void VidsoftKeepRotDrawn(vdp2draw_struct *info, u8 *ram);
+/* vidsoft.c: the tile lookup of a rotated line at (x, y), as the pixel loop does it */
+void VidsoftRotLookup(vdp2draw_struct *info, screeninfo_struct *sinfo, Vdp2 *regs, u8 *ram, int x, int y);
 
 #endif

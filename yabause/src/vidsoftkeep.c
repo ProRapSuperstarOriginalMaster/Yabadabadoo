@@ -47,6 +47,17 @@
     rotation parameter tables in VRAM, which every row of it counts as read,
     and its plane table from the frame registers (not regenerated per line).
 
+    RBG0 rotated with coefficients per line (the Vdp2RotKLine* loops: Shining
+    Force III, Panzer Dragoon): a row is also compared by the values its
+    pixel loop starts from (the parameter, its start, steps, scale and
+    offsets: the rotation and coefficient tables' only effect on it), and its
+    read set is found by walking its pixels with that loop's arithmetic. The
+    tile lookup state carries from line to line (two parameters share the
+    tile fields), so a tile row is kept only when its first pixel looks a tile
+    up afresh, and after it the state is set as drawing it leaves it (a lookup
+    at its last pixel, VidsoftRotLookup()). In check mode the next row's call
+    compares that prediction with the drawn state ("rotkeep CACHE MISS").
+
     Tile layers on the fast path only (no bitmap, mosaic or bad-cycle
     emulation), no sprite window. With double-density interlace each field has
     its own Titan rows (titan.c row_base) and a row is compared with the field
@@ -68,7 +79,7 @@
 #include "vidsoftkeep.h"
 #include "titan/titan.h"
 
-extern int vdp2width, vdp2height, vdp2_interlace;
+extern int vdp2width, vdp2height, vdp2_interlace, rbg0width;
 
 extern int bad_cycle_setting[6];
 
@@ -113,11 +124,14 @@ static u32 keep_frame;          /* TitanFrame() of this field */
 
 /* a Titan row's record: the frame it was last drawn or kept in (0 = none),
    what it read */
+#define KEEP_GEOM 12
 struct KeepRow
 {
    u32 frame;
    u32 vm[VW], cm[4];
    u8 miss;   /* fields in a row it was recorded and then not kept (KEEP_IDLE on: recorded every 8th field) */
+   u8 rot;    /* recorded by the rotated path (its geometry in g) */
+   s32 g[KEEP_GEOM];
 };
 static struct KeepRow keep_row[5][2 * KEEP_LINES];   /* [parity * 256 + row] */
 static int keep_layer_ok[5];    /* KeepBegin: rows of this layer may be recorded */
@@ -162,6 +176,7 @@ static const struct KeepRegDef keep_regdefs[] = {
    KEEP_R(COBB) };
 
 static void KeepLog(void);
+static unsigned long keep_st_cmiss;
 
 static void KeepClr(u16 *m, const char *names)
 {
@@ -275,8 +290,8 @@ static void KeepLog(void)
 {
    static const char *nm[5] = { "NBG3", "NBG2", "NBG1", "NBG0", "RBG0" };
    int l;
-   fprintf(stderr, "lnkeep: %u fields%s, misses %lu;", keep_st_fields, vidsoft_keep_check ? " (check mode)" : "",
-           keep_st_miss);
+   fprintf(stderr, "lnkeep: %u fields%s, misses %lu, cache misses %lu;", keep_st_fields,
+           vidsoft_keep_check ? " (check mode)" : "", keep_st_miss, keep_st_cmiss);
    for (l = 0; l < 5; l++)
    {
       int k;
@@ -331,13 +346,14 @@ void VidsoftKeepFrameEnd(void)
    keep_active = 0;
 }
 
-/* a line of this layer that is drawn (LoadLineParams' enable). Special
+/* a line of this layer that is drawn (LoadLineParams' enable; RBG0's line
+   parameters leave it as the frame's: every line is drawn). Special
    priority mode 1 is fine: the priority bit of a tile carries over to the next
    line only through the cell cache, which starts afresh after a kept line. */
 static INLINE int KeepLineOk(int l, const Vdp2 *r)
 {
-   static const u16 en[5] = { 0x8, 0x4, 0x2, 0x21, 0x10 };
-   return (r->BGON & en[l]) != 0;
+   static const u16 en[4] = { 0x8, 0x4, 0x2, 0x21 };
+   return l == TITAN_RBG0 || (r->BGON & en[l]) != 0;
 }
 
 /* rows a layer draws into this field (Vdp2DrawScroll's output_y), the field
@@ -374,7 +390,7 @@ static void KeepBegin(int layer, vdp2draw_struct *info)
    keep_layer_ok[layer] = 0;
    wctl = info->wctl;
    {
-      const int why = n > KEEP_LINES ? 2 : info->isbitmap ? 3 : info->mosaicxmask != 1 ? 4 :
+      const int why = n > KEEP_LINES ? 2 : info->isbitmap && layer != TITAN_RBG0 ? 3 : info->mosaicxmask != 1 ? 4 :
                       (keep_glob[keep_cur] & 0x200) ? 5 : (wctl & 0x20) || (fr->WCTLD & 0x2000) ? 6 :
                       layer == TITAN_RBG0 && KeepRotTable(fr) + 0x100 > 0x80000 ? 11 : 0;
       if (why)
@@ -383,8 +399,8 @@ static void KeepBegin(int layer, vdp2draw_struct *info)
          return;
       }
    }
-   for (y = 0; y < n; y++)
-      if (!(lines[y].BGON & (layer == TITAN_RBG0 ? 0x10 : layer == TITAN_NBG0 ? 0x21 : 8 >> layer)))
+   for (y = 0; y < n && layer != TITAN_RBG0; y++)
+      if (!(lines[y].BGON & (layer == TITAN_NBG0 ? 0x21 : 8 >> layer)))
       {
          keep_st_why[layer][7]++;
          return;   /* a line without this layer: the rows shift (Vdp2DrawScroll's output_y) */
@@ -404,7 +420,7 @@ static void KeepBegin(int layer, vdp2draw_struct *info)
    for (y = 0; y < n; y++)
    {
       struct KeepRow *R = &keep_row[layer][s0 + y];
-      if (R->frame != prev || TitanLineFrame(layer, y) != prev)
+      if (R->frame != prev || R->rot || TitanLineFrame(layer, y) != prev)
          continue;
       if (R->miss < 255)
          R->miss++;   /* until kept below */
@@ -602,6 +618,70 @@ static void KeepWalkLine(int layer, vdp2draw_struct *info, const u32 *planetbl, 
    }
 }
 
+/* The same for a bitmap line (unrotated RBG0 only: an NBG bitmap's address
+   can change per line): every x the pixel loop can compute (the bitmap's
+   width wraps, then the line scroll) and the dot there */
+static void KeepWalkBitmapLine(vdp2draw_struct *info, const struct VidsoftKeepLine *L, u8 *ram, u32 *vm, u32 *cm)
+{
+   const int colormode = Vdp2Internal.ColorMode;
+   const int cn = info->colornumber, cellw = info->cellw, xmask = info->cellw - 1, y = L->y;
+   const u32 charaddr = info->charaddr, paladdr = info->paladdr;
+   const int zoomed = L->zoom != 1.0f;
+   int xs, xe, xx;
+   if (zoomed)
+   {
+      xs = info->x - 1;
+      xe = (int)(info->x + (vdp2width - 1) * L->zoom) + 1;
+   }
+   else
+   {
+      xs = info->x;
+      xe = info->x + vdp2width - 1;
+   }
+   if (xe - xs > 2 * 1024)
+      xe = xs + 2 * 1024;   /* every x of the bitmap row and the line scroll (wraps at 1024 and the width) */
+   for (xx = xs; xx <= xe; xx++)
+   {
+      int x = xx & xmask;
+      u32 a, dot;
+      if (L->lsx)
+         x = (x + L->lsx) & 0x3FF;
+      /* Vdp2FetchPixelCN */
+      switch (cn)
+      {
+         case 0:
+            a = charaddr + ((y * cellw) + x) / 2;
+            dot = T1ReadByte(ram, a & 0x7FFFF);
+            if (!(x & 1))
+               dot >>= 4;
+            KeepMarkV(vm, a);
+            if ((dot & 0xF) || !info->transparencyenable)
+               KeepMarkC(cm, colormode, info->coloroffset + (paladdr | (dot & 0xF)));
+            break;
+         case 1:
+            a = charaddr + (y * cellw) + x;
+            dot = T1ReadByte(ram, a & 0x7FFFF);
+            KeepMarkV(vm, a);
+            if (dot || !info->transparencyenable)
+               KeepMarkC(cm, colormode, info->coloroffset + (paladdr | dot));
+            break;
+         case 2:
+            a = charaddr + ((y * cellw) + x) * 2;
+            dot = T1ReadWord(ram, a & 0x7FFFF);
+            KeepMarkVRange(vm, a, 2);
+            if (dot || !info->transparencyenable)
+               KeepMarkC(cm, colormode, info->coloroffset + dot);
+            break;
+         case 3:
+            KeepMarkVRange(vm, charaddr + ((y * cellw) + x) * 2, 2);
+            break;
+         case 4:
+            KeepMarkVRange(vm, charaddr + ((y * cellw) + x) * 4, 4);
+            break;
+      }
+   }
+}
+
 static void KeepEnd(int layer, vdp2draw_struct *info, u8 *ram)
 {
    const Vdp2 *fr = &keep_regs[keep_cur];
@@ -691,7 +771,11 @@ static void KeepEnd(int layer, vdp2draw_struct *info, u8 *ram)
             KeepMarkVRange(R->vm, ((fr->LWTA0.all & 0x7FFFE) << 1) + j * 4, 4);
          if (info->islinewindow & 2)
             KeepMarkVRange(R->vm, ((fr->LWTA1.all & 0x7FFFE) << 1) + j * 4, 4);
+         if (info->isbitmap)
+            KeepWalkBitmapLine(info, &vidsoft_keep_line[layer][y], ram, R->vm, R->cm);
+         else
          KeepWalkLine(layer, info, planetbl, &vidsoft_keep_line[layer][y], fr, ram, R->vm, R->cm);
+         R->rot = 0;
          R->frame = keep_frame;
          keep_st_rec[layer]++;
       }
@@ -721,4 +805,424 @@ void VidsoftKeepDrawn(vdp2draw_struct *info, u8 *ram)
    const int layer = info->titan_which_layer;
    if (layer <= TITAN_RBG0 && keep_layer_began[layer])
       KeepEnd(layer, info, ram);
+}
+
+/* Rotated RBG0 (the coefficient path's per-line loops, Vdp2RotKLine*) */
+
+/* this field: began / may keep rows / frame inputs as the last field's / the
+   writes since it */
+static u32 rot_frame;
+static int rot_began, rot_ok, rot_same;
+static u32 rot_vchg[VW], rot_cchg[4];
+/* per row this field: the geometry its loop started from, the screen of its
+   parameter, whether it may be recorded */
+struct KeepRotLine
+{
+   u32 frame;
+   s32 g[KEEP_GEOM];
+   int which, rec;
+};
+static struct KeepRotLine rot_line[KEEP_LINES];
+static screeninfo_struct rot_sinfo[2];
+static u32 rot_sinfo_frame[2];
+/* check mode: the lookup state predicted after a kept row (row, its screen) */
+static int rot_pred_row = -1;
+static u32 rot_pred_frame;
+static screeninfo_struct *rot_pred_qs;
+static int rot_pred_oc;
+static u32 rot_pred_t[6];
+
+/* the tile fields of the lookup state (Vdp2PatternAddr) */
+static INLINE void RotTileGet(const vdp2draw_struct *info, u32 *t)
+{
+   t[0] = info->charaddr; t[1] = info->paladdr; t[2] = info->flipfunction;
+   t[3] = info->specialfunction; t[4] = info->specialcolorfunction; t[5] = info->priority;
+}
+
+static void KeepBeginRot(vdp2draw_struct *info)
+{
+   const int layer = TITAN_RBG0, pi = (keep_seq - 1) % KEEP_HIST;
+   const Vdp2 *fr = &keep_regs[keep_cur], *pfr = &keep_regs[pi];
+   int why, k;
+   rot_began = rot_ok = rot_same = 0;
+   if (!keep_active || TitanFrame() != keep_frame)
+   {
+      keep_st_why[layer][!keep_active ? 8 : 9]++;
+      return;
+   }
+   rot_began = 1;
+   why = vdp2_interlace ? 1 : vdp2height > KEEP_LINES ? 2 : info->mosaicxmask != 1 || info->mosaicymask != 1 ? 4 :
+         (keep_glob[keep_cur] & 0x200) ? 5 : (info->wctl & 0x20) || (fr->WCTLD & 0x2000) ? 6 : 0;
+   if (why)
+   {
+      keep_st_why[layer][why]++;
+      return;
+   }
+   rot_ok = 1;
+   keep_layer_idle[layer]++;
+   rot_same = keep_seq >= 2 && keep_hframe[pi] == keep_frame - 1 && keep_hpar[pi] == keep_hpar[keep_cur] &&
+              keep_glob[keep_cur] == keep_glob[pi] && KeepRegsSame(layer, fr, pfr);
+   for (k = 0; k < VW; k++)
+      rot_vchg[k] = keep_vchg[keep_cur][k];
+   for (k = 0; k < 4; k++)
+      rot_cchg[k] = keep_cchg[keep_cur][k];
+}
+
+/* the position of pixel i of a line as the per-line loop computes it (masked;
+   0 = the screen-over rule drops it) */
+static INLINE int RotPos(const s32 *g, const screeninfo_struct *qs, int i, int *px, int *py)
+{
+   const u32 cx = (u32)g[0] + (u32)g[6] * (u32)i, cy = (u32)g[1] + (u32)g[7] * (u32)i;
+   int x = touint(mulfixed(g[2], (fixed32)cx) + g[4]);
+   int y = touint(mulfixed(g[3], (fixed32)cy) + g[5]);
+   const int over = g[8] & 3;
+   if (over <= 1)
+   {
+      x &= qs->xmask;
+      y &= qs->ymask;
+   }
+   else if (over == 2)
+   {
+      if (x > qs->xmask || y > qs->ymask)
+         return 0;
+   }
+   else if (x > 512 || y > 512)
+      return 0;
+   *px = x;
+   *py = y;
+   return 1;
+}
+
+/* the pixel loop's window test (a table, or one answer for the line) */
+static INLINE int RotWin(const vdp2draw_struct *info, const u8 *wintab, int i)
+{
+   return (info->wctl & 0x2a) == 0 ? !(info->wctl & 0x80) : wintab[i];
+}
+
+int VidsoftKeepRot(vdp2draw_struct *info, vdp2rotationparameterfp_struct *q, screeninfo_struct *qs,
+                   fixed32 Xs, fixed32 Ys, Vdp2 *regs, u8 *ram, const u8 *wintab, int j)
+{
+   const int layer = info->titan_which_layer;
+   const int w = rbg0width, cellwh = 2 + info->patternwh;
+   struct KeepRotLine *L;
+   struct KeepRow *R;
+   s32 g[KEEP_GEOM];
+   int which, i0, i1, x0 = 0, y0 = 0, x1 = 0, y1 = 0, fresh = 1, k;
+   if (layer != TITAN_RBG0 || keep_mode == 0)
+      return 0;
+   if (rot_frame != keep_frame)
+   {
+      rot_frame = keep_frame;
+      KeepBeginRot(info);
+   }
+   if (vidsoft_keep_check && rot_pred_row >= 0)
+   {
+      /* the lookup state the last row was predicted to leave */
+      if (rot_pred_frame == keep_frame && rot_pred_row == j - 1)
+      {
+         u32 t[6];
+         RotTileGet(info, t);
+         if (rot_pred_qs->oldcellcheck != rot_pred_oc || memcmp(t, rot_pred_t, sizeof(t)))
+         {
+            keep_st_cmiss++;
+            fprintf(stderr, "rotkeep CACHE MISS: field %u row %d (cell %x/%x) (%lu)\n", keep_frame, j - 1,
+                    rot_pred_qs->oldcellcheck, rot_pred_oc, keep_st_cmiss);
+         }
+      }
+      rot_pred_row = -1;
+   }
+   if (!rot_ok || j < 0 || j >= vdp2height || j >= KEEP_LINES)
+      return 0;
+   which = q->PlaneAddr == (void FASTCALL (*)(void *, int, Vdp2 *))&Vdp2ParameterBPlaneAddr;
+   g[0] = Xs; g[1] = Ys; g[2] = q->kx; g[3] = q->ky; g[4] = q->Xp; g[5] = q->Yp; g[6] = q->dX; g[7] = q->dY;
+   g[8] = q->screenover | (which << 2) | (info->isbitmap ? 8 : 0) | (info->colornumber << 4);
+   g[9] = info->priority; g[10] = info->alpha; g[11] = info->linescreen;
+   L = &rot_line[j];
+   L->frame = keep_frame;
+   memcpy(L->g, g, sizeof(g));
+   L->which = which;
+   L->rec = 0;
+   if (rot_sinfo_frame[which] != keep_frame)
+   {
+      rot_sinfo_frame[which] = keep_frame;
+      rot_sinfo[which] = *qs;
+   }
+   if (info->specialprimode == 1 || ((info->wctl & 0x2a) && !wintab) || info->colornumber > 4)
+      return 0;
+   /* the first and the last pixel the loop draws (window and screen-over) */
+   for (i0 = 0; i0 < w && !(RotWin(info, wintab, i0) && RotPos(g, qs, i0, &x0, &y0)); i0++)
+      ;
+   if (i0 == w)
+      return 0;   /* draws nothing */
+   for (i1 = w - 1; !(RotWin(info, wintab, i1) && RotPos(g, qs, i1, &x1, &y1)); i1--)
+      ;
+   if (!info->isbitmap)
+   {
+      /* the row's pixels depend only on its key when its first pixel looks a
+         tile up (not the cached one: two parameters share its fields) */
+      fresh = ((((y0 >> cellwh) << 16) | (x0 >> cellwh)) != qs->oldcellcheck);
+      if (!fresh)
+         return 0;
+   }
+   L->rec = 1;
+   R = &keep_row[layer][j];
+   if (!rot_same || R->frame != keep_frame - 1 || !R->rot || TitanLineFrame(layer, j) != keep_frame - 1)
+      return 0;
+   if (R->miss < 255)
+      R->miss++;   /* until kept below */
+   {
+      u32 d = (R->cm[0] & rot_cchg[0]) | (R->cm[1] & rot_cchg[1]) | (R->cm[2] & rot_cchg[2]) | (R->cm[3] & rot_cchg[3]);
+      for (k = 0; k < VW; k++)
+         d |= R->vm[k] & rot_vchg[k];
+      if (d || memcmp(R->g, g, sizeof(g)))
+         return 0;
+   }
+   {
+      const int pi = (keep_seq - 1) % KEEP_HIST;
+      if (!KeepLineOk(layer, &keep_lines[keep_cur][j]) || !KeepRegsSame(layer, &keep_lines[keep_cur][j], &keep_lines[pi][j]))
+         return 0;
+   }
+   vidsoft_keep_bits[layer][j >> 5] |= 1u << (j & 31);
+   keep_layer_idle[layer] = 0;
+   R->miss = 0;
+   if (vidsoft_keep_check)
+   {
+      if (!keep_save[layer])
+         keep_save[layer] = (struct PixelData *)malloc(sizeof(struct PixelData) * 704 * KEEP_LINES);
+      memcpy(keep_save[layer] + j * 704, TitanGetLayerLine(layer, j), sizeof(struct PixelData) * vdp2width);
+      keep_save_prio[layer][j] = TitanLineMaxPriority(layer, j);
+      if (!info->isbitmap)
+      {
+         /* predict the lookup state drawing the row leaves (as below), then
+            put it back: this row is drawn */
+         u32 t[6], addr = info->addr;
+         const int ox = qs->oldcellx, oy = qs->oldcelly, oc = qs->oldcellcheck;
+         RotTileGet(info, t);
+         VidsoftRotLookup(info, qs, regs, ram, x1, y1);
+         rot_pred_oc = qs->oldcellcheck;
+         RotTileGet(info, rot_pred_t);
+         rot_pred_qs = qs;
+         rot_pred_row = j;
+         rot_pred_frame = keep_frame;
+         info->charaddr = t[0]; info->paladdr = t[1]; info->flipfunction = t[2];
+         info->specialfunction = t[3]; info->specialcolorfunction = t[4]; info->priority = t[5];
+         info->addr = addr;
+         qs->oldcellx = ox; qs->oldcelly = oy; qs->oldcellcheck = oc;
+      }
+      return 0;
+   }
+   TitanKeepLayerLine(layer, j);
+   if (!info->isbitmap)
+      VidsoftRotLookup(info, qs, regs, ram, x1, y1);   /* the lookup state the row's last pixel leaves */
+   return 1;
+}
+
+/* What one drawn rotated row reads: every pixel's position as its loop
+   computes it (the window is left out: a superset), the tile there
+   (Vdp2MapCalcXYFast + Vdp2PatternAddr), the dot (Vdp2RotKLine*'s fetch)
+   and its palette entry */
+static void KeepWalkRot(vdp2draw_struct *info, const s32 *g, const screeninfo_struct *qs, const Vdp2 *regs, u8 *ram,
+                        u32 *vm, u32 *cm)
+{
+   const int colormode = Vdp2Internal.ColorMode;
+   const int cn = info->colornumber, bm = info->isbitmap, w = rbg0width;
+   const int pagesize_bits = info->pagewh_bits * 2;
+   const int cellwh = 2 + info->patternwh;
+   const int cellw = info->cellw, transparent = info->transparencyenable;
+   u32 charaddr = info->charaddr, paladdr = info->paladdr;
+   int flipfunction = 0, lastcell = -1, i;
+   for (i = 0; i < w; i++)
+   {
+      int x, y;
+      u32 a, dot;
+      if (!RotPos(g, qs, i, &x, &y))
+         continue;
+      if (!bm)
+      {
+         const int check = ((y >> cellwh) << 16) | (x >> cellwh);
+         if (check != lastcell)
+         {
+            /* Vdp2MapCalcXYFast + Vdp2PatternAddr */
+            const int planenum = ((y >> qs->planepixelheight_bits) * info->mapwh) + (x >> qs->planepixelwidth_bits);
+            const int xp = x & qs->planepixelwidth_mask, yp = y & qs->planepixelheight_mask;
+            lastcell = check;
+            a = qs->planetbl[planenum];
+            a += ((((yp >> qs->pagepixelwh_bits) << pagesize_bits) << info->planew_bits) +
+                  ((xp >> qs->pagepixelwh_bits) << pagesize_bits) +
+                  (((yp & qs->pagepixelwh_mask) >> cellwh) << info->pagewh_bits) +
+                  ((xp & qs->pagepixelwh_mask) >> cellwh)) << (info->patterndatasize_bits + 1);
+            if (info->patterndatasize == 1)
+            {
+               const u16 tmp = T1ReadWord(ram, a & 0x7FFFF);
+               KeepMarkVRange(vm, a, 2);
+               paladdr = cn == 0 ? ((tmp & 0xF000) >> 8) | ((info->supplementdata & 0xE0) << 3) : (tmp & 0x7000) >> 4;
+               if (info->auxmode == 0)
+               {
+                  flipfunction = (tmp & 0xC00) >> 10;
+                  charaddr = info->patternwh == 1 ? (tmp & 0x3FF) | ((info->supplementdata & 0x1F) << 10) :
+                             ((tmp & 0x3FF) << 2) | (info->supplementdata & 0x3) | ((info->supplementdata & 0x1C) << 10);
+               }
+               else
+               {
+                  flipfunction = 0;
+                  charaddr = info->patternwh == 1 ? (tmp & 0xFFF) | ((info->supplementdata & 0x1C) << 10) :
+                             ((tmp & 0xFFF) << 2) | (info->supplementdata & 0x3) | ((info->supplementdata & 0x10) << 10);
+               }
+            }
+            else
+            {
+               const u16 tmp1 = T1ReadWord(ram, a & 0x7FFFF), tmp2 = T1ReadWord(ram, (a + 2) & 0x7FFFF);
+               KeepMarkVRange(vm, a, 4);
+               charaddr = tmp2 & 0x7FFF;
+               flipfunction = (tmp1 & 0xC000) >> 14;
+               paladdr = cn == 0 ? (tmp1 & 0x7F) << 4 : (tmp1 & 0x70) << 4;
+            }
+            if (!(regs->VRSIZE & 0x8000))
+               charaddr &= 0x3FFF;
+            charaddr *= 0x20;
+         }
+         /* the pixel in the tile (Vdp2MapCalcXYFast) */
+         x &= qs->planepixelwidth_mask;
+         y &= qs->planepixelheight_mask;
+         if (info->patternwh == 1)
+         {
+            x &= 7;
+            y &= 7;
+            if (flipfunction & 1)
+               x = 7 - x;
+            if (flipfunction & 2)
+               y = 7 - y;
+         }
+         else if (flipfunction)
+         {
+            y &= 15;
+            if (flipfunction & 2)
+               y = !(y & 8) ? 8 - 1 - y + 16 : 16 - 1 - y;
+            else if (y & 8)
+               y += 8;
+            if (flipfunction & 1)
+            {
+               if (!(x & 8))
+                  y += 8;
+               x = 7 - (x & 7);
+            }
+            else if (x & 8)
+            {
+               y += 8;
+               x &= 7;
+            }
+            else
+               x &= 7;
+         }
+         else
+         {
+            y &= 15;
+            if (y & 8)
+               y += 8;
+            if (x & 8)
+               y += 8;
+            x &= 7;
+         }
+      }
+      /* the dot (Vdp2DrawRotationKLineBody) and its palette entry */
+      switch (cn)
+      {
+         case 0:
+            a = charaddr + ((y * cellw) + x) / 2;
+            dot = T1ReadByte(ram, a & 0x7FFFF);
+            if (!(x & 1))
+               dot >>= 4;
+            KeepMarkV(vm, a);
+            if ((dot & 0xF) || !transparent)
+               KeepMarkC(cm, colormode, info->coloroffset + (paladdr | (dot & 0xF)));
+            break;
+         case 1:
+            a = charaddr + (y * cellw) + x;
+            dot = T1ReadByte(ram, a & 0x7FFFF);
+            KeepMarkV(vm, a);
+            if (dot || !transparent)
+               KeepMarkC(cm, colormode, info->coloroffset + (paladdr | dot));
+            break;
+         case 2:
+            a = charaddr + ((y * cellw) + x) * 2;
+            dot = T1ReadWord(ram, a & 0x7FFFF);
+            KeepMarkVRange(vm, a, 2);
+            if (dot || !transparent)
+               KeepMarkC(cm, colormode, info->coloroffset + dot);
+            break;
+         case 3:
+            KeepMarkVRange(vm, charaddr + ((y * cellw) + x) * 2, 2);
+            break;
+         default:
+            KeepMarkVRange(vm, charaddr + ((y * cellw) + x) * 4, 4);
+            break;
+      }
+   }
+}
+
+void VidsoftKeepRotDrawn(vdp2draw_struct *info, u8 *ram)
+{
+   const int layer = TITAN_RBG0;
+   const Vdp2 *fr = &keep_regs[keep_cur];
+   const u32 *bits = vidsoft_keep_bits[layer];
+   const int n = vdp2height < KEEP_LINES ? vdp2height : KEEP_LINES;
+   const u32 pf = keep_frame;
+   const int record = keep_layer_idle[layer] < KEEP_IDLE || (pf & 7) == 0;
+   int y;
+   if (!rot_began || rot_frame != keep_frame)
+      return;
+   rot_began = 0;
+   if (!rot_ok)
+   {
+      memset(keep_row[layer], 0, sizeof(keep_row[layer]));
+      return;
+   }
+   for (y = 0; y < n; y++)
+   {
+      struct KeepRow *R = &keep_row[layer][y];
+      const struct KeepRotLine *L = &rot_line[y];
+      if (bits[y >> 5] & (1u << (y & 31)))
+      {
+         keep_st_kept[layer]++;
+         if (vidsoft_keep_check)
+         {
+            const struct PixelData *now = TitanGetLayerLine(layer, y);
+            if (memcmp(now, keep_save[layer] + y * 704, sizeof(struct PixelData) * vdp2width) ||
+                TitanLineMaxPriority(layer, y) != keep_save_prio[layer][y])
+            {
+               int x = 0;
+               while (x < vdp2width && !memcmp(now + x, keep_save[layer] + y * 704 + x, sizeof(struct PixelData)))
+                  x++;
+               keep_st_miss++;
+               fprintf(stderr, "lnkeep MISS: field %u layer %d (rotated) row %d (first differing x %d, prio %d/%d) (%lu misses)\n",
+                       keep_frame, layer, y, x, TitanLineMaxPriority(layer, y), keep_save_prio[layer][y], keep_st_miss);
+            }
+         }
+         R->frame = keep_frame;
+         continue;
+      }
+      if (TitanLineFrame(layer, y) != keep_frame || L->frame != keep_frame || !L->rec ||
+          !KeepLineOk(layer, &keep_lines[keep_cur][y]))
+      {
+         R->frame = 0;
+         continue;
+      }
+      keep_st_drawn[layer]++;
+      if (!record || (R->miss >= KEEP_IDLE && ((pf + y) & 7)))
+      {
+         R->frame = 0;
+         continue;
+      }
+      memset(R->vm, 0, sizeof(R->vm));
+      memset(R->cm, 0, sizeof(R->cm));
+      if (info->islinewindow & 1)
+         KeepMarkVRange(R->vm, ((fr->LWTA0.all & 0x7FFFE) << 1) + y * 4, 4);
+      if (info->islinewindow & 2)
+         KeepMarkVRange(R->vm, ((fr->LWTA1.all & 0x7FFFE) << 1) + y * 4, 4);
+      KeepWalkRot(info, L->g, &rot_sinfo[L->which], fr, ram, R->vm, R->cm);
+      memcpy(R->g, L->g, sizeof(R->g));
+      R->rot = 1;
+      R->frame = keep_frame;
+      keep_st_rec[layer]++;
+   }
 }
