@@ -95,7 +95,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
          { "5", NULL },
          { NULL, NULL },
       },
-      "2"
+      "3"
    },
    {
       "yabadabadoo_frameskip_sprites",
