@@ -5251,9 +5251,8 @@ static INLINE __attribute__((always_inline)) int Vdp1QuadPut(const int drawmode,
 }
 
 /* points of the line being drawn, in iterateOverLine() order, packed as
- * x | y << 16 (both stay within +-2000) */
+ * (u16)x | y << 16 (both stay within +-2000; QuadWalk() in vidsoftquad.c) */
 static u32 quad_pt_buf[2][2048];
-#define QUAD_PT(X, Y) (((u32)(X) & 0xFFFF) | ((u32)(Y) << 16))
 
 /* QuadLine and QuadPen: vidsoftquad.h */
 
@@ -6044,7 +6043,7 @@ static void DrawLineQuad(const Vdp1QuadState *st, int x1, int y1, int x2, int y2
    const int cw = characterWidth, interlace = vdp1interlace, width = vdp1width;
    int line = (int)linenumber;
    u32 rowaddr;
-   int a, ax, ay, dx, dy, n;
+   int n;
    int noclip;
    /* currentStep = (int)k * texturestep without floating point: when
     * texturestep is cw / linelength, k * cw / linelength is tracked as
@@ -6076,45 +6075,15 @@ static void DrawLineQuad(const Vdp1QuadState *st, int x1, int y1, int x2, int y2
    }
 
    /* the walk of iterateOverLine() with greedy set; point k is plotted with i == k */
-   dx = x2 - x1;
-   dy = y2 - y1;
-   ax = (dx >= 0) ? 1 : -1;
-   ay = (dy >= 0) ? 1 : -1;
-   a = 0;
-   n = 0;
-
-   if (abs(dx) > 999 || abs(dy) > 999)
+   if (abs(x2 - x1) > 999 || abs(y2 - y1) > 999)
    {
       VDP1RLOG_L999();
       return;
    }
-
-   if (abs(dx) > abs(dy)) {
-      if (ax != ay) dx = -dx;
-      for (; x1 != x2; x1 += ax) {
-         quad_pt[n++] = QUAD_PT(x1, y1);
-         a += dy;
-         if (abs(a) >= abs(dx)) {
-            a -= dx;
-            y1 += ay;
-            if (ax == ay) { quad_pt[n++] = QUAD_PT(x1 + ax, y1 - ay); }
-            else { quad_pt[n++] = QUAD_PT(x1, y1); }
-         }
-      }
-   } else {
-      if (ax != ay) dy = -dy;
-      for (; y1 != y2; y1 += ay) {
-         quad_pt[n++] = QUAD_PT(x1, y1);
-         a += dx;
-         if (abs(a) >= abs(dy)) {
-            a -= dy;
-            x1 += ax;
-            if (ay == ax) { quad_pt[n++] = QUAD_PT(x1, y1); }
-            else { quad_pt[n++] = QUAD_PT(x1 - ax, y1 + ay); }
-         }
-      }
-   }
-   quad_pt[n++] = QUAD_PT(x2, y2);
+   n = QuadWalk(quad_pt, x1, y1, x2, y2);
+   /* where the walk left the pen, as the fallbacks below have always had it */
+   x1 = x2;
+   y1 = y2;
 
    if (st->rev)
    {

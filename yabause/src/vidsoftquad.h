@@ -67,6 +67,7 @@ extern VDP1_TLS int currentPixelIsVisible;
 /* vidsoftquad.c */
 int QuadRevStart(int tid, const vdp1cmd_struct *cmd, Vdp1 *regs, u8 *ram, u8 *fb, int fb8, int dil_skip, int cw,
                  int interlace, int width, int row_lo, int row_hi, int miny, int maxy, const u32 *pts);
+int QuadWalk(u32 *pts, int x1, int y1, int x2, int y2);
 void QuadRevLine(int tid, int n, u32 rowaddr, int noclip, int int_step, int step_q, int step_r, int linelength,
                  int x1, int y1, int x2, int y2, double texturestep, double xredstep, double xgreenstep,
                  double xbluestep);

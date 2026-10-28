@@ -151,6 +151,91 @@ int QuadRevStart(int tid, const vdp1cmd_struct *cmd, Vdp1 *regs, u8 *ram, u8 *fb
    return 1;
 }
 
+/* drawQuad()'s line walk (iterateOverLine() with greedy set), see QuadWalk().
+ * x major: a point per x step and, for every y step, one more at (x + ax, old
+ * y) when the line goes the same way on both axes ("same"), else at (x, new
+ * y). The error term of the original (a += dy against dx, with dx negated
+ * when ax != ay) always has the sign of the minor step or is 0, so it is kept
+ * here as a non-negative b against the absolute deltas. */
+static INLINE __attribute__((always_inline)) void QuadWalkX(const int same, u32 *p, int x, u32 Y, int ax, u32 ystep,
+                                                            int adx, int ady)
+{
+   int b = 0, i;
+   for (i = adx; i != 0; i--, x += ax)
+   {
+      *p++ = ((u32)x & 0xFFFF) | Y;
+      b += ady;
+      if (b >= adx)
+      {
+         b -= adx;
+         if (same)
+         {
+            *p++ = ((u32)(x + ax) & 0xFFFF) | Y;
+            Y += ystep;
+         }
+         else
+         {
+            Y += ystep;
+            *p++ = ((u32)x & 0xFFFF) | Y;
+         }
+      }
+   }
+}
+
+/* y major: a point per y step and, for every x step, one more at (new x, y)
+ * ("same"), else at (old x, y + ay) */
+static INLINE __attribute__((always_inline)) void QuadWalkY(const int same, u32 *p, int x, u32 Y, int ax, u32 ystep,
+                                                            int adx, int ady)
+{
+   int b = 0, i;
+   for (i = ady; i != 0; i--, Y += ystep)
+   {
+      *p++ = ((u32)x & 0xFFFF) | Y;
+      b += adx;
+      if (b >= ady)
+      {
+         b -= ady;
+         if (same)
+         {
+            x += ax;
+            *p++ = ((u32)x & 0xFFFF) | Y;
+         }
+         else
+         {
+            *p++ = ((u32)x & 0xFFFF) | (Y + ystep);
+            x += ax;
+         }
+      }
+   }
+}
+
+/* The points of the line from (x1, y1) to (x2, y2) as drawQuad() walks them,
+ * into pts as (y << 16) | (u16)x in walking order, |dx| + |dy| + 1 of them
+ * (the last is (x2, y2)); returns how many. Endpoints within 999 of each
+ * other. In small loops of their own so they keep their values in registers
+ * (inside drawQuad() the walk spilled three to the stack). */
+int QuadWalk(u32 *pts, int x1, int y1, int x2, int y2)
+{
+   const int dx = x2 - x1, dy = y2 - y1;
+   const int ax = dx >= 0 ? 1 : -1, ay = dy >= 0 ? 1 : -1;
+   const int adx = abs(dx), ady = abs(dy), n = adx + ady + 1;
+   const u32 ystep = (u32)ay << 16, Y = (u32)y1 << 16;
+
+   pts[n - 1] = ((u32)x2 & 0xFFFF) | ((u32)y2 << 16);
+   if (adx > ady)
+   {
+      if (ax == ay)
+         QuadWalkX(1, pts, x1, Y, ax, ystep, adx, ady);
+      else
+         QuadWalkX(0, pts, x1, Y, ax, ystep, adx, ady);
+   }
+   else if (ax == ay)
+      QuadWalkY(1, pts, x1, Y, ax, ystep, adx, ady);
+   else
+      QuadWalkY(0, pts, x1, Y, ax, ystep, adx, ady);
+   return n;
+}
+
 /* vidsoft.c's QuadLeanRun() */
 static INLINE __attribute__((always_inline)) void QuadRevRun(const QuadLine *Lp, int *k0p, int *k1p)
 {
