@@ -2966,6 +2966,15 @@ void flags_assemble(int i,struct regstat *i_regs)
 void complex_assemble(int i,struct regstat *i_regs)
 {
   if(opcode[i]==3&&opcode2[i]==4) { // DIV1
+    #ifdef HOST_TEMPREG
+    if(rs1[i]==rs2[i]) {
+      // DIV1 Rn,Rn: Rn is in register 0 only (complex_alloc). As in
+      // sh2int.c the divisor is Rn after the shift: (Rn<<1)|T into 1.
+      emit_andimm(2,1,HOST_TEMPREG);
+      emit_shlimm(0,1,1);
+      emit_or(1,HOST_TEMPREG,1);
+    }
+    #endif
     emit_call((pointer)div1);
   }
   if(opcode[i]==0&&opcode2[i]==15) { // MAC.L
