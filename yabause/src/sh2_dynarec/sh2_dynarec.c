@@ -6159,7 +6159,7 @@ static void cull_unused_regs(void)
       if(itype[i]==LOAD || itype[i]==STORE || itype[i]==RMW ||
          itype[i]==PCREL || itype[i]==SYSTEM )
         temp1=MOREG;
-      if(itype[i]==COMPLEX) {
+      if(itype[i]==COMPLEX&&(opcode[i]|4)==4&&opcode2[i]==15) { // MAC.L/MAC.W
         temp1=MACH;
         temp2=MACL;
       }
@@ -6199,7 +6199,10 @@ static void cull_unused_regs(void)
              itype[i+1]==RMW || itype[i+1]==PCREL ||
              itype[i+1]==SYSTEM || source[i]==0x002B /* RTE */ )
             temp1=MOREG;
-          if(itype[i+1]==COMPLEX) {
+          // MAC.L/MAC.W in the delay slot: the accumulator (only then: with
+          // another slot, MACH/MACL kept here while culled before the branch
+          // would be registers never loaded, written back as garbage)
+          if(itype[i+1]==COMPLEX&&(opcode[i+1]|4)==4&&opcode2[i+1]==15) {
             temp1=MACH;
             temp2=MACL;
           }
@@ -6249,7 +6252,7 @@ static void cull_unused_regs(void)
             if(itype[i]==LOAD || itype[i]==STORE || itype[i]==RMW ||
                itype[i]==PCREL || itype[i]==SYSTEM )
               temp1=MOREG;
-            if(itype[i]==COMPLEX) {
+            if(itype[i]==COMPLEX&&(opcode[i]|4)==4&&opcode2[i]==15) { // MAC.L/MAC.W
               temp1=MACH;
               temp2=MACL;
             }
