@@ -1644,6 +1644,20 @@ void emit_subc(int s, int t, int sr)
   emit_adc(sr,sr,sr);
   emit_xorimm(sr,1,sr);
 }
+void emit_orrvs_imm(int rs,int imm,int rt);
+// ADDV/SUBV: t = t +/- s, T = signed overflow
+void emit_addv(int s, int t, int sr)
+{
+  emit_adds(t,s,t);
+  emit_andimm(sr,~1,sr);
+  emit_orrvs_imm(sr,1,sr);
+}
+void emit_subv(int s, int t, int sr)
+{
+  emit_subs(t,s,t);
+  emit_andimm(sr,~1,sr);
+  emit_orrvs_imm(sr,1,sr);
+}
 void emit_shrsr(int t, int sr)
 {
   emit_andimm(sr,~1,sr);

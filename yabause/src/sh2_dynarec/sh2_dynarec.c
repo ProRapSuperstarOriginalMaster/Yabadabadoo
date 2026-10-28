@@ -2075,6 +2075,16 @@ void alu_assemble(int i,struct regstat *i_regs)
     {
       signed char s,t,sr,temp;
       t=get_reg(i_regs->regmap,rt1[i]);
+      #ifdef HOST_TEMPREG
+      if(t<0&&(opcode2[i]&3)) {
+        // Rn is not needed, T is: ADDC/ADDV/SUBC/SUBV on a copy
+        sr=get_reg(i_regs->regmap,SR);
+        if(sr>=0&&!(i_regs->u&(1LL<<TBIT))) {
+          emit_loadreg(rs2[i],HOST_TEMPREG);
+          t=HOST_TEMPREG;
+        }
+      }
+      #endif
       if(t>=0) {
         s=get_reg(i_regs->regmap,rs1[i]);
         sr=get_reg(i_regs->regmap,SR);
@@ -2083,12 +2093,10 @@ void alu_assemble(int i,struct regstat *i_regs)
         //assert(s2==t);
         if(opcode2[i]==8) emit_sub(t,s,t);
         if(opcode2[i]==10) emit_subc(s,t,sr);
-        //if(opcode2[i]==11) emit_subv(s,sr,temp);
-        assert(opcode2[i]!=11);
+        if(opcode2[i]==11) emit_subv(s,t,sr);
         if(opcode2[i]==12) emit_add(s,t,t);
         if(opcode2[i]==14) emit_addc(s,t,sr);
-        //if(opcode2[i]==15) emit_addv(s,sr,temp);
-        assert(opcode2[i]!=15);
+        if(opcode2[i]==15) emit_addv(s,t,sr);
       }
     }
   }
