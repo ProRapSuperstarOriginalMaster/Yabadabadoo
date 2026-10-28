@@ -42,8 +42,10 @@
     window and line scroll tables. The walk takes a superset where it is
     simpler (whole tile rows, the whole line scroll table).
 
-    Only progressive pictures, tile layers on the fast path (no bitmap, mosaic
-    or bad-cycle emulation), no sprite window. Rotation
+    Tile layers on the fast path only (no bitmap, mosaic or bad-cycle
+    emulation), no sprite window. With double-density interlace each field has
+    its own Titan rows (titan.c row_base) and a row is compared with the field
+    before the last, which drew it. Rotation
     layers are always drawn. In a file of its own: vidsoft.c sits at GCC's
     per-file inlining limit (code added there changes what gets inlined in its
     hot loops); Vdp2DrawScroll only calls VidsoftKeepRow() per line and
@@ -84,15 +86,24 @@ static int keep_mode = -1;      /* YAB_LNKEEP */
 static int keep_log;
 static u16 keep_mask[5][KEEP_NREG];
 
-/* this field and the last drawn one, as the layers draw from them */
-static Vdp2 keep_regs[2];
-static Vdp2 keep_lines[2][KEEP_LINES];
-static u32 keep_cells[2][KEEP_LINES][2];
-static int keep_glob[2];
+/* the last KEEP_HIST drawn fields (this one = keep_cur), as the layers drew
+   from them: registers, line registers, cell scroll, the other inputs, the
+   Titan frame and field parity, and what was written with a new value between
+   the field before it and it. A row is compared with the field that drew it:
+   the last one, or with double-density interlace the one before (same
+   parity: each field has its own Titan rows). */
+#define KEEP_HIST 4
+static Vdp2 keep_regs[KEEP_HIST];
+static Vdp2 keep_lines[KEEP_HIST][KEEP_LINES];
+static u32 keep_cells[KEEP_HIST][KEEP_LINES][2];
+static int keep_glob[KEEP_HIST];
+static u32 keep_hframe[KEEP_HIST];
+static int keep_hpar[KEEP_HIST];
+static u32 keep_vchg[KEEP_HIST][4], keep_cchg[KEEP_HIST][4];
+static u32 keep_seq;
 static int keep_cur;
 static int keep_active;         /* between VidsoftKeepFrame and VidsoftKeepFrameEnd */
 static u32 keep_frame;          /* TitanFrame() of this field */
-static u32 keep_vchg[4], keep_cchg[4];   /* written with a new value since the last drawn field */
 
 /* a Titan row's record: the frame it was last drawn or kept in (0 = none),
    what it read */
@@ -101,10 +112,14 @@ struct KeepRow
    u32 frame;
    u32 vm[4], cm[4];
 };
-static struct KeepRow keep_row[5][KEEP_LINES];
+static struct KeepRow keep_row[5][2 * KEEP_LINES];   /* [parity * 256 + row] */
 static int keep_layer_ok[5];    /* KeepBegin: rows of this layer may be recorded */
 static int keep_layer_began[5];
 static u32 keep_layer_frame[5]; /* the field KeepBegin last ran for the layer */
+/* fields in a row the layer kept no row (scrolling, or what it reads keeps
+   changing): from KEEP_IDLE on, its rows are recorded only every 4th field */
+static int keep_layer_idle[5];
+#define KEEP_IDLE 4
 
 /* check mode: the kept rows as they were before this field drew them again */
 static struct PixelData *keep_save[5];
@@ -138,6 +153,8 @@ static const struct KeepRegDef keep_regdefs[] = {
    KEEP_R(PRIR), KEEP_R(CCRSA), KEEP_R(CCRSB), KEEP_R(CCRSC), KEEP_R(CCRSD), KEEP_R(CCRNA), KEEP_R(CCRNB), KEEP_R(CCRR),
    KEEP_R(CCRLB), KEEP_R(CLOFEN), KEEP_R(CLOFSL), KEEP_R(COAR), KEEP_R(COAG), KEEP_R(COAB), KEEP_R(COBR), KEEP_R(COBG),
    KEEP_R(COBB) };
+
+static void KeepLog(void);
 
 static void KeepClr(u16 *m, const char *names)
 {
@@ -179,6 +196,8 @@ static void KeepInit(void)
    keep_mode = e ? atoi(e) : 1;
    keep_log = e && (keep_mode == 1 || keep_mode == 2);
    vidsoft_keep_check = keep_mode == 2;
+   if (keep_log)
+      atexit(KeepLog);
    for (l = 0; l < 5; l++)
    {
       u16 *m = keep_mask[l];
@@ -245,6 +264,25 @@ static int KeepColorCalcLines(void)
    return diff != 0;
 }
 
+static void KeepLog(void)
+{
+   static const char *nm[5] = { "NBG3", "NBG2", "NBG1", "NBG0", "RBG0" };
+   int l;
+   fprintf(stderr, "lnkeep: %u fields%s, misses %lu;", keep_st_fields, vidsoft_keep_check ? " (check mode)" : "",
+           keep_st_miss);
+   for (l = 0; l < 5; l++)
+   {
+      int k;
+      if (keep_st_drawn[l] + keep_st_kept[l])
+         fprintf(stderr, " %s kept %lu of %lu rec %lu;", nm[l], keep_st_kept[l], keep_st_drawn[l] + keep_st_kept[l],
+                 keep_st_rec[l]);
+      for (k = 1; k < 12; k++)
+         if (keep_st_why[l][k])
+            fprintf(stderr, " %s not taken (%d) %lu;", nm[l], k, keep_st_why[l][k]);
+   }
+   fprintf(stderr, "\n");
+}
+
 void VidsoftKeepFrame(void)
 {
    const int bad_cycle = bad_cycle_setting[0] | bad_cycle_setting[1] | bad_cycle_setting[2] |
@@ -256,7 +294,7 @@ void VidsoftKeepFrame(void)
    keep_active = 0;
    if (keep_mode == 0)
       return;
-   keep_cur ^= 1;
+   keep_cur = ++keep_seq % KEEP_HIST;
    keep_regs[keep_cur] = *Vdp2Regs;
    n = vdp2height < KEEP_LINES ? vdp2height : KEEP_LINES;
    memcpy(keep_lines[keep_cur], Vdp2Lines, sizeof(Vdp2) * n);
@@ -267,31 +305,17 @@ void VidsoftKeepFrame(void)
    }
    keep_glob[keep_cur] = (Vdp2External.disptoggle & 0xFF) | (KeepColorCalcLines() ? 0x100 : 0) | (bad_cycle ? 0x200 : 0) |
                          (Vdp2Internal.ColorMode << 10);
-   memcpy(keep_vchg, vdp2_vram_vchg, sizeof(keep_vchg));
-   memcpy(keep_cchg, vdp2_cram_vchg, sizeof(keep_cchg));
+   memcpy(keep_vchg[keep_cur], vdp2_vram_vchg, sizeof(keep_vchg[0]));
+   memcpy(keep_cchg[keep_cur], vdp2_cram_vchg, sizeof(keep_cchg[0]));
    memset(vdp2_vram_vchg, 0, sizeof(vdp2_vram_vchg));
    memset(vdp2_cram_vchg, 0, sizeof(vdp2_cram_vchg));
    keep_frame = TitanFrame() + 1;   /* VIDSoftVdp2DrawScreens' TitanErase */
+   keep_hframe[keep_cur] = keep_frame;
+   keep_hpar[keep_cur] = vdp2_interlace ? vdp2_is_odd_frame : -1;
    keep_active = 1;
    keep_st_fields++;
    if (keep_log && keep_st_fields % 300 == 0)
-   {
-      static const char *nm[5] = { "NBG3", "NBG2", "NBG1", "NBG0", "RBG0" };
-      int l;
-      fprintf(stderr, "lnkeep: %u fields%s, misses %lu;", keep_st_fields, vidsoft_keep_check ? " (check mode)" : "",
-              keep_st_miss);
-      for (l = 0; l < 5; l++)
-      {
-         int k;
-         if (keep_st_drawn[l] + keep_st_kept[l])
-            fprintf(stderr, " %s kept %lu of %lu rec %lu;", nm[l], keep_st_kept[l], keep_st_drawn[l] + keep_st_kept[l],
-                    keep_st_rec[l]);
-         for (k = 1; k < 12; k++)
-            if (keep_st_why[l][k])
-               fprintf(stderr, " %s not taken (%d) %lu;", nm[l], k, keep_st_why[l][k]);
-      }
-      fprintf(stderr, "\n");
-   }
+      KeepLog();
 }
 
 void VidsoftKeepFrameEnd(void)
@@ -309,14 +333,22 @@ static INLINE int KeepLineOk(int l, const Vdp2 *r)
    return (r->BGON & en[l]) != 0;
 }
 
+/* rows a layer draws into this field (Vdp2DrawScroll's output_y), the field
+   its rows are compared with (1 or 2 back), this field's rows in keep_row */
+static INLINE int KeepRows(void) { return vdp2_interlace ? vdp2height / 2 : vdp2height; }
+static INLINE int KeepBack(void) { return vdp2_interlace ? 2 : 1; }
+static INLINE int KeepSlot0(void) { return vdp2_interlace && vdp2_is_odd_frame ? KEEP_LINES : 0; }
+
 static void KeepBegin(int layer, vdp2draw_struct *info)
 {
-   const Vdp2 *fr = &keep_regs[keep_cur], *pfr = &keep_regs[keep_cur ^ 1];
-   const Vdp2 *lines = keep_lines[keep_cur], *plines = keep_lines[keep_cur ^ 1];
-   const int n = vdp2height, w = vdp2width;
-   const u32 prev = keep_frame - 1;
+   const int back = KeepBack(), pi = (keep_seq - back) % KEEP_HIST;
+   const Vdp2 *fr = &keep_regs[keep_cur], *pfr = &keep_regs[pi];
+   const Vdp2 *lines = keep_lines[keep_cur], *plines = keep_lines[pi];
+   const int n = KeepRows(), w = vdp2width, s0 = KeepSlot0();
+   const u32 prev = keep_frame - back;
    u32 *bits = vidsoft_keep_bits[layer];
-   int y, wctl, cells;
+   u32 vchg[4], cchg[4];
+   int y, wctl, cells, k;
 
    keep_layer_began[layer] = 0;
    if (!keep_active || layer > TITAN_NBG0 || TitanFrame() != keep_frame || (layer == TITAN_NBG0 && (fr->BGON & 0x20)))
@@ -328,7 +360,7 @@ static void KeepBegin(int layer, vdp2draw_struct *info)
    keep_layer_ok[layer] = 0;
    wctl = info->wctl;
    {
-      const int why = vdp2_interlace ? 1 : n > KEEP_LINES ? 2 : info->isbitmap ? 3 : info->mosaicxmask != 1 ? 4 :
+      const int why = n > KEEP_LINES ? 2 : info->isbitmap ? 3 : info->mosaicxmask != 1 ? 4 :
                       (keep_glob[keep_cur] & 0x200) ? 5 : (wctl & 0x20) || (fr->WCTLD & 0x2000) ? 6 : 0;
       if (why)
       {
@@ -343,24 +375,33 @@ static void KeepBegin(int layer, vdp2draw_struct *info)
          return;   /* a line without this layer: the rows shift (Vdp2DrawScroll's output_y) */
       }
    keep_layer_ok[layer] = 1;
+   keep_layer_idle[layer]++;
 
-   if (keep_glob[keep_cur] != keep_glob[keep_cur ^ 1] || !KeepRegsSame(layer, fr, pfr))
+   if (keep_seq < (u32)back + 1 || keep_hframe[pi] != prev || keep_hpar[pi] != keep_hpar[keep_cur] ||
+       keep_glob[keep_cur] != keep_glob[pi] || !KeepRegsSame(layer, fr, pfr))
       return;
+   /* written since the field that drew the rows */
+   for (k = 0; k < 4; k++)
+   {
+      vchg[k] = keep_vchg[keep_cur][k] | (back == 2 ? keep_vchg[(keep_seq - 1) % KEEP_HIST][k] : 0);
+      cchg[k] = keep_cchg[keep_cur][k] | (back == 2 ? keep_cchg[(keep_seq - 1) % KEEP_HIST][k] : 0);
+   }
    cells = (layer == TITAN_NBG0 || layer == TITAN_NBG1) && (fr->SCRCTL & 0x101);
    for (y = 0; y < n; y++)
    {
-      const struct KeepRow *R = &keep_row[layer][y];
+      const struct KeepRow *R = &keep_row[layer][s0 + y];
       if (R->frame != prev || TitanLineFrame(layer, y) != prev)
          continue;
-      if ((R->vm[0] & keep_vchg[0]) | (R->vm[1] & keep_vchg[1]) | (R->vm[2] & keep_vchg[2]) | (R->vm[3] & keep_vchg[3]) |
-          (R->cm[0] & keep_cchg[0]) | (R->cm[1] & keep_cchg[1]) | (R->cm[2] & keep_cchg[2]) | (R->cm[3] & keep_cchg[3]))
+      if ((R->vm[0] & vchg[0]) | (R->vm[1] & vchg[1]) | (R->vm[2] & vchg[2]) | (R->vm[3] & vchg[3]) |
+          (R->cm[0] & cchg[0]) | (R->cm[1] & cchg[1]) | (R->cm[2] & cchg[2]) | (R->cm[3] & cchg[3]))
          continue;
       if (!KeepLineOk(layer, &lines[y]) || !KeepRegsSame(layer, &lines[y], &plines[y]))
          continue;
-      if (cells && (keep_cells[keep_cur][y][0] != keep_cells[keep_cur ^ 1][y][0] ||
-                    keep_cells[keep_cur][y][1] != keep_cells[keep_cur ^ 1][y][1]))
+      if (cells && (keep_cells[keep_cur][y][0] != keep_cells[pi][y][0] ||
+                    keep_cells[keep_cur][y][1] != keep_cells[pi][y][1]))
          continue;
       bits[y >> 5] |= 1u << (y & 31);
+      keep_layer_idle[layer] = 0;
       if (vidsoft_keep_check)
       {
          if (!keep_save[layer])
@@ -534,9 +575,11 @@ static void KeepEnd(int layer, vdp2draw_struct *info, u8 *ram)
 {
    const Vdp2 *fr = &keep_regs[keep_cur];
    const Vdp2 *lines = keep_lines[keep_cur];
-   const int n = vdp2height, w = vdp2width;
+   const int n = KeepRows(), w = vdp2width, s0 = KeepSlot0();
+   const int par = vdp2_interlace ? vdp2_is_odd_frame : 0;   /* Vdp2GetInterlaceInfo's start_line */
    const u32 *bits = vidsoft_keep_bits[layer];
    u32 lw[4] = { 0, 0, 0, 0 };
+   const int record = keep_layer_idle[layer] < KEEP_IDLE || (keep_frame & 3) == 0;
    int y;
 
    if (!keep_layer_began[layer])
@@ -558,7 +601,9 @@ static void KeepEnd(int layer, vdp2draw_struct *info, u8 *ram)
    }
    for (y = 0; y < n; y++)
    {
-      struct KeepRow *R = &keep_row[layer][y];
+      struct KeepRow *R = &keep_row[layer][s0 + y];
+      /* the display line drawn into this row (line window tables are per display line) */
+      const int j = vdp2_interlace ? 2 * y + par : y;
       if (bits[y >> 5] & (1u << (y & 31)))
       {
          keep_st_kept[layer]++;
@@ -585,6 +630,11 @@ static void KeepEnd(int layer, vdp2draw_struct *info, u8 *ram)
          continue;
       }
       keep_st_drawn[layer]++;
+      if (!record)
+      {
+         R->frame = 0;
+         continue;
+      }
       {
          /* the line's plane table (LoadLineParams' GeneratePlaneAddrTable) */
          u32 planetbl[16];
@@ -597,9 +647,9 @@ static void KeepEnd(int layer, vdp2draw_struct *info, u8 *ram)
          memcpy(R->vm, lw, sizeof(lw));
          memset(R->cm, 0, sizeof(R->cm));
          if (info->islinewindow & 1)
-            KeepMarkVRange(R->vm, ((fr->LWTA0.all & 0x7FFFE) << 1) + y * 4, 4);
+            KeepMarkVRange(R->vm, ((fr->LWTA0.all & 0x7FFFE) << 1) + j * 4, 4);
          if (info->islinewindow & 2)
-            KeepMarkVRange(R->vm, ((fr->LWTA1.all & 0x7FFFE) << 1) + y * 4, 4);
+            KeepMarkVRange(R->vm, ((fr->LWTA1.all & 0x7FFFE) << 1) + j * 4, 4);
          KeepWalkLine(layer, info, planetbl, &vidsoft_keep_line[layer][y], fr, ram, R->vm, R->cm);
          R->frame = keep_frame;
          keep_st_rec[layer]++;
