@@ -3151,6 +3151,38 @@ void load_regs(signed char entry[],signed char regmap[],int rs1,int rs2,int rs3)
   }
 }
 
+// wb_invalidate() from a branch's registers to branch_regs: the dirty bits of
+// branch_regs are worked out per host register (clean_registers), so a dirty
+// register moved to another host register can arrive there clean and never be
+// written back. Write those back first.
+static void wb_invalidate_moved(signed char pre[],signed char entry[],u32 dirty,u32 entry_dirty,u64 u)
+{
+  int hr,nr;
+  for(hr=0;hr<HOST_REGS;hr++) {
+    if(hr!=EXCLUDE_REG&&pre[hr]>=0&&pre[hr]<TBIT&&((dirty>>hr)&1)&&!((u>>pre[hr])&1)) {
+      nr=get_reg(entry,pre[hr]);
+      if(nr>=0&&nr!=hr&&!((entry_dirty>>nr)&1)) emit_storereg(pre[hr],hr);
+    }
+  }
+  wb_invalidate(pre,entry,dirty,u);
+}
+
+// load_regs() after wb_invalidate(pre,regmap,...): a register that was in a
+// host register in pre has been moved (or reloaded) to its place in regmap.
+// Loading it again from memory would lose it when it is dirty or a constant
+// (a delay slot assembled with branch_regs, e.g. DIV1 with its fixed registers).
+static void load_regs_moved(signed char pre[],signed char regmap[],int rs1,int rs2,int rs3)
+{
+  signed char moved[HOST_REGS];
+  int hr;
+  for(hr=0;hr<HOST_REGS;hr++) {
+    int r=regmap[hr];
+    if(hr!=EXCLUDE_REG&&r>=0&&(r&63)<TEMPREG&&get_reg(pre,r)>=0) moved[hr]=r;
+    else moved[hr]=pre[hr];
+  }
+  load_regs(moved,regmap,rs1,rs2,rs3);
+}
+
 // Load registers prior to the start of a loop
 // so that they are not loaded within the loop
 static void loop_preload(signed char pre[],signed char entry[])
@@ -3946,9 +3978,9 @@ void ujump_assemble(int i,struct regstat *i_regs)
   ds_assemble(i+1,i_regs);
   bc_unneeded=regs[i].u;
   bc_unneeded|=1LL<<rt1[i];
-  wb_invalidate(regs[i].regmap,branch_regs[i].regmap,regs[i].dirty,
+  wb_invalidate_moved(regs[i].regmap,branch_regs[i].regmap,regs[i].dirty,branch_regs[i].dirty,
                 bc_unneeded);
-  load_regs(regs[i].regmap,branch_regs[i].regmap,CCREG,CCREG,CCREG);
+  load_regs_moved(regs[i].regmap,branch_regs[i].regmap,CCREG,CCREG,CCREG);
   if(rt1[i]==PR) {
     int rt;
     unsigned int return_address;
@@ -4077,9 +4109,9 @@ void rjump_assemble(int i,struct regstat *i_regs)
   bc_unneeded=regs[i].u;
   bc_unneeded|=1LL<<rt1[i];
   bc_unneeded&=~(1LL<<rs1[i]);
-  wb_invalidate(regs[i].regmap,branch_regs[i].regmap,regs[i].dirty,
+  wb_invalidate_moved(regs[i].regmap,branch_regs[i].regmap,regs[i].dirty,branch_regs[i].dirty,
                 bc_unneeded);
-  load_regs(regs[i].regmap,branch_regs[i].regmap,rs1[i],CCREG,CCREG);
+  load_regs_moved(regs[i].regmap,branch_regs[i].regmap,rs1[i],CCREG,CCREG);
   if(rt1[i]==PR) {
     int rt,return_address;
     rt=get_reg(branch_regs[i].regmap,rt1[i]);
@@ -4680,9 +4712,9 @@ void sjump_assemble(int i,struct regstat *i_regs)
     ds_assemble(i+1,i_regs);
     bc_unneeded=regs[i].u;
     bc_unneeded&=~((1LL<<rs1[i])|(1LL<<rs2[i]));
-    wb_invalidate(regs[i].regmap,branch_regs[i].regmap,regs[i].dirty,
+    wb_invalidate_moved(regs[i].regmap,branch_regs[i].regmap,regs[i].dirty,branch_regs[i].dirty,
                   bc_unneeded);
-    load_regs(regs[i].regmap,branch_regs[i].regmap,CCREG,SR,SR);
+    load_regs_moved(regs[i].regmap,branch_regs[i].regmap,CCREG,SR,SR);
     cc=get_reg(branch_regs[i].regmap,CCREG);
     assert(cc==HOST_CCREG);
     if(unconditional) 
@@ -4811,17 +4843,17 @@ void sjump_assemble(int i,struct regstat *i_regs)
     if(!nop) {
       if(taken) set_jump_target(taken,(int)out);
       assem_debug("1:\n");
-      wb_invalidate(regs[i].regmap,branch_regs[i].regmap,regs[i].dirty,
+      wb_invalidate_moved(regs[i].regmap,branch_regs[i].regmap,regs[i].dirty,branch_regs[i].dirty,
                     ds_unneeded);
       // load regs
-      load_regs(regs[i].regmap,branch_regs[i].regmap,rs1[i+1],rs2[i+1],rs3[i+1]);
+      load_regs_moved(regs[i].regmap,branch_regs[i].regmap,rs1[i+1],rs2[i+1],rs3[i+1]);
       address_generation(i+1,&branch_regs[i],0);
       if(itype[i+1]==COMPLEX) {
         if((opcode[i+1]|4)==4&&opcode2[i+1]==15) { // MAC.W/MAC.L
-          load_regs(regs[i].regmap,branch_regs[i].regmap,MACL,MACH,MACH);
+          load_regs_moved(regs[i].regmap,branch_regs[i].regmap,MACL,MACH,MACH);
         }
       }
-      load_regs(regs[i].regmap,branch_regs[i].regmap,CCREG,CCREG,CCREG);
+      load_regs_moved(regs[i].regmap,branch_regs[i].regmap,CCREG,CCREG,CCREG);
       ds_assemble(i+1,&branch_regs[i]);
       cc=get_reg(branch_regs[i].regmap,CCREG);
       if(cc==-1) {
@@ -4855,16 +4887,16 @@ void sjump_assemble(int i,struct regstat *i_regs)
       if(nottaken1) set_jump_target(nottaken1,(int)out);
       set_jump_target(nottaken,(int)out);
       assem_debug("2:\n");
-      wb_invalidate(regs[i].regmap,branch_regs[i].regmap,regs[i].dirty,
+      wb_invalidate_moved(regs[i].regmap,branch_regs[i].regmap,regs[i].dirty,branch_regs[i].dirty,
                     ds_unneeded);
-      load_regs(regs[i].regmap,branch_regs[i].regmap,rs1[i+1],rs2[i+1],rs3[i+1]);
+      load_regs_moved(regs[i].regmap,branch_regs[i].regmap,rs1[i+1],rs2[i+1],rs3[i+1]);
       address_generation(i+1,&branch_regs[i],0);
       if(itype[i+1]==COMPLEX) {
         if((opcode[i+1]|4)==4&&opcode2[i+1]==15) { // MAC.W/MAC.L
-          load_regs(regs[i].regmap,branch_regs[i].regmap,MACL,MACH,MACH);
+          load_regs_moved(regs[i].regmap,branch_regs[i].regmap,MACL,MACH,MACH);
         }
       }
-      load_regs(regs[i].regmap,branch_regs[i].regmap,CCREG,CCREG,CCREG);
+      load_regs_moved(regs[i].regmap,branch_regs[i].regmap,CCREG,CCREG,CCREG);
       ds_assemble(i+1,&branch_regs[i]);
     }
   }
