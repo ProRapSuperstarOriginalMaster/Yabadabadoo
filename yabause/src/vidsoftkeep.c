@@ -112,13 +112,14 @@ struct KeepRow
 {
    u32 frame;
    u32 vm[VW], cm[4];
+   u8 miss;   /* fields in a row it was recorded and then not kept (KEEP_IDLE on: recorded every 8th field) */
 };
 static struct KeepRow keep_row[5][2 * KEEP_LINES];   /* [parity * 256 + row] */
 static int keep_layer_ok[5];    /* KeepBegin: rows of this layer may be recorded */
 static int keep_layer_began[5];
 static u32 keep_layer_frame[5]; /* the field KeepBegin last ran for the layer */
 /* fields in a row the layer kept no row (scrolling, or what it reads keeps
-   changing): from KEEP_IDLE on, its rows are recorded only every 4th field */
+   changing): from KEEP_IDLE on, its rows are recorded only every 8th field */
 static int keep_layer_idle[5];
 #define KEEP_IDLE 4
 
@@ -389,9 +390,11 @@ static void KeepBegin(int layer, vdp2draw_struct *info)
    cells = (layer == TITAN_NBG0 || layer == TITAN_NBG1) && (fr->SCRCTL & 0x101);
    for (y = 0; y < n; y++)
    {
-      const struct KeepRow *R = &keep_row[layer][s0 + y];
+      struct KeepRow *R = &keep_row[layer][s0 + y];
       if (R->frame != prev || TitanLineFrame(layer, y) != prev)
          continue;
+      if (R->miss < 255)
+         R->miss++;   /* until kept below */
       {
          u32 d = (R->cm[0] & cchg[0]) | (R->cm[1] & cchg[1]) | (R->cm[2] & cchg[2]) | (R->cm[3] & cchg[3]);
          for (k = 0; k < VW; k++)
@@ -406,6 +409,7 @@ static void KeepBegin(int layer, vdp2draw_struct *info)
          continue;
       bits[y >> 5] |= 1u << (y & 31);
       keep_layer_idle[layer] = 0;
+      R->miss = 0;
       if (vidsoft_keep_check)
       {
          if (!keep_save[layer])
@@ -593,7 +597,9 @@ static void KeepEnd(int layer, vdp2draw_struct *info, u8 *ram)
    const int par = vdp2_interlace ? vdp2_is_odd_frame : 0;   /* Vdp2GetInterlaceInfo's start_line */
    const u32 *bits = vidsoft_keep_bits[layer];
    u32 lw[VW];
-   const int record = keep_layer_idle[layer] < KEEP_IDLE || (keep_frame & 3) == 0;
+   /* this field's number among those of its parity (the probes below must reach both fields) */
+   const u32 pf = vdp2_interlace ? keep_frame >> 1 : keep_frame;
+   const int record = keep_layer_idle[layer] < KEEP_IDLE || (pf & 7) == 0;
    int y;
 
    if (!keep_layer_began[layer])
@@ -645,7 +651,7 @@ static void KeepEnd(int layer, vdp2draw_struct *info, u8 *ram)
          continue;
       }
       keep_st_drawn[layer]++;
-      if (!record)
+      if (!record || (R->miss >= KEEP_IDLE && ((pf + y) & 7)))
       {
          R->frame = 0;
          continue;
