@@ -1166,8 +1166,10 @@ void VidsoftKeepRotDrawn(vdp2draw_struct *info, u8 *ram)
    const Vdp2 *fr = &keep_regs[keep_cur];
    const u32 *bits = vidsoft_keep_bits[layer];
    const int n = vdp2height < KEEP_LINES ? vdp2height : KEEP_LINES;
-   const u32 pf = keep_frame;
-   const int record = keep_layer_idle[layer] < KEEP_IDLE || (pf & 7) == 0;
+   /* the probes come every 7th field, not 8th: a layer updated every second
+      field (Panzer, Rally: 30 Hz) is probed on both phases */
+   const u32 pf = keep_frame % 7;
+   const int record = keep_layer_idle[layer] < KEEP_IDLE || pf == 0;
    int y;
    if (!rot_began || rot_frame != keep_frame)
       return;
@@ -1208,7 +1210,7 @@ void VidsoftKeepRotDrawn(vdp2draw_struct *info, u8 *ram)
          continue;
       }
       keep_st_drawn[layer]++;
-      if (!record || (R->miss >= KEEP_IDLE && ((pf + y) & 7)))
+      if (!record || (R->miss >= KEEP_IDLE && (pf + y) % 7))
       {
          R->frame = 0;
          continue;
