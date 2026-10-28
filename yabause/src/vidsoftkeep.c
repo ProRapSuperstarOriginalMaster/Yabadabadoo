@@ -140,6 +140,21 @@ static u32 keep_layer_frame[5]; /* the field KeepBegin last ran for the layer */
 /* fields in a row the layer kept no row (scrolling, or what it reads keeps
    changing): from KEEP_IDLE on, its rows are recorded only every 8th field */
 static int keep_layer_idle[5];
+/* Unrotated RBG0's rows kept and recorded lately (each decays by 1/8 per
+   field): when it keeps fewer than 3/4 as many rows as it walks, the walk
+   costs more than the keeping saves (NiGHTS in flight: a zoomed layer, walked
+   pixel by pixel, keeps 0.43 rows per row walked and was 2 % slower), so only
+   probe fields record. (The rotated walk is cheap enough: not used there.) */
+static u32 keep_acc_k, keep_acc_r;
+static INLINE int KeepRbg0Lean(void)
+{
+   return keep_acc_r > 8 * 64 && keep_acc_k * 4 < keep_acc_r * 3;
+}
+static void KeepRbg0Acc(u32 k, u32 r)
+{
+   keep_acc_k += k - (keep_acc_k >> 3);
+   keep_acc_r += r - (keep_acc_r >> 3);
+}
 #define KEEP_IDLE 4
 
 /* check mode: the kept rows as they were before this field drew them again */
@@ -692,7 +707,10 @@ static void KeepEnd(int layer, vdp2draw_struct *info, u8 *ram)
    u32 lw[VW];
    /* this field's number among those of its parity (the probes below must reach both fields) */
    const u32 pf = vdp2_interlace ? keep_frame >> 1 : keep_frame;
-   const int record = keep_layer_idle[layer] < KEEP_IDLE || (pf & 7) == 0;
+   /* (RBG0: probes every 7th field, see VidsoftKeepRotDrawn, and the lean rule above) */
+   const int record = layer == TITAN_RBG0 ? (!KeepRbg0Lean() && keep_layer_idle[layer] < KEEP_IDLE) || pf % 7 == 0 :
+                      keep_layer_idle[layer] < KEEP_IDLE || (pf & 7) == 0;
+   u32 nkept = 0, nrec = 0;
    int y;
 
    if (!keep_layer_began[layer])
@@ -728,6 +746,7 @@ static void KeepEnd(int layer, vdp2draw_struct *info, u8 *ram)
       if (bits[y >> 5] & (1u << (y & 31)))
       {
          keep_st_kept[layer]++;
+         nkept++;
          if (vidsoft_keep_check)
          {
             const struct PixelData *now = TitanGetLayerLine(layer, y);
@@ -751,7 +770,7 @@ static void KeepEnd(int layer, vdp2draw_struct *info, u8 *ram)
          continue;
       }
       keep_st_drawn[layer]++;
-      if (!record || (R->miss >= KEEP_IDLE && ((pf + y) & 7)))
+      if (!record || (R->miss >= KEEP_IDLE && (layer == TITAN_RBG0 ? (pf + y) % 7 : (pf + y) & 7)))
       {
          R->frame = 0;
          continue;
@@ -778,8 +797,11 @@ static void KeepEnd(int layer, vdp2draw_struct *info, u8 *ram)
          R->rot = 0;
          R->frame = keep_frame;
          keep_st_rec[layer]++;
+         nrec++;
       }
    }
+   if (layer == TITAN_RBG0)
+      KeepRbg0Acc(nkept, nrec);
 }
 
 int VidsoftKeepRow(vdp2draw_struct *info, int row, int y, int lsx)
