@@ -109,6 +109,8 @@ void Vdp1TimeLine(void);
 void Vdp1TimeFinish(void);
 void Vdp1TimeVBlankOut(void);
 void Vdp1TimeDiscard(void);
+void Vdp1TimeSaveState(void **stream);
+void Vdp1TimeLoadState(const void *stream, int version);
 void Vdp1TimeStats(void);
 
 u8 FASTCALL	Vdp1RamReadByte(u32);

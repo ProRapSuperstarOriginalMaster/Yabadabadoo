@@ -94,6 +94,7 @@ static double vdp1time_start, vdp1time_end;
 static VideoInterface_struct *vdp1time_core;
 static Vdp1 vdp1time_regs;           /* the registers when the list started */
 static unsigned long vdp1time_lists, vdp1time_raced, vdp1time_chipread, vdp1time_unhandled, vdp1time_early;
+static unsigned long vdp1time_saved, vdp1time_resumed;   /* states saved / loaded with a list in flight */
 
 static int Vdp1TimeMode(void)
 {
@@ -441,6 +442,18 @@ static int Vdp1TimeWalk(int cover)
    return 0;
 }
 
+/* The walk's times from cycles to lines after the start */
+static void Vdp1TimeToLines(void)
+{
+   const double hz = yabsys.IsPal ? 50 : 59.94;
+   const double clock = yabsys.CurSH2FreqType == CLKTYPE_26MHZ ? 26874100 : 28636400;
+   const double cycles_per_line = clock / (hz * yabsys.MaxLineCount);
+   int i;
+   vdp1time_end /= cycles_per_line;
+   for (i = 0; i < vdp1time_ncmds; i++)
+      vdp1time_cmds[i].t /= cycles_per_line;
+}
+
 /* Vdp1Draw, before the list is drawn. Returns 1 if this list is drawn at
    its modelled end instead (Vdp1Draw then only walks it for the registers) */
 int Vdp1TimeDrawStart(void)
@@ -459,16 +472,8 @@ int Vdp1TimeDrawStart(void)
    vdp1time_core = VIDCore;
    vdp1time_regs = *Vdp1Regs;
    vdp1time_start = Vdp1TimeNow();
-   {
-      const double hz = yabsys.IsPal ? 50 : 59.94;
-      const double clock = yabsys.CurSH2FreqType == CLKTYPE_26MHZ ? 26874100 : 28636400;
-      const double cycles_per_line = clock / (hz * yabsys.MaxLineCount);
-      int i;
-      /* from cycles to lines after the start */
-      vdp1time_end = vdp1time_start + vdp1time_end / cycles_per_line;
-      for (i = 0; i < vdp1time_ncmds; i++)
-         vdp1time_cmds[i].t /= cycles_per_line;
-   }
+   Vdp1TimeToLines();
+   vdp1time_end += vdp1time_start;
    vdp1time_nwrites = 0;
    vdp1time_lists++;
    vdp1time_inflight = 1;
@@ -635,11 +640,119 @@ void Vdp1TimeFinish(void)
    ScuSendDrawEnd();
 }
 
-/* A state load or reset: the RAM the journal describes is gone (a list not
-   drawn yet stays undrawn: states don't hold the framebuffers either) */
+/* A reset: the RAM the journal describes is gone */
 void Vdp1TimeDiscard(void)
 {
    vdp1time_inflight = 0;
+}
+
+/* States are saved between frames, just after VBlank-OUT, where a modelled
+   list has started and not yet ended. The state keeps what resumes it:
+   its start registers, how far it got, and the writes journaled since. */
+void Vdp1TimeSaveState(void **stream)
+{
+   const u32 inflight = vdp1time_inflight;
+   MemStateWrite((void *)&inflight, 4, 1, stream);
+   if (inflight)
+   {
+      const double elapsed = Vdp1TimeNow() - vdp1time_start, len = vdp1time_end - vdp1time_start;
+      const u32 later = vdp1time_later, started = vdp1time_started, nwrites = vdp1time_nwrites;
+      u32 i;
+      MemStateWrite((void *)&vdp1time_regs, sizeof(Vdp1), 1, stream);
+      MemStateWrite((void *)&later, 4, 1, stream);
+      MemStateWrite((void *)&started, 4, 1, stream);
+      MemStateWrite((void *)&elapsed, sizeof(double), 1, stream);
+      MemStateWrite((void *)&len, sizeof(double), 1, stream);
+      MemStateWrite((void *)&nwrites, 4, 1, stream);
+      for (i = 0; i < nwrites; i++)
+      {
+         const Vdp1TimeWr *w = &vdp1time_writes[i];
+         const u32 addr = w->addr, size = w->size;
+         MemStateWrite((void *)&w->t, sizeof(double), 1, stream);
+         MemStateWrite((void *)&addr, 4, 1, stream);
+         MemStateWrite((void *)&size, 4, 1, stream);
+         MemStateWrite((void *)w->old, 1, 4, stream);
+      }
+      vdp1time_saved++;
+   }
+}
+
+/* A state load (after the registers and VDP1 RAM): resume the list that
+   was drawing, as Beetle does; the walk is redone on VDP1 RAM as the list
+   started (the journaled writes undone). Older states hold none: a list
+   drawing then is lost, as before. */
+void Vdp1TimeLoadState(const void *stream, int version)
+{
+   u32 inflight = 0, later, started, nwrites, i;
+   double elapsed, len;
+   Vdp1 regs;
+   vdp1time_inflight = 0;
+   if (version < 2)
+      return;
+   MemStateRead((void *)&inflight, 4, 1, stream);
+   if (!inflight)
+      return;
+   MemStateRead((void *)&regs, sizeof(Vdp1), 1, stream);
+   MemStateRead((void *)&later, 4, 1, stream);
+   MemStateRead((void *)&started, 4, 1, stream);
+   MemStateRead((void *)&elapsed, sizeof(double), 1, stream);
+   MemStateRead((void *)&len, sizeof(double), 1, stream);
+   MemStateRead((void *)&nwrites, 4, 1, stream);
+   if (nwrites > VDP1TIME_MAXWRITES)
+      return;
+   for (i = 0; i < nwrites; i++)
+   {
+      Vdp1TimeWr *w = &vdp1time_writes[i];
+      u32 addr, size;
+      MemStateRead((void *)&w->t, sizeof(double), 1, stream);
+      MemStateRead((void *)&addr, 4, 1, stream);
+      MemStateRead((void *)&size, 4, 1, stream);
+      MemStateRead((void *)w->old, 1, 4, stream);
+      w->addr = addr;
+      w->size = size > 4 ? 4 : size;
+   }
+
+   if (VIDCore == NULL || VIDCore->id != 2 /* VIDCORE_SOFT */)
+   {
+      /* nothing to draw it with here: end it now, as other lists */
+      if (!started)
+         Vdp1TimeShowStart();
+      Vdp1Regs->EDSR |= 2;
+      ScuSendDrawEnd();
+      return;
+   }
+   {
+      u8 *live = (u8 *)malloc(0x80000);
+      const Vdp1 now = *Vdp1Regs;
+      int ok;
+      if (live == NULL)
+         return;
+      memcpy(live, Vdp1Ram, 0x80000);
+      for (i = nwrites; i-- > 0;)
+      {
+         const Vdp1TimeWr *w = &vdp1time_writes[i];
+         int b;
+         for (b = 0; b < w->size; b++)
+            T1WriteByte(Vdp1Ram, (w->addr + b) & 0x7FFFF, w->old[b]);
+      }
+      *Vdp1Regs = regs;
+      ok = Vdp1TimeWalk(later);
+      *Vdp1Regs = now;
+      memcpy(Vdp1Ram, live, 0x80000);
+      free(live);
+      if (!ok)
+         return;
+   }
+   Vdp1TimeToLines();
+   vdp1time_regs = regs;
+   vdp1time_later = later;
+   vdp1time_started = started;
+   vdp1time_core = VIDCore;
+   vdp1time_start = Vdp1TimeNow() - elapsed;
+   vdp1time_end = vdp1time_start + len;
+   vdp1time_nwrites = nwrites;
+   vdp1time_inflight = 1;
+   vdp1time_resumed++;
 }
 
 void Vdp1TimeStats(void)
@@ -647,4 +760,7 @@ void Vdp1TimeStats(void)
    if (getenv("YAB_VDP1TIME"))
       fprintf(stderr, "vdp1time: %lu lists modelled, %lu raced, %lu drawn as the chip read them, %lu raced but drawn as at their start, %lu ended early (journal full)\n",
               vdp1time_lists, vdp1time_raced, vdp1time_chipread, vdp1time_unhandled, vdp1time_early);
+   if (getenv("YAB_VDP1TIME") && (vdp1time_saved || vdp1time_resumed))
+      fprintf(stderr, "vdp1time: %lu states saved with a list in flight, %lu such lists resumed at a load\n",
+              vdp1time_saved, vdp1time_resumed);
 }
