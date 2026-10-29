@@ -68,9 +68,14 @@ int vdp1time_inflight;      /* a list is modelled as still drawing: journal writ
 
 static int vdp1time_mode = -1;
 static u32 vdp1time_frame;  /* VBlank-OUT count */
+static double vdp1time_base; /* lines up to the last VBlank-OUT */
 static Vdp1TimeCmd vdp1time_cmds[VDP1TIME_MAXCMDS];
 static int vdp1time_ncmds;
-static u8 vdp1time_readblk[0x80000 >> 8];  /* 256-byte blocks some command reads */
+/* which commands read each 256-byte block: commands vdp1time_blkcmd[first[b] .. first[b + 1]) */
+#define VDP1TIME_BLOCKS (0x80000 >> 8)
+#define VDP1TIME_MAXREFS 65536
+static int vdp1time_blkfirst[VDP1TIME_BLOCKS + 1];
+static u16 vdp1time_blkcmd[VDP1TIME_MAXREFS];
 static Vdp1TimeWr vdp1time_writes[VDP1TIME_MAXWRITES];
 static int vdp1time_nwrites, vdp1time_overflow;
 static int vdp1time_cover;  /* the list opens with an opaque full clear */
@@ -89,11 +94,12 @@ static int Vdp1TimeMode(void)
    return vdp1time_mode;
 }
 
-/* Lines since some fixed point; the line count as the CPU sees it */
+/* Lines since some fixed point; the line count as the CPU sees it (at
+   VBlank-OUT LineCount is still the field's last line + 1, then 0) */
 static double Vdp1TimeNow(void)
 {
    int line = yabsys.LineCount >= yabsys.MaxLineCount ? 0 : yabsys.LineCount;
-   return (double)vdp1time_frame * yabsys.MaxLineCount + line;
+   return vdp1time_base + line;
 }
 
 void Vdp1TimeVBlankOut(void)
@@ -101,6 +107,7 @@ void Vdp1TimeVBlankOut(void)
    if (vdp1time_inflight)
       Vdp1TimeFinish();
    vdp1time_frame++;
+   vdp1time_base += yabsys.MaxLineCount;
 }
 
 static s32 Vdp1TimeMax(s32 a, s32 b) { return a > b ? a : b; }
@@ -185,6 +192,43 @@ static int Vdp1TimeOpensWithClear(void)
    return 0;
 }
 
+/* Visit the 256-byte blocks command c reads */
+#define VDP1TIME_FOR_BLOCKS(c, b) \
+   for (k = 0; k < 4; k++) \
+      if ((c)->hi[k] > (c)->lo[k]) \
+         for (b = (c)->lo[k] >> 8; b <= (((c)->hi[k] - 1) >> 8) && b < VDP1TIME_BLOCKS; b++)
+
+/* The readers of each block (counting sort); 0 if there are too many */
+static int Vdp1TimeIndex(void)
+{
+   static int count[VDP1TIME_BLOCKS];
+   int i, k, total = 0;
+   u32 b;
+   memset(count, 0, sizeof(count));
+   for (i = 0; i < vdp1time_ncmds; i++)
+      VDP1TIME_FOR_BLOCKS(&vdp1time_cmds[i], b)
+         count[b]++;
+   for (b = 0; b < VDP1TIME_BLOCKS; b++)
+   {
+      vdp1time_blkfirst[b] = total;
+      total += count[b];
+   }
+   vdp1time_blkfirst[VDP1TIME_BLOCKS] = total;
+   if (total > VDP1TIME_MAXREFS)
+      return 0;
+   memset(count, 0, sizeof(count));
+   for (i = 0; i < vdp1time_ncmds; i++)
+      VDP1TIME_FOR_BLOCKS(&vdp1time_cmds[i], b)
+      {
+         /* a command reading one block twice (two ranges) is listed once */
+         int f = vdp1time_blkfirst[b];
+         if (count[b] && vdp1time_blkcmd[f + count[b] - 1] == i)
+            continue;
+         vdp1time_blkcmd[f + count[b]++] = (u16)i;
+      }
+   return 1;
+}
+
 /* Each command's modelled read time and what it reads; the list's end.
    Returns 0 if the walk can't be modelled (too long, a loop) or a later
    system clip goes beyond the clear. */
@@ -197,7 +241,6 @@ static int Vdp1TimeWalk(int cover)
    int n, first = 1;
 
    vdp1time_ncmds = 0;
-   memset(vdp1time_readblk, 0, sizeof(vdp1time_readblk));
    for (n = 0; n < 4000; n++)
    {
       u16 ctrl = T1ReadWord(Vdp1Ram, addr);
@@ -214,9 +257,8 @@ static int Vdp1TimeWalk(int cover)
       c->lo[0] = addr; c->hi[0] = addr + 0x20;
       if (ctrl & 0x8000)
       {
-         vdp1time_readblk[addr >> 8] = 1;
          vdp1time_end = t;
-         return 1;
+         return Vdp1TimeIndex();
       }
       if (!(ctrl & 0x4000))
       {
@@ -289,15 +331,6 @@ static int Vdp1TimeWalk(int cover)
                cy = yc + ly;
             }
             first = 0;
-         }
-      }
-      {
-         int k;
-         for (k = 0; k < 4; k++)
-         {
-            u32 b;
-            for (b = c->lo[k] >> 8; c->hi[k] > c->lo[k] && b <= ((c->hi[k] - 1) >> 8) && b < sizeof(vdp1time_readblk); b++)
-               vdp1time_readblk[b] = 1;
          }
       }
       t += cost;
@@ -396,11 +429,9 @@ void Vdp1TimeFinish(void)
       {
          const u32 a = (w->addr + b) & 0x7FFFF;
          int before = 0, after = 0;
-         if (!vdp1time_readblk[a >> 8])
-            continue;
-         for (j = 0; j < vdp1time_ncmds; j++)
+         for (j = vdp1time_blkfirst[a >> 8]; j < vdp1time_blkfirst[(a >> 8) + 1]; j++)
          {
-            const Vdp1TimeCmd *c = &vdp1time_cmds[j];
+            const Vdp1TimeCmd *c = &vdp1time_cmds[vdp1time_blkcmd[j]];
             if (!Vdp1TimeReads(c, a))
                continue;
             if (c->t >= w->t)
@@ -433,10 +464,11 @@ void Vdp1TimeFinish(void)
       {
          const u32 a = (w->addr + b) & 0x7FFFF;
          int read_before = 0;
-         if (!vdp1time_readblk[a >> 8])
-            continue;
-         for (j = 0; j < vdp1time_ncmds && !read_before; j++)
-            read_before = vdp1time_cmds[j].t < w->t && Vdp1TimeReads(&vdp1time_cmds[j], a);
+         for (j = vdp1time_blkfirst[a >> 8]; j < vdp1time_blkfirst[(a >> 8) + 1] && !read_before; j++)
+         {
+            const Vdp1TimeCmd *c = &vdp1time_cmds[vdp1time_blkcmd[j]];
+            read_before = c->t < w->t && Vdp1TimeReads(c, a);
+         }
          if (!read_before)
             continue;
          patch_addr[npatch] = a;
