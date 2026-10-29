@@ -650,33 +650,44 @@ void Vdp1TimeDiscard(void)
 
 /* States are saved between frames, just after VBlank-OUT, where a modelled
    list has started and not yet ended. The state keeps what resumes it:
-   its start registers, how far it got, and the writes journaled since. */
+   its start registers, how far it got, and the writes journaled since.
+   The block has the same size every time (frontends size their rewind and
+   run-ahead buffers once): the whole journal, unused entries zero. */
+#define VDP1TIME_STATEWR 20   /* a journal entry in a state: t, addr, size, old */
 void Vdp1TimeSaveState(void **stream)
 {
+   static u8 wr[VDP1TIME_MAXWRITES * VDP1TIME_STATEWR];
    const u32 inflight = vdp1time_inflight;
-   MemStateWrite((void *)&inflight, 4, 1, stream);
+   const double elapsed = inflight ? Vdp1TimeNow() - vdp1time_start : 0, len = inflight ? vdp1time_end - vdp1time_start : 0;
+   const u32 later = inflight ? vdp1time_later : 0, started = inflight ? vdp1time_started : 0;
+   const u32 nwrites = inflight ? vdp1time_nwrites : 0;
+   Vdp1 regs;
+   u32 i;
    if (inflight)
+      regs = vdp1time_regs;
+   else
+      memset(&regs, 0, sizeof(regs));
+   memset(wr, 0, sizeof(wr));
+   for (i = 0; i < nwrites; i++)
    {
-      const double elapsed = Vdp1TimeNow() - vdp1time_start, len = vdp1time_end - vdp1time_start;
-      const u32 later = vdp1time_later, started = vdp1time_started, nwrites = vdp1time_nwrites;
-      u32 i;
-      MemStateWrite((void *)&vdp1time_regs, sizeof(Vdp1), 1, stream);
-      MemStateWrite((void *)&later, 4, 1, stream);
-      MemStateWrite((void *)&started, 4, 1, stream);
-      MemStateWrite((void *)&elapsed, sizeof(double), 1, stream);
-      MemStateWrite((void *)&len, sizeof(double), 1, stream);
-      MemStateWrite((void *)&nwrites, 4, 1, stream);
-      for (i = 0; i < nwrites; i++)
-      {
-         const Vdp1TimeWr *w = &vdp1time_writes[i];
-         const u32 addr = w->addr, size = w->size;
-         MemStateWrite((void *)&w->t, sizeof(double), 1, stream);
-         MemStateWrite((void *)&addr, 4, 1, stream);
-         MemStateWrite((void *)&size, 4, 1, stream);
-         MemStateWrite((void *)w->old, 1, 4, stream);
-      }
-      vdp1time_saved++;
+      const Vdp1TimeWr *w = &vdp1time_writes[i];
+      const u32 addr = w->addr, size = w->size;
+      u8 *e = wr + i * VDP1TIME_STATEWR;
+      memcpy(e, &w->t, 8);
+      memcpy(e + 8, &addr, 4);
+      memcpy(e + 12, &size, 4);
+      memcpy(e + 16, w->old, 4);
    }
+   MemStateWrite((void *)&inflight, 4, 1, stream);
+   MemStateWrite((void *)&regs, sizeof(Vdp1), 1, stream);
+   MemStateWrite((void *)&later, 4, 1, stream);
+   MemStateWrite((void *)&started, 4, 1, stream);
+   MemStateWrite((void *)&elapsed, sizeof(double), 1, stream);
+   MemStateWrite((void *)&len, sizeof(double), 1, stream);
+   MemStateWrite((void *)&nwrites, 4, 1, stream);
+   MemStateWrite((void *)wr, sizeof(wr), 1, stream);
+   if (inflight)
+      vdp1time_saved++;
 }
 
 /* A state load (after the registers and VDP1 RAM): resume the list that
@@ -692,26 +703,29 @@ void Vdp1TimeLoadState(const void *stream, int version)
    if (version < 2)
       return;
    MemStateRead((void *)&inflight, 4, 1, stream);
-   if (!inflight)
-      return;
    MemStateRead((void *)&regs, sizeof(Vdp1), 1, stream);
    MemStateRead((void *)&later, 4, 1, stream);
    MemStateRead((void *)&started, 4, 1, stream);
    MemStateRead((void *)&elapsed, sizeof(double), 1, stream);
    MemStateRead((void *)&len, sizeof(double), 1, stream);
    MemStateRead((void *)&nwrites, 4, 1, stream);
-   if (nwrites > VDP1TIME_MAXWRITES)
-      return;
-   for (i = 0; i < nwrites; i++)
    {
-      Vdp1TimeWr *w = &vdp1time_writes[i];
-      u32 addr, size;
-      MemStateRead((void *)&w->t, sizeof(double), 1, stream);
-      MemStateRead((void *)&addr, 4, 1, stream);
-      MemStateRead((void *)&size, 4, 1, stream);
-      MemStateRead((void *)w->old, 1, 4, stream);
-      w->addr = addr;
-      w->size = size > 4 ? 4 : size;
+      static u8 wr[VDP1TIME_MAXWRITES * VDP1TIME_STATEWR];
+      MemStateRead((void *)wr, sizeof(wr), 1, stream);
+      if (!inflight || nwrites > VDP1TIME_MAXWRITES)
+         return;
+      for (i = 0; i < nwrites; i++)
+      {
+         Vdp1TimeWr *w = &vdp1time_writes[i];
+         const u8 *e = wr + i * VDP1TIME_STATEWR;
+         u32 addr, size;
+         memcpy(&w->t, e, 8);
+         memcpy(&addr, e + 8, 4);
+         memcpy(&size, e + 12, 4);
+         memcpy(w->old, e + 16, 4);
+         w->addr = addr;
+         w->size = size > 4 ? 4 : size;
+      }
    }
 
    if (VIDCore == NULL || VIDCore->id != 2 /* VIDCORE_SOFT */)
