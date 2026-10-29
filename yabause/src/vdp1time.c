@@ -23,22 +23,22 @@
     list with a full-screen polygon that clears the framebuffer (~54 lines),
     and uploads X's cells for the new pose in the lines after VBlank-OUT, so
     the chip reads X's sprites with the new cells, and we read the old ones
-    (X built from the pieces of another pose on every pose change, U57).
+    (X built from the pieces of another pose on every pose change, issue #14).
 
     For a list that opens with an opaque polygon covering the whole system
     clip (a framebuffer clear), each command's read time is modelled from the
     draw start (Beetle's costs: a 16-cycle fetch, polygons and sprites drawn
-    as lines of about one cycle a pixel, +19 % in 16 bpp) and VDP1 RAM writes
-    are journaled until the list's modelled end. If a write landed before a
-    command's modelled read and touched what it reads (command words,
-    texture, colour table, Gouraud table), the list is drawn again with VDP1
-    RAM as each command would have read it. The clear covers everything the
-    first draw left, so drawing over it is exact. Lists without that clear are
-    drawn once, as before.
+    as lines of about one cycle a pixel, +19 % in 16 bpp), VDP1 RAM writes
+    are journaled until the list's modelled end, and the list is drawn then,
+    with VDP1 RAM as each command read it (the writes made after a command
+    read a byte undone). At VBlank-OUT only its register effects are made
+    (Vdp1FakeDrawCommands), as the threaded renderer does; the draw-end
+    interrupt and status stay where they were. Other lists are drawn at
+    VBlank-OUT, as before.
 
     YAB_VDP1TIME=0 turns it off, 1 is the default, 2 also models every list
     (not only those that open with a clear) and logs each list where a write
-    races a read, redrawn or not; counts at exit with the variable set. */
+    races a read; counts at exit with the variable set. */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -77,12 +77,12 @@ static int vdp1time_ncmds;
 static int vdp1time_blkfirst[VDP1TIME_BLOCKS + 1];
 static u16 vdp1time_blkcmd[VDP1TIME_MAXREFS];
 static Vdp1TimeWr vdp1time_writes[VDP1TIME_MAXWRITES];
-static int vdp1time_nwrites, vdp1time_overflow;
-static int vdp1time_cover;  /* the list opens with an opaque full clear */
+static int vdp1time_nwrites;
+static int vdp1time_later;  /* the list opens with a clear: drawn at its end */
 static double vdp1time_start, vdp1time_end;
 static VideoInterface_struct *vdp1time_core;
 static Vdp1 vdp1time_regs;           /* the registers when the list started */
-static unsigned long vdp1time_lists, vdp1time_raced, vdp1time_redrawn, vdp1time_unhandled;
+static unsigned long vdp1time_lists, vdp1time_raced, vdp1time_chipread, vdp1time_unhandled, vdp1time_early;
 
 static int Vdp1TimeMode(void)
 {
@@ -339,38 +339,38 @@ static int Vdp1TimeWalk(int cover)
    return 0;
 }
 
-/* Vdp1Draw, before the list is drawn */
-void Vdp1TimeDrawStart(void)
+/* Vdp1Draw, before the list is drawn. Returns 1 if this list is drawn at
+   its modelled end instead (Vdp1Draw then only walks it for the registers) */
+int Vdp1TimeDrawStart(void)
 {
    int cover;
    if (vdp1time_inflight)
       Vdp1TimeFinish();
    if (!Vdp1TimeMode() || VIDCore->id != 2 /* VIDCORE_SOFT */)
-      return;
+      return 0;
    cover = Vdp1TimeOpensWithClear();
    if (!cover && vdp1time_mode != 2)
-      return;
+      return 0;
    if (!Vdp1TimeWalk(cover))
-      return;
-   vdp1time_cover = cover;
+      return 0;
+   vdp1time_later = cover;
    vdp1time_core = VIDCore;
    vdp1time_regs = *Vdp1Regs;
    vdp1time_start = Vdp1TimeNow();
    {
       const double hz = yabsys.IsPal ? 50 : 59.94;
       const double clock = yabsys.CurSH2FreqType == CLKTYPE_26MHZ ? 26874100 : 28636400;
-      vdp1time_end = vdp1time_start + vdp1time_end / (clock / (hz * yabsys.MaxLineCount));
-      /* command times from cycles to lines after the start */
-      {
-         int i;
-         for (i = 0; i < vdp1time_ncmds; i++)
-            vdp1time_cmds[i].t /= clock / (hz * yabsys.MaxLineCount);
-      }
+      const double cycles_per_line = clock / (hz * yabsys.MaxLineCount);
+      int i;
+      /* from cycles to lines after the start */
+      vdp1time_end = vdp1time_start + vdp1time_end / cycles_per_line;
+      for (i = 0; i < vdp1time_ncmds; i++)
+         vdp1time_cmds[i].t /= cycles_per_line;
    }
    vdp1time_nwrites = 0;
-   vdp1time_overflow = 0;
    vdp1time_lists++;
    vdp1time_inflight = 1;
+   return vdp1time_later;
 }
 
 /* A VDP1 RAM write while a list is modelled as drawing, before it is made */
@@ -380,7 +380,9 @@ void Vdp1TimeWrite(u32 addr, int size)
    int i;
    if (vdp1time_nwrites >= VDP1TIME_MAXWRITES)
    {
-      vdp1time_overflow = 1;
+      /* the journal is full: the list is done as of now */
+      vdp1time_early++;
+      Vdp1TimeFinish();
       return;
    }
    w = &vdp1time_writes[vdp1time_nwrites++];
@@ -407,70 +409,78 @@ static int Vdp1TimeReads(const Vdp1TimeCmd *c, u32 a)
    return 0;
 }
 
+/* Did command reads of byte a come before write w, after it, or both? */
+static void Vdp1TimeReaders(const Vdp1TimeWr *w, u32 a, int *before, int *after)
+{
+   int j;
+   *before = *after = 0;
+   for (j = vdp1time_blkfirst[a >> 8]; j < vdp1time_blkfirst[(a >> 8) + 1]; j++)
+   {
+      const Vdp1TimeCmd *c = &vdp1time_cmds[vdp1time_blkcmd[j]];
+      if (!Vdp1TimeReads(c, a))
+         continue;
+      if (c->t >= w->t)
+         *after = 1;
+      else
+         *before = 1;
+   }
+}
+
 /* The list has ended (or something needs the framebuffer, or the next list
-   starts): did a write land before a read it changes? Then draw it again. */
+   starts). A list that opens with a clear is drawn now, with VDP1 RAM as its
+   commands read it; others were drawn at VBlank-OUT, as before. */
 void Vdp1TimeFinish(void)
 {
    static u32 patch_addr[VDP1TIME_MAXWRITES * 4];
    static u8 patch_live[VDP1TIME_MAXWRITES * 4];
-   int raced = 0, mixed = 0, npatch = 0, i, j, b;
+   int raced = 0, mixed = 0, npatch = 0, i, b, before, after;
 
    vdp1time_inflight = 0;
-   if (!vdp1time_nwrites)
-      return;
 
-   /* per written byte: the chip read it after the write (raced: we read
-      the old value), before it (we must not see the new one when drawing
-      again), or both (one RAM image can't hold that) */
+   /* per written byte: the chip read it after the write (we read the old
+      value at VBlank-OUT), before it, or both (one RAM image can't hold
+      that: drawn as at VBlank-OUT, as before) */
    for (i = 0; i < vdp1time_nwrites; i++)
    {
       const Vdp1TimeWr *w = &vdp1time_writes[i];
       for (b = 0; b < w->size; b++)
       {
-         const u32 a = (w->addr + b) & 0x7FFFF;
-         int before = 0, after = 0;
-         for (j = vdp1time_blkfirst[a >> 8]; j < vdp1time_blkfirst[(a >> 8) + 1]; j++)
-         {
-            const Vdp1TimeCmd *c = &vdp1time_cmds[vdp1time_blkcmd[j]];
-            if (!Vdp1TimeReads(c, a))
-               continue;
-            if (c->t >= w->t)
-               after = 1;
-            else
-               before = 1;
-         }
+         Vdp1TimeReaders(w, (w->addr + b) & 0x7FFFF, &before, &after);
          raced |= after;
          mixed |= after && before;
       }
    }
-   if (!raced)
-      return;
-   vdp1time_raced++;
-   if (!vdp1time_cover || mixed || vdp1time_overflow)
+   if (raced)
    {
-      vdp1time_unhandled++;
-      if (vdp1time_mode == 2)
-         fprintf(stderr, "vdp1time: frame %u: list raced, not redrawn (%s)\n", vdp1time_frame,
-                 !vdp1time_cover ? "no clear first" : mixed ? "a byte read before and after a write" : "journal full");
-      return;
+      vdp1time_raced++;
+      if (!vdp1time_later || mixed)
+      {
+         vdp1time_unhandled++;
+         if (vdp1time_mode == 2)
+            fprintf(stderr, "vdp1time: frame %u: list raced, drawn as at its start (%s)\n", vdp1time_frame,
+                    !vdp1time_later ? "no clear first" : "a byte read before and after a write");
+      }
+      else
+         vdp1time_chipread++;
    }
+   if (!vdp1time_later)
+      return;
 
-   /* VDP1 RAM as each command read it: undo, newest first, the writes made
-      after the commands that read those bytes */
+   /* VDP1 RAM as the commands read it: undo, newest first, the writes made
+      after the commands that read those bytes (all of them when the list
+      can't be drawn as the chip read it: then as at VBlank-OUT) */
    for (i = vdp1time_nwrites - 1; i >= 0; i--)
    {
       const Vdp1TimeWr *w = &vdp1time_writes[i];
       for (b = 0; b < w->size; b++)
       {
          const u32 a = (w->addr + b) & 0x7FFFF;
-         int read_before = 0;
-         for (j = vdp1time_blkfirst[a >> 8]; j < vdp1time_blkfirst[(a >> 8) + 1] && !read_before; j++)
+         if (!mixed)
          {
-            const Vdp1TimeCmd *c = &vdp1time_cmds[vdp1time_blkcmd[j]];
-            read_before = c->t < w->t && Vdp1TimeReads(c, a);
+            Vdp1TimeReaders(w, a, &before, &after);
+            if (!before)
+               continue;
          }
-         if (!read_before)
-            continue;
          patch_addr[npatch] = a;
          patch_live[npatch++] = T1ReadByte(Vdp1Ram, a);
          T1WriteByte(Vdp1Ram, a, w->old[b]);
@@ -478,9 +488,8 @@ void Vdp1TimeFinish(void)
       }
    }
 
-   /* draw the list again over the first draw (its clear covers what that
-      left), from the registers it started with: a frame change asked for
-      since, or the clipping the list set, must not change it */
+   /* draw it from the registers it started with (a frame change asked for
+      since must not change it), then the registers as they are now back */
    {
       const Vdp1 regs = *Vdp1Regs;
       const int incomplete = Vdp1ListIncomplete, erase = Vdp1External.manualerase;
@@ -492,9 +501,8 @@ void Vdp1TimeFinish(void)
       Vdp1ListIncomplete = incomplete;
       Vdp1External.manualerase = erase;
    }
-   vdp1time_redrawn++;
-   if (vdp1time_mode == 2)
-      fprintf(stderr, "vdp1time: frame %u: list redrawn (%d writes, %d bytes as read before them)\n",
+   if (vdp1time_mode == 2 && raced)
+      fprintf(stderr, "vdp1time: frame %u: list drawn as the chip read it (%d writes, %d bytes as read before them)\n",
               vdp1time_frame, vdp1time_nwrites, npatch);
 
    /* the live RAM back, newest value last */
@@ -505,7 +513,8 @@ void Vdp1TimeFinish(void)
    }
 }
 
-/* A state load or reset: the RAM the journal describes is gone */
+/* A state load or reset: the RAM the journal describes is gone (a list not
+   drawn yet stays undrawn: states don't hold the framebuffers either) */
 void Vdp1TimeDiscard(void)
 {
    vdp1time_inflight = 0;
@@ -514,6 +523,6 @@ void Vdp1TimeDiscard(void)
 void Vdp1TimeStats(void)
 {
    if (getenv("YAB_VDP1TIME"))
-      fprintf(stderr, "vdp1time: %lu lists modelled, %lu raced, %lu redrawn, %lu not redrawn\n",
-              vdp1time_lists, vdp1time_raced, vdp1time_redrawn, vdp1time_unhandled);
+      fprintf(stderr, "vdp1time: %lu lists modelled, %lu raced, %lu drawn as the chip read them, %lu raced but drawn as at their start, %lu ended early (journal full)\n",
+              vdp1time_lists, vdp1time_raced, vdp1time_chipread, vdp1time_unhandled, vdp1time_early);
 }

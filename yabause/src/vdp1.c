@@ -670,6 +670,7 @@ void Vdp1Draw(void)
 #undef Vdp1Draw
 #endif
 {
+   int later;
    if (!Vdp1External.disptoggle)
    {
       Vdp1NoDraw();
@@ -678,7 +679,7 @@ void Vdp1Draw(void)
 
    Vdp1Regs->addr = 0;
    Vdp1ListIncomplete = 0;
-   Vdp1TimeDrawStart();
+   later = Vdp1TimeDrawStart();
 
    // beginning of a frame
    // BEF <- CEF
@@ -687,7 +688,12 @@ void Vdp1Draw(void)
    /* this should be done after a frame change or a plot trigger */
    Vdp1Regs->COPR = 0;
 
-   VIDCore->Vdp1DrawStart();
+   /* a list drawn at its modelled end (vdp1time.c): the registers as
+      drawing it leaves them now */
+   if (later)
+      Vdp1FakeDrawCommands(Vdp1Ram, Vdp1Regs);
+   else
+      VIDCore->Vdp1DrawStart();
 
    // we set two bits to 1
    Vdp1Regs->EDSR |= 2;
