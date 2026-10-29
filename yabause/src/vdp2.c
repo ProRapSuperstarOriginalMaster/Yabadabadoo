@@ -516,6 +516,7 @@ void Vdp2HBlankIN(void) {
 #ifdef YAB_PROFILE
 #undef Vdp2HBlankIN
 #endif
+   vdp1time_lines++;
    if (vdp1time_inflight) Vdp1TimeLine();
    Vdp2Regs->TVSTAT |= 0x0004;
    ScuSendHBlankIN();

@@ -68,7 +68,7 @@ int vdp1time_inflight;      /* a list is modelled as still drawing: journal writ
 
 static int vdp1time_mode = -1;
 static u32 vdp1time_frame;  /* VBlank-OUT count */
-static double vdp1time_base; /* lines up to the last VBlank-OUT */
+u32 vdp1time_lines;         /* HBlank-IN count: the line clock */
 static Vdp1TimeCmd vdp1time_cmds[VDP1TIME_MAXCMDS];
 static int vdp1time_ncmds;
 /* which commands read each 256-byte block: commands vdp1time_blkcmd[first[b] .. first[b + 1]) */
@@ -94,12 +94,12 @@ static int Vdp1TimeMode(void)
    return vdp1time_mode;
 }
 
-/* Lines since some fixed point; the line count as the CPU sees it (at
-   VBlank-OUT LineCount is still the field's last line + 1, then 0) */
+/* Lines since some fixed point. Counted at HBlank-IN, once a line on both
+   SH-2 cores: yabsys.LineCount isn't the same at VBlank-OUT on both (the
+   recompiler's frame loop calls it before the count wraps) */
 static double Vdp1TimeNow(void)
 {
-   int line = yabsys.LineCount >= yabsys.MaxLineCount ? 0 : yabsys.LineCount;
-   return vdp1time_base + line;
+   return vdp1time_lines;
 }
 
 void Vdp1TimeVBlankOut(void)
@@ -107,7 +107,6 @@ void Vdp1TimeVBlankOut(void)
    if (vdp1time_inflight)
       Vdp1TimeFinish();
    vdp1time_frame++;
-   vdp1time_base += yabsys.MaxLineCount;
 }
 
 static s32 Vdp1TimeMax(s32 a, s32 b) { return a > b ? a : b; }
