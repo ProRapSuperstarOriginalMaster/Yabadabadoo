@@ -26,15 +26,23 @@
     (X built from the pieces of another pose on every pose change, issue #14).
 
     For a list that opens with an opaque polygon covering the whole system
-    clip (a framebuffer clear), each command's read time is modelled from the
-    draw start (Beetle's costs: a 16-cycle fetch, polygons and sprites drawn
-    as lines of about one cycle a pixel, +19 % in 16 bpp), VDP1 RAM writes
-    are journaled until the list's modelled end, and the list is drawn then,
-    with VDP1 RAM as each command read it (the writes made after a command
-    read a byte undone). At VBlank-OUT only its register effects are made
-    (Vdp1FakeDrawCommands), as the threaded renderer does; the draw-end
-    interrupt and status stay where they were. Other lists are drawn at
-    VBlank-OUT, as before.
+    clip (a framebuffer clear), the chip's timing is modelled as Beetle has
+    it: the list starts at the first HBlank after VBlank-OUT (the draw
+    status, EDSR's CEF, clears there, so a VBlank-OUT interrupt handler
+    still sees the last list's end); each command is read when the chip gets
+    to it (Beetle's costs: a 16-cycle fetch; polygons and sprites stepped as
+    lines, each 12 cycles to set up plus a cycle a pixel, +19 % in 16 bpp,
+    a line wholly outside the clip area reduced to a point, a line that
+    leaves it after entering stopping there); the list ends, with draw end
+    (CEF, COPR, the SCU interrupt), when its last command is done. Games
+    that wait for draw end rewrite their list only then. VDP1 RAM writes are
+    journaled until the end, and the list is drawn then, with VDP1 RAM as
+    each command read it (the writes made after a command read a byte
+    undone). At VBlank-OUT only its register effects are made
+    (Vdp1FakeDrawCommands), as the threaded renderer does. The chip draws on
+    through the VBlank: the list is completed early only where the frame
+    changes, a new list starts, or the CPU touches the framebuffer. Other
+    lists are drawn and end at VBlank-OUT, as before.
 
     YAB_VDP1TIME=0 turns it off, 1 is the default, 2 also models every list
     (not only those that open with a clear) and logs each list where a write
@@ -46,6 +54,7 @@
 #include "core.h"
 #include "yabause.h"
 #include "vdp1.h"
+#include "scu.h"
 
 #define VDP1TIME_MAXCMDS 2048
 #define VDP1TIME_MAXWRITES 16384
@@ -80,6 +89,7 @@ static u16 vdp1time_blkcmd[VDP1TIME_MAXREFS];
 static Vdp1TimeWr vdp1time_writes[VDP1TIME_MAXWRITES];
 static int vdp1time_nwrites;
 static int vdp1time_later;  /* the list opens with a clear: drawn at its end */
+static int vdp1time_started; /* its start shown in the draw status yet */
 static double vdp1time_start, vdp1time_end;
 static VideoInterface_struct *vdp1time_core;
 static Vdp1 vdp1time_regs;           /* the registers when the list started */
@@ -105,22 +115,72 @@ static double Vdp1TimeNow(void)
 
 void Vdp1TimeVBlankOut(void)
 {
-   if (vdp1time_inflight)
+   /* a frame change asked for during the VBlank is made at VBlank-OUT
+      (Vdp2VBlankOUT): a list still drawing is complete first. A new list
+      completes it in Vdp1TimeDrawStart; else it draws on, as on the chip */
+   if (vdp1time_inflight && Vdp1External.changerequest)
       Vdp1TimeFinish();
    vdp1time_frame++;
 }
 
 static s32 Vdp1TimeMax(s32 a, s32 b) { return a > b ? a : b; }
 
-/* Beetle's polygon walk: steps along edges A->D and B->C, the longer one's
-   length in steps; each step draws a line between them */
-static double Vdp1TimeQuad(s32 xa, s32 ya, s32 xb, s32 yb, s32 xc, s32 yc, s32 xd, s32 yd)
+/* The clipping a command is drawn with: system clip (0,0)-(sx,sy), user
+   clip (ux0,uy0)-(ux1,uy1) */
+typedef struct { s32 sx, sy, ux0, uy0, ux1, uy1; } Vdp1TimeClip;
+
+/* Cycles of one line from (x0,y0) to (x1,y1) as Beetle draws it: 4 + 8 to
+   set it up; a line wholly beyond one edge of the clip area is reduced to a
+   point; else one pixel a step (+ one each time both x and y step, with
+   anti-aliasing), stopping where it leaves the clip area after entering it;
+   pixel cycles + 19 % (16 bpp drawing timing) */
+static double Vdp1TimeLineCost(s32 x0, s32 y0, s32 x1, s32 y1, int aa, int user, const Vdp1TimeClip *k, double pix)
 {
-   s32 e0 = Vdp1TimeMax(abs(xd - xa), abs(yd - ya));
-   s32 e1 = Vdp1TimeMax(abs(xc - xb), abs(yc - yb));
-   s32 l0 = Vdp1TimeMax(abs(xb - xa), abs(yb - ya));
-   s32 l1 = Vdp1TimeMax(abs(xc - xd), abs(yc - yd));
-   return (Vdp1TimeMax(e0, e1) + 1) * ((l0 + l1) / 2.0 + 1 + 8);
+   const s32 bx0 = user ? k->ux0 : 0, by0 = user ? k->uy0 : 0;
+   const s32 bx1 = user ? k->ux1 : k->sx, by1 = user ? k->uy1 : k->sy;
+   const s32 dx = x1 - x0, dy = y1 - y0, adx = abs(dx), ady = abs(dy);
+   const s32 len = Vdp1TimeMax(adx, ady);
+   double steps, tin = 0, tout = 1;
+   if ((x0 < bx0 && x1 < bx0) || (x0 > bx1 && x1 > bx1) || (y0 < by0 && y1 < by0) || (y0 > by1 && y1 > by1))
+      return 12 + pix * (1 + 48 / 256.0);
+   steps = len + 1 + (aa ? (adx < ady ? adx : ady) : 0);
+   /* the part of the segment inside the clip box (Liang-Barsky) */
+   {
+      const double p[4] = { -dx, dx, -dy, dy };
+      const double q[4] = { x0 - bx0, bx1 - x0, y0 - by0, by1 - y0 };
+      int i;
+      for (i = 0; i < 4; i++)
+      {
+         if (p[i] == 0)
+            continue;
+         {
+            const double r = q[i] / p[i];
+            if (p[i] < 0) { if (r > tin) tin = r; }
+            else if (r < tout) tout = r;
+         }
+      }
+   }
+   if (tin <= tout && tout < 1)
+      steps = steps * tout + 1;   /* stops once it leaves the clip area */
+   return 12 + steps * pix * (1 + 48 / 256.0);
+}
+
+/* A quad (polygon, distorted, scaled or normal sprite) as Beetle steps it:
+   along edges A->D and B->C, as many steps as the longer edge, a line
+   between them at each */
+static double Vdp1TimeQuad(s32 xa, s32 ya, s32 xb, s32 yb, s32 xc, s32 yc, s32 xd, s32 yd, int user,
+                           const Vdp1TimeClip *k, double pix)
+{
+   s32 dmax = Vdp1TimeMax(Vdp1TimeMax(abs(xd - xa), abs(yd - ya)), Vdp1TimeMax(abs(xc - xb), abs(yc - yb))) & 0xFFF;
+   double cost = 0;
+   s32 i;
+   for (i = 0; i <= dmax; i++)
+   {
+      const s32 x0 = dmax ? xa + (xd - xa) * i / dmax : xa, y0 = dmax ? ya + (yd - ya) * i / dmax : ya;
+      const s32 x1 = dmax ? xb + (xc - xb) * i / dmax : xb, y1 = dmax ? yb + (yc - yb) * i / dmax : yb;
+      cost += Vdp1TimeLineCost(x0, y0, x1, y1, 1, user, k, pix);
+   }
+   return cost;
 }
 
 static u32 Vdp1TimeNext(u32 addr, u16 ctrl, u32 *ret)
@@ -241,12 +301,15 @@ static int Vdp1TimeIndex(void)
    system clip goes beyond the clear. */
 static int Vdp1TimeWalk(int cover)
 {
-   const double dta = 1 + 48 / 256.0;          /* 16 bpp drawing */
    u32 addr = 0, ret = 0xFFFFFFFF;
    s32 cx = 0, cy = 0, lx = Vdp1Regs->localX, ly = Vdp1Regs->localY;
+   Vdp1TimeClip clip;
    double t = 0;
    int n, first = 1;
 
+   clip.sx = Vdp1Regs->systemclipX2; clip.sy = Vdp1Regs->systemclipY2;
+   clip.ux0 = Vdp1Regs->userclipX1; clip.uy0 = Vdp1Regs->userclipY1;
+   clip.ux1 = Vdp1Regs->userclipX2; clip.uy1 = Vdp1Regs->userclipY2;
    vdp1time_ncmds = 0;
    for (n = 0; n < 2000; n++)   /* as many as Vdp1DrawCommands visits */
    {
@@ -312,43 +375,58 @@ static int Vdp1TimeWalk(int cover)
             return Vdp1TimeIndex();
          }
 
-         switch (type)
          {
-         case 0:
-            cost += h * (w + 8.0) + (cm == 1 ? 16 : 0);
-            break;
-         case 1:
-            if (((ctrl >> 8) & 0xF) == 0)
-               cost += (abs(yc - ya) + 1) * (abs(xc - xa) + 1 + 8.0);
-            else
-               cost += (abs(yb) + 1) * (abs(xb) + 1 + 8.0);
-            cost += cm == 1 ? 16 : 0;
-            break;
-         case 2: case 3: case 4:
-            cost += Vdp1TimeQuad(xa, ya, xb, yb, xc, yc, xd, yd) + (cm == 1 && type != 4 ? 16 : 0);
-            break;
-         case 5: case 7:
-            cost += (abs(xb - xa) + abs(yb - ya) + abs(xc - xb) + abs(yc - yb) +
-                     abs(xd - xc) + abs(yd - yc) + abs(xa - xd) + abs(ya - yd)) + 4 * 8;
-            break;
-         case 6:
-            cost += Vdp1TimeMax(abs(xb - xa), abs(yb - ya)) + 1 + 8;
-            break;
-         case 9:
-            /* a system clip set after the clear may reach what it didn't cover */
-            if (!first && cover && (xc > cx || yc > cy))
-               return 0;
-            cx = xc; cy = yc;
-            break;
-         case 10:
-            lx = xa; ly = ya;
-            break;
-         default:
-            break;
+            /* pixel cycles: 1, +5 where the pixel behind is read (MSB on,
+               shadow, half-transparency); user clipping (draw inside) */
+            const double pix = (pmod & 0x8000) || (pmod & 1) ? 6 : 1;
+            const int user = (pmod & 0x600) == 0x400;
+            const s32 ax = xa + lx, ay = ya + ly, bx = xb + lx, by = yb + ly;
+            const s32 cxx = xc + lx, cyy = yc + ly, dxx = xd + lx, dyy = yd + ly;
+            switch (type)
+            {
+            case 0:
+               cost += Vdp1TimeQuad(ax, ay, ax + (s32)w - 1, ay, ax + (s32)w - 1, ay + (s32)h - 1, ax, ay + (s32)h - 1, user, &clip, pix)
+                       + (cm == 1 ? 16 : 0);
+               break;
+            case 1:
+            {
+               s32 x0 = ax, y0 = ay, x1 = cxx, y1 = cyy;
+               if (((ctrl >> 8) & 0xF) != 0)
+               {
+                  x1 = ax + xb; y1 = ay + yb;   /* size from the zoom point (its position approximated) */
+               }
+               cost += Vdp1TimeQuad(x0, y0, x1, y0, x1, y1, x0, y1, user, &clip, pix) + (cm == 1 ? 16 : 0);
+               break;
+            }
+            case 2: case 3: case 4:
+               cost += Vdp1TimeQuad(ax, ay, bx, by, cxx, cyy, dxx, dyy, user, &clip, pix) + (cm == 1 && type != 4 ? 16 : 0);
+               break;
+            case 5: case 7:
+               cost += Vdp1TimeLineCost(ax, ay, bx, by, 0, user, &clip, pix) + Vdp1TimeLineCost(bx, by, cxx, cyy, 0, user, &clip, pix) +
+                       Vdp1TimeLineCost(cxx, cyy, dxx, dyy, 0, user, &clip, pix) + Vdp1TimeLineCost(dxx, dyy, ax, ay, 0, user, &clip, pix);
+               break;
+            case 6:
+               cost += Vdp1TimeLineCost(ax, ay, bx, by, 0, user, &clip, pix);
+               break;
+            case 8: case 11:
+               clip.ux0 = xa; clip.uy0 = ya; clip.ux1 = xc; clip.uy1 = yc;
+               break;
+            case 9:
+               /* a system clip set after the clear may reach what it didn't cover */
+               if (!first && cover && (xc > cx || yc > cy))
+                  return 0;
+               cx = xc; cy = yc;
+               clip.sx = xc; clip.sy = yc;
+               break;
+            case 10:
+               lx = xa; ly = ya;
+               break;
+            default:
+               break;
+            }
          }
          if (type <= 7)
          {
-            cost *= dta;
             if (first && cover)
             {
                cx = xc + lx;
@@ -394,6 +472,7 @@ int Vdp1TimeDrawStart(void)
    vdp1time_nwrites = 0;
    vdp1time_lists++;
    vdp1time_inflight = 1;
+   vdp1time_started = !vdp1time_later;
    return vdp1time_later;
 }
 
@@ -417,9 +496,20 @@ void Vdp1TimeWrite(u32 addr, int size)
       w->old[i] = T1ReadByte(Vdp1Ram, (addr + i) & 0x7FFFF);
 }
 
-/* Every line: has the modelled list ended? */
+/* The chip starts a list at the first HBlank after VBlank-OUT (Beetle): the
+   VBlank-OUT interrupt handler still sees the last list's draw end (CEF) */
+static void Vdp1TimeShowStart(void)
+{
+   vdp1time_started = 1;
+   Vdp1Regs->EDSR >>= 1;   /* BEF <- CEF, CEF <- 0 */
+   Vdp1Regs->COPR = 0;
+}
+
+/* Every line: has the modelled list started, or ended? */
 void Vdp1TimeLine(void)
 {
+   if (!vdp1time_started)
+      Vdp1TimeShowStart();
    if (Vdp1TimeNow() >= vdp1time_end)
       Vdp1TimeFinish();
 }
@@ -460,6 +550,8 @@ void Vdp1TimeFinish(void)
    int raced = 0, mixed = 0, npatch = 0, i, b, before, after;
 
    vdp1time_inflight = 0;
+   if (!vdp1time_started)
+      Vdp1TimeShowStart();
 
    /* per written byte: the chip read it after the write (we read the old
       value at VBlank-OUT), before it, or both (one RAM image can't hold
@@ -525,6 +617,10 @@ void Vdp1TimeFinish(void)
       Vdp1ListIncomplete = incomplete;
       Vdp1External.manualerase = erase;
    }
+   /* the list has ended: draw end, as Vdp1Draw reports it for other lists */
+   Vdp1Regs->EDSR |= 2;
+   Vdp1Regs->COPR = Vdp1Regs->addr >> 3;
+   ScuSendDrawEnd();
    if (vdp1time_mode == 2 && raced)
       fprintf(stderr, "vdp1time: frame %u: list drawn as the chip read it (%d writes, %d bytes as read before them)\n",
               vdp1time_frame, vdp1time_nwrites, npatch);

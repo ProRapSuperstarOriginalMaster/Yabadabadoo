@@ -459,8 +459,10 @@ void Vdp2VBlankIN(void) {
 #ifdef YAB_PROFILE
 #undef Vdp2VBlankIN
 #endif
-   /* the frame changes here: a list modelled as still drawing is complete first */
-   if (vdp1time_inflight) Vdp1TimeFinish();
+   /* a list modelled as still drawing is complete first if the frame
+      changes here (Vdp2DrawEnd); otherwise the chip draws on through the
+      VBlank, as in Beetle */
+   if (vdp1time_inflight && (!(Vdp1Regs->FBCR & 2) || Vdp1External.manualchange)) Vdp1TimeFinish();
    memcpy(&vdp2_vblank_regs, Vdp2Regs, sizeof(Vdp2));
    vdp2_vblank_regs_valid = 1;
    if (!(Vdp1Regs->FBCR & 2) || Vdp1External.changerequest)

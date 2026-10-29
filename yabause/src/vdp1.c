@@ -681,12 +681,17 @@ void Vdp1Draw(void)
    Vdp1ListIncomplete = 0;
    later = Vdp1TimeDrawStart();
 
-   // beginning of a frame
-   // BEF <- CEF
-   // CEF <- 0
-   Vdp1Regs->EDSR >>= 1;
-   /* this should be done after a frame change or a plot trigger */
-   Vdp1Regs->COPR = 0;
+   /* a list drawn at its modelled end (vdp1time.c) starts, as on the chip,
+      at the first HBlank after this: the status changes there */
+   if (!later)
+   {
+      // beginning of a frame
+      // BEF <- CEF
+      // CEF <- 0
+      Vdp1Regs->EDSR >>= 1;
+      /* this should be done after a frame change or a plot trigger */
+      Vdp1Regs->COPR = 0;
+   }
 
    /* a list drawn at its modelled end (vdp1time.c): the registers as
       drawing it leaves them now */
@@ -695,10 +700,16 @@ void Vdp1Draw(void)
    else
       VIDCore->Vdp1DrawStart();
 
-   // we set two bits to 1
-   Vdp1Regs->EDSR |= 2;
-   Vdp1Regs->COPR = Vdp1Regs->addr >> 3;
-   ScuSendDrawEnd();
+   /* draw end (CEF, COPR, the SCU interrupt): for a list drawn at its
+      modelled end, when it ends there, as the chip reports it (games that
+      wait for it rewrite their list only then) */
+   if (!later)
+   {
+      // we set two bits to 1
+      Vdp1Regs->EDSR |= 2;
+      Vdp1Regs->COPR = Vdp1Regs->addr >> 3;
+      ScuSendDrawEnd();
+   }
    VIDCore->Vdp1DrawEnd();
 }
 
