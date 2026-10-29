@@ -53,7 +53,8 @@
 typedef struct
 {
    double t;                /* modelled read time, lines after the draw start */
-   u32 lo[4], hi[4];        /* what it reads: command, texture, colour table, Gouraud */
+   u32 lo[5], hi[5];        /* what it reads: command, texture, colour table, Gouraud, the
+                               part of one of them past the end of VDP1 RAM (it wraps) */
 } Vdp1TimeCmd;
 
 typedef struct
@@ -68,7 +69,7 @@ int vdp1time_inflight;      /* a list is modelled as still drawing: journal writ
 
 static int vdp1time_mode = -1;
 static u32 vdp1time_frame;  /* VBlank-OUT count */
-u32 vdp1time_lines;         /* HBlank-IN count: the line clock */
+u64 vdp1time_lines;         /* HBlank-IN count: the line clock */
 static Vdp1TimeCmd vdp1time_cmds[VDP1TIME_MAXCMDS];
 static int vdp1time_ncmds;
 /* which commands read each 256-byte block: commands vdp1time_blkcmd[first[b] .. first[b + 1]) */
@@ -99,7 +100,7 @@ static int Vdp1TimeMode(void)
    recompiler's frame loop calls it before the count wraps) */
 static double Vdp1TimeNow(void)
 {
-   return vdp1time_lines;
+   return (double)vdp1time_lines;
 }
 
 void Vdp1TimeVBlankOut(void)
@@ -175,6 +176,8 @@ static int Vdp1TimeOpensWithClear(void)
             lx = (s16)T1ReadWord(Vdp1Ram, addr + 0xC);
             ly = (s16)T1ReadWord(Vdp1Ram, addr + 0xE);
          }
+         else if (type >= 0xC)
+            return 0;
          else if (type <= 7)
          {
             u16 pmod = T1ReadWord(Vdp1Ram, addr + 4);
@@ -193,20 +196,26 @@ static int Vdp1TimeOpensWithClear(void)
 
 /* Visit the 256-byte blocks command c reads */
 #define VDP1TIME_FOR_BLOCKS(c, b) \
-   for (k = 0; k < 4; k++) \
+   for (k = 0; k < 5; k++) \
       if ((c)->hi[k] > (c)->lo[k]) \
          for (b = (c)->lo[k] >> 8; b <= (((c)->hi[k] - 1) >> 8) && b < VDP1TIME_BLOCKS; b++)
 
 /* The readers of each block (counting sort); 0 if there are too many */
 static int Vdp1TimeIndex(void)
 {
-   static int count[VDP1TIME_BLOCKS];
+   static int count[VDP1TIME_BLOCKS], last[VDP1TIME_BLOCKS];
    int i, k, total = 0;
    u32 b;
+   /* a command reading one block through two ranges is listed once */
    memset(count, 0, sizeof(count));
+   memset(last, 0xFF, sizeof(last));
    for (i = 0; i < vdp1time_ncmds; i++)
       VDP1TIME_FOR_BLOCKS(&vdp1time_cmds[i], b)
-         count[b]++;
+         if (last[b] != i)
+         {
+            last[b] = i;
+            count[b]++;
+         }
    for (b = 0; b < VDP1TIME_BLOCKS; b++)
    {
       vdp1time_blkfirst[b] = total;
@@ -216,20 +225,19 @@ static int Vdp1TimeIndex(void)
    if (total > VDP1TIME_MAXREFS)
       return 0;
    memset(count, 0, sizeof(count));
+   memset(last, 0xFF, sizeof(last));
    for (i = 0; i < vdp1time_ncmds; i++)
       VDP1TIME_FOR_BLOCKS(&vdp1time_cmds[i], b)
-      {
-         /* a command reading one block twice (two ranges) is listed once */
-         int f = vdp1time_blkfirst[b];
-         if (count[b] && vdp1time_blkcmd[f + count[b] - 1] == i)
-            continue;
-         vdp1time_blkcmd[f + count[b]++] = (u16)i;
-      }
+         if (last[b] != i)
+         {
+            last[b] = i;
+            vdp1time_blkcmd[vdp1time_blkfirst[b] + count[b]++] = (u16)i;
+         }
    return 1;
 }
 
 /* Each command's modelled read time and what it reads; the list's end.
-   Returns 0 if the walk can't be modelled (too long, a loop) or a later
+   Returns 0 if the walk can't be modelled (longer than drawing walks, a loop) or a later
    system clip goes beyond the clear. */
 static int Vdp1TimeWalk(int cover)
 {
@@ -240,7 +248,7 @@ static int Vdp1TimeWalk(int cover)
    int n, first = 1;
 
    vdp1time_ncmds = 0;
-   for (n = 0; n < 4000; n++)
+   for (n = 0; n < 2000; n++)   /* as many as Vdp1DrawCommands visits */
    {
       u16 ctrl = T1ReadWord(Vdp1Ram, addr);
       double cost = 16;
@@ -285,6 +293,23 @@ static int Vdp1TimeWalk(int cover)
          {
             c->lo[3] = T1ReadWord(Vdp1Ram, addr + 0x1C) * 8;
             c->hi[3] = c->lo[3] + 8;
+         }
+         {
+            int k;
+            for (k = 1; k < 4; k++)
+               if (c->hi[k] > 0x80000)
+               {
+                  c->lo[4] = 0;
+                  c->hi[4] = c->hi[k] - 0x80000;
+                  c->hi[k] = 0x80000;
+                  break;
+               }
+         }
+         /* drawing stops at an invalid command (Vdp1DrawCommands) */
+         if (type >= 0xC)
+         {
+            vdp1time_end = t;
+            return Vdp1TimeIndex();
          }
 
          switch (type)
@@ -402,7 +427,7 @@ void Vdp1TimeLine(void)
 static int Vdp1TimeReads(const Vdp1TimeCmd *c, u32 a)
 {
    int k;
-   for (k = 0; k < 4; k++)
+   for (k = 0; k < 5; k++)
       if (a >= c->lo[k] && a < c->hi[k])
          return 1;
    return 0;

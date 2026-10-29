@@ -102,7 +102,7 @@ extern int Vdp1ListIncomplete;
 
 /* VDP1 RAM read at the chip's time for lists the CPU races (vdp1time.c) */
 extern int vdp1time_inflight;
-extern u32 vdp1time_lines;
+extern u64 vdp1time_lines;
 int Vdp1TimeDrawStart(void);
 void Vdp1TimeWrite(u32 addr, int size);
 void Vdp1TimeLine(void);
