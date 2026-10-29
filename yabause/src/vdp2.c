@@ -459,6 +459,8 @@ void Vdp2VBlankIN(void) {
 #ifdef YAB_PROFILE
 #undef Vdp2VBlankIN
 #endif
+   /* the frame changes here: a list modelled as still drawing is complete first */
+   if (vdp1time_inflight) Vdp1TimeFinish();
    memcpy(&vdp2_vblank_regs, Vdp2Regs, sizeof(Vdp2));
    vdp2_vblank_regs_valid = 1;
    if (!(Vdp1Regs->FBCR & 2) || Vdp1External.changerequest)
@@ -514,6 +516,7 @@ void Vdp2HBlankIN(void) {
 #ifdef YAB_PROFILE
 #undef Vdp2HBlankIN
 #endif
+   if (vdp1time_inflight) Vdp1TimeLine();
    Vdp2Regs->TVSTAT |= 0x0004;
    ScuSendHBlankIN();
 
@@ -968,6 +971,7 @@ void Vdp2VBlankOUT(void) {
 #ifdef YAB_PROFILE
 #undef Vdp2VBlankOUT
 #endif
+   Vdp1TimeVBlankOut();
    static int framestoskip = 0;
    static int framesskipped = 0;
    static int skipnextframe = 0;

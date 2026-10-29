@@ -100,6 +100,16 @@ extern int Vdp1ListIncomplete;
 #define VDP1_RAM_MARK(addr) (Vdp1RamDirty[((addr) >> 17) & 3] |= 1u << (((addr) >> 12) & 31))
 #define VDP1_RAM_MARK_ALL() memset(Vdp1RamDirty, 0xFF, sizeof(Vdp1RamDirty))
 
+/* VDP1 RAM read at the chip's time for lists the CPU races (vdp1time.c) */
+extern int vdp1time_inflight;
+void Vdp1TimeDrawStart(void);
+void Vdp1TimeWrite(u32 addr, int size);
+void Vdp1TimeLine(void);
+void Vdp1TimeFinish(void);
+void Vdp1TimeVBlankOut(void);
+void Vdp1TimeDiscard(void);
+void Vdp1TimeStats(void);
+
 u8 FASTCALL	Vdp1RamReadByte(u32);
 u16 FASTCALL	Vdp1RamReadWord(u32);
 u32 FASTCALL	Vdp1RamReadLong(u32);
