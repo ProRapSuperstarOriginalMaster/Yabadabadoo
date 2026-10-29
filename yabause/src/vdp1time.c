@@ -145,6 +145,8 @@ static double Vdp1TimeLineCost(s32 x0, s32 y0, s32 x1, s32 y1, int aa, int user,
    if ((x0 < bx0 && x1 < bx0) || (x0 > bx1 && x1 > bx1) || (y0 < by0 && y1 < by0) || (y0 > by1 && y1 > by1))
       return 12 + pix * (1 + 48 / 256.0);
    steps = len + 1 + (aa ? (adx < ady ? adx : ady) : 0);
+   if (x0 >= bx0 && x0 <= bx1 && x1 >= bx0 && x1 <= bx1 && y0 >= by0 && y0 <= by1 && y1 >= by0 && y1 <= by1)
+      return 12 + steps * pix * (1 + 48 / 256.0);   /* wholly inside: never leaves it */
    /* the part of the segment inside the clip box (Liang-Barsky) */
    {
       const double p[4] = { -dx, dx, -dy, dy };
