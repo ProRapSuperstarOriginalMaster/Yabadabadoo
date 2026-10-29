@@ -1452,6 +1452,10 @@ int YabSaveState(const char *filename)
 //    [sh2core.c] frc.div changed to frc.shift
 //    [sh2core.c] wdt probably needs to be written as well
 
+// 0: states carry no screen thumbnail (width and height 0), so their size
+// doesn't depend on the current resolution
+int YabStateThumbnail = 1;
+
 int YabSaveStateStream(void ** stream)
 {
    u32 i;
@@ -1524,11 +1528,14 @@ int YabSaveStateStream(void ** stream)
    MemStateWrite((void *)&yabsys.CurSH2FreqType, sizeof(int), 1, stream);
    MemStateWrite((void *)&yabsys.IsPal, sizeof(int), 1, stream);
 
-   VIDCore->GetGlSize(&outputwidth, &outputheight);
+   if (YabStateThumbnail)
+      VIDCore->GetGlSize(&outputwidth, &outputheight);
+   else
+      outputwidth = outputheight = 0;
 
    totalsize=outputwidth * outputheight * sizeof(u32);
 
-   if ((buf = (u8 *)malloc(totalsize)) == NULL)
+   if ((buf = (u8 *)malloc(totalsize ? totalsize : 1)) == NULL)
    {
       return -2;
    }
@@ -1810,7 +1817,7 @@ int YabLoadStateStream(const void * stream, size_t size_stream)
 
    totalsize=outputwidth * outputheight * sizeof(u32);
 
-   if ((buf = (u8 *)malloc(totalsize)) == NULL)
+   if ((buf = (u8 *)malloc(totalsize ? totalsize : 1)) == NULL)
    {
       return -2;
    }

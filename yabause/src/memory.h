@@ -420,6 +420,7 @@ int YabSaveState(const char *filename);
 int YabLoadState(const char *filename);
 int YabSaveStateSlot(const char *dirpath, u8 slot);
 int YabLoadStateSlot(const char *dirpath, u8 slot);
+extern int YabStateThumbnail;
 int YabSaveStateStream(void ** stream);
 int YabLoadStateStream(const void * stream, size_t size_stream);
 int YabSaveStateBuffer(void **buffer, size_t *size);

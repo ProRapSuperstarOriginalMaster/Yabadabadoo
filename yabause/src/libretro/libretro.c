@@ -853,6 +853,9 @@ size_t retro_serialize_size(void)
    if (no_bios_screen)
       return 0;
 
+   /* States have no thumbnail (YabStateThumbnail), so this is the same before
+    * the first retro_run() as in game: NextUI's minarch loads an auto-resume
+    * state right after loading the game into a buffer of this size */
    ScspMuteAudio(SCSP_MUTE_SYSTEM);
    YabSaveStateBuffer(NULL, &size);
    ScspUnMuteAudio(SCSP_MUTE_SYSTEM);
@@ -872,17 +875,35 @@ bool retro_serialize(void *data, size_t size)
    int error = YabSaveStateBuffer (&buffer, &out_size);
    ScspUnMuteAudio(SCSP_MUTE_SYSTEM);
 
-   memcpy(data, buffer, size);
+   if (error || out_size > size)
+   {
+      free(buffer);
+      return false;
+   }
+   memcpy(data, buffer, out_size);
+   memset((u8 *)data + out_size, 0, size - out_size);
 
    free(buffer);
 
-   return !error;
+   return true;
 }
 
 bool retro_unserialize(const void *data, size_t size)
 {
    if (no_bios_screen)
       return false;
+   /* The state may be shorter than the buffer: states of older versions have
+    * a thumbnail of the screen at that time, and a frontend can pass a buffer
+    * of the current serialize size. The header has the state's own size */
+   if (size >= 12 && !memcmp(data, "YSS", 3))
+   {
+      u32 version, body;
+      memcpy(&version, (const u8 *)data + 4, 4);
+      memcpy(&body, (const u8 *)data + 8, 4);
+      size_t total = (size_t)body + (version > 1 ? 0x14 : 0xC);
+      if (total < size)
+         size = total;
+   }
    ScspMuteAudio(SCSP_MUTE_SYSTEM);
    int error = YabLoadStateBuffer(data, size);
    ScspUnMuteAudio(SCSP_MUTE_SYSTEM);
@@ -1439,6 +1460,7 @@ void retro_init(void)
    const char *dir = NULL;
 
    log_cb                   = NULL;
+   YabStateThumbnail        = 0;
    perf_get_cpu_features_cb = NULL;
    game_width               = 320;
    game_height              = 240;
