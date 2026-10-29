@@ -617,10 +617,6 @@ void Vdp1TimeFinish(void)
       Vdp1ListIncomplete = incomplete;
       Vdp1External.manualerase = erase;
    }
-   /* the list has ended: draw end, as Vdp1Draw reports it for other lists */
-   Vdp1Regs->EDSR |= 2;
-   Vdp1Regs->COPR = Vdp1Regs->addr >> 3;
-   ScuSendDrawEnd();
    if (vdp1time_mode == 2 && raced)
       fprintf(stderr, "vdp1time: frame %u: list drawn as the chip read it (%d writes, %d bytes as read before them)\n",
               vdp1time_frame, vdp1time_nwrites, npatch);
@@ -631,6 +627,12 @@ void Vdp1TimeFinish(void)
       T1WriteByte(Vdp1Ram, patch_addr[i], patch_live[i]);
       VDP1_RAM_MARK(patch_addr[i]);
    }
+
+   /* the list has ended: draw end, as Vdp1Draw reports it for other lists
+      (after the live RAM is back: a DMA started by the draw end sees it) */
+   Vdp1Regs->EDSR |= 2;
+   Vdp1Regs->COPR = Vdp1Regs->addr >> 3;
+   ScuSendDrawEnd();
 }
 
 /* A state load or reset: the RAM the journal describes is gone (a list not
