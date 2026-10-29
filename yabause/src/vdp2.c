@@ -1763,7 +1763,9 @@ int Vdp2LoadState(const void * stream, UNUSED int version, int size)
 {
    // Read registers
    MemStateRead((void *)Vdp2Regs, sizeof(Vdp2), 1, stream);
-   vdp1_draw_pending = 1;
+   /* states hold no framebuffers: draw the list again at the next VBlank-OUT,
+      unless the state's list is still drawing (vdp1time.c resumed it) */
+   vdp1_draw_pending = !vdp1time_inflight;
    Vdp2ExactSkipInvalidate();
 
    // Read VDP2 ram
