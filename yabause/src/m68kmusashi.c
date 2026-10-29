@@ -88,6 +88,9 @@ int m68k_idle_skip = 1;
 #define PROBE_CYCLES    3000    /* give up a probe after this many cycles */
 #define PROBE_WAIT_CYCLES 30000 /* or, waiting to relearn a loop, after this many */
 #define IDLE_REPROBE    4       /* slices between probes while in a loop whose values changed */
+#define PROBE_SLICE     716     /* the probe intervals count 68K time in slices of a line (they were
+                                   tuned with one call a line; the recompiler now calls ten times a
+                                   line, and probing ten times as often doubled the 68K's cost) */
 
 typedef struct
 {
@@ -128,9 +131,24 @@ static u32 stat_steps_found, stat_steps_fail, stat_fail_reason[4];
 static double stat_now(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return ts.tv_sec + ts.tv_nsec * 1e-9; }
 static int idle_nloops;
 static u32 idle_clock;                   /* counts slices, for replacing the least recently used loop */
-static u32 probe_wait, probe_interval = 16;
+static u32 probe_wait, probe_interval = 16;   /* probe_wait: 68K cycles since the last probe */
 static u32 relearn_interval = IDLE_REPROBE;   /* doubles while relearning fails */
-static u32 relearn_sig = 0xFFFFFFFF;           /* the loop's inputs at the previous slice */
+static u32 relearn_sig = 0xFFFFFFFF;           /* the loop's inputs when last compared */
+static u32 relearn_wait;                       /* 68K cycles run since then */
+
+/* A line's 68K chunks that scsp.c runs one right after the other, with
+   nothing else run in between (M68KMusashiIdleChain). Once one of them is
+   skipped in a loop, the next is skipped in the same loop without checking
+   it again: nothing the check looks at can have changed. The 68K is still
+   at the same PC (so the loops before it in the list still don't hold it,
+   when none of them did); the loop's inputs are sound RAM and SCSP
+   registers, which only the SH-2 side, the SCSP's timers and the 68K's own
+   accesses change, and the skip writes only the loop's counters, which are
+   never inputs. Calling idle_skip() once per chunk keeps the counters,
+   vphase, lastuse and idle_clock as they were. */
+static int idle_chain;
+static IdleLoop *idle_last;                    /* the loop the chain's last chunk was skipped in */
+static u32 stat_chain;
 
 /* probe log: registers before each instruction and the data accesses it made.
    A probe runs over as many time slices as it needs (an iteration can be
@@ -585,6 +603,7 @@ static void idle_resume(IdleLoop *l)
 static void idle_resume_all(void)
 {
    int i;
+   idle_last = NULL;
    for (i = 0; i < idle_nloops; i++)
       if (idle_loops[i].vvalid)
          idle_resume(&idle_loops[i]);
@@ -609,6 +628,8 @@ static void idle_report(void)
               idle_loops[i].nreads, idle_loops[i].ncounters, idle_loops[i].iter_cycles);
    fprintf(stderr, " last reject: %s; probes %u (found %u) steps %u classify %u checks %u\n", probe_reject ? probe_reject : "-",
            stat_probes, stat_found, stat_psteps, stat_classify, stat_checks);
+   fprintf(stderr, "  chained skips %u\n", stat_chain);
+   stat_chain = 0;
    fprintf(stderr, "  time: probe %.1f ms, run %.1f ms, check %.1f ms\n", stat_tprobe * 1e3, stat_trun * 1e3, stat_tcheck * 1e3);
    fprintf(stderr, "  steps in found probes %u, failed %u; fails: steps %u overflow %u stopped %u cycles %u\n", stat_steps_found, stat_steps_fail,
            stat_fail_reason[0], stat_fail_reason[1], stat_fail_reason[2], stat_fail_reason[3]);
@@ -626,12 +647,22 @@ static void idle_report(void)
    idle_skipped = idle_run = 0;
 }
 
+/* on: the calls from now on follow each other directly (one line's 68K
+   chunks, scsp.c), until it is called with off */
+void M68KMusashiIdleChain(int on)
+{
+   idle_chain = on;
+   idle_last = NULL;
+}
+
 void M68KMusashiIdleReset(void)
 {
+   idle_last = NULL;
    probe_session = 0;
    relearn_interval = IDLE_REPROBE;
    idle_nloops = 0;
    probe_wait = 0;
+   relearn_wait = 0;
    probe_interval = 16;
 }
 
@@ -658,12 +689,24 @@ static s32 FASTCALL M68KMusashiExec(s32 cycle) {
          idle_clock++;
       IdleLoop *relearn = NULL;
       stat_checks++;
+      if (idle_last)
+      {
+         /* the chunk before this one, right before it, was skipped */
+         stat_chain++;
+         idle_skip(idle_last, cycle);
+         idle_skipped += cycle;
+         return cycle;
+      }
       for (i = 0; i < idle_nloops; i++)
       {
          const int m = idle_match(&idle_loops[i], pc);
          if (m > 0 && idle_env != 2 && idle_skip(&idle_loops[i], cycle))   /* 2: learn only (tests) */
          {
             idle_skipped += cycle;
+            /* a loop before it that holds the PC (-1) might hold it next
+               time: its inputs could include this loop's counters */
+            if (idle_chain && !relearn)
+               idle_last = &idle_loops[i];
             return cycle;
          }
          if (m)
@@ -671,13 +714,18 @@ static s32 FASTCALL M68KMusashiExec(s32 cycle) {
       }
       /* it runs, from where the skipped time has got to */
       idle_resume_all();
-      ++probe_wait;
-      if (relearn)
+      probe_wait += cycle;
+      relearn_wait += cycle;
+      if (relearn && relearn_wait < PROBE_SLICE)
+         relearn = NULL;
+      else if (relearn)
       {
-         /* relearn once its inputs have stayed the same for a slice: while
-            they change, the driver is busy and a probe would not find it
-            idle */
+         /* relearn once its inputs have stayed the same for a line's 68K
+            time: while they change, the driver is busy and a probe would
+            not find it idle (compared every call, a tenth of a line, the
+            probes started in busy code and ran three times as long) */
          u32 sig = 0x9E3779B9;
+         relearn_wait = 0;
          for (i = 0; i < relearn->nreads; i++)
             sig = (sig ^ idle_read(relearn->raddr[i], relearn->rsize[i])) * 0x01000193;
          if (sig != relearn_sig)
@@ -686,7 +734,7 @@ static s32 FASTCALL M68KMusashiExec(s32 cycle) {
             relearn = NULL;
          }
       }
-      if (probe_wait >= probe_interval || (relearn && probe_wait >= relearn_interval))
+      if (probe_wait >= probe_interval * PROBE_SLICE || (relearn && probe_wait >= relearn_interval * PROBE_SLICE))
       {
          probe_wait = 0;
          if (cycle + idle_debt > 0)
@@ -788,6 +836,7 @@ static void FASTCALL M68KMusashiSetIRQ(s32 level) {
 /* the SH2 wrote to sound RAM: forget the loops whose code it changed */
 static void FASTCALL M68KMusashiWriteNotify(u32 address, u32 size) {
    int i;
+   idle_last = NULL;
    address &= 0x7FFFF;
    for (i = 0; i < idle_nloops; i++)
       if (address < idle_loops[i].hi && idle_loops[i].lo < address + size)

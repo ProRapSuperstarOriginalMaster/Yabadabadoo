@@ -109,6 +109,9 @@ void M68KStop(void);
 void ScspReset(void);
 int ScspChangeVideoFormat(int type);
 void M68KExec(s32 cycles);
+extern u32 m68k_owed_decilines;    // the recompiler's decilines whose 68K chunks are owed (linkage_arm.s)
+extern u32 m68k_line_cycles[2];    // the 68K's cycles a line: cycles, hundredths (linkage_arm.s, each frame)
+void M68KExecLastDeciline(void);   // the recompiler's line end: the owed chunks, then the line's last
 void ScspExec(void);
 void ScspConvert32uto16s(s32 *srcL, s32 *srcR, s16 *dst, u32 len);
 void ScspReceiveCDDA(const u8 *sector);

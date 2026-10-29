@@ -1701,11 +1701,49 @@ static volatile u32 m68kq_head, m68kq_tail; // next entry to queue / to run
 static void M68KQueueDrain (void);
 static void M68KThreadStop (void);
 
+/* The 68K chunks the recompiler's frame loop owes: one per deciline since the
+   68K last ran (linkage_arm.s counts them in m68k_owed_decilines; their
+   lengths follow from the 68K's cycles a line, m68k_line_cycles = cycles and
+   hundredths, set at each frame's start, in the order they were owed, so they
+   are the same as when they were worked out at each deciline, without a call
+   from the recompiler's loop for each). They run, still one Musashi call each (a
+   merged call is not the same: an interrupt's cycles are charged at the end of
+   the call), before anything touches sound RAM, the SCSP or the 68K
+   (M68KJobWait; M68KQueuePush of other work) and before the line's last chunk
+   (M68KExec): the same as running the 68K after every deciline, as the
+   interpreter's loop does, at one queue entry a line instead of ten. They run
+   one right after the other, so once one is an idle skip the rest are too
+   (M68KMusashiIdleChain). */
+#ifdef HAVE_MUSASHI
+#define M68K_IDLE_CHAIN(on) M68KMusashiIdleChain(on)
+#else
+#define M68K_IDLE_CHAIN(on)
+#endif
+#define M68K_OWED_MAX 10
+u32 m68k_owed_decilines;
+u32 m68k_line_cycles[2] = { 716, 20 };
+static u32 m68k_deciline_frac;             // 1/1000 cycles
+static void M68KPayOwed (void);
+
+/* the length of the next deciline's chunk; inc = the 68K's cycles a
+   deciline in 1/1000 */
+static INLINE s32
+M68KDecilineCycles (u32 inc)
+{
+  u32 c;
+  m68k_deciline_frac += inc;
+  c = m68k_deciline_frac / 1000;
+  m68k_deciline_frac -= c * 1000;
+  return c;
+}
+
 /* Called by everything on the emulation thread that touches sound RAM, the
    SCSP or the 68K */
 static INLINE void
 M68KJobWait (void)
 {
+  if (UNLIKELY(m68k_owed_decilines))
+    M68KPayOwed();
   if (UNLIKELY(m68kq_head != __atomic_load_n(&m68kq_tail, __ATOMIC_ACQUIRE) ||
                __atomic_load_n(&m68k_pending_mint, __ATOMIC_ACQUIRE)))
     M68KQueueDrain();
@@ -5303,13 +5341,13 @@ M68KExecInline (s32 cycles)
 // delivered at the next drain, and the pipeline then turns itself off for
 // the session. YAB_M68K_THREAD=0/1 overrides the option (tests).
 
-enum { M68KQ_TIMER, M68KQ_TIMER_ONLY, M68KQ_GEN, M68KQ_EXEC };
+enum { M68KQ_TIMER, M68KQ_TIMER_ONLY, M68KQ_GEN, M68KQ_EXEC, M68KQ_EXECS };
 /* the frame's sample rendering, queued (M68KQ_GEN, arg = slot) */
 #define M68KQ_GENS 8
 static struct { u32 pos, len, cdstart, cdlen; } m68kq_gen[M68KQ_GENS];
 static u32 m68kq_gens;                    // GEN entries queued so far
 static u32 m68kq_gen_entry;               // queue index of the last one
-#define M68KQ_SIZE 1024                   // > 3 frames of lines
+#define M68KQ_SIZE 8192                   // > 3 frames of decilines (a power of 2)
 static struct { s32 type, arg; } m68kq[M68KQ_SIZE];
 static volatile int m68kq_lock;           // held while an entry runs
 static int m68k_thread_on = -1;           // -1: not decided yet
@@ -5341,6 +5379,15 @@ M68KQueueRunOne (void)
   case M68KQ_EXEC:
     M68KExecInline(arg);
     break;
+  case M68KQ_EXECS:  // owed chunks (M68KPayOwed): count, which ones are 1 longer, base length
+  {
+    s32 i, n = arg & 15, longer = (arg >> 4) & 0x3FF, base = arg >> 16;
+    M68K_IDLE_CHAIN(1);
+    for (i = 0; i < n; i++)
+      M68KExecInline(base + ((longer >> i) & 1));
+    M68K_IDLE_CHAIN(0);
+    break;
+  }
   case M68KQ_TIMER:
     scsp_update_timer(arg);
     scsp_update_monitor();
@@ -5516,7 +5563,10 @@ M68KQueueDrainTo (u32 idx)
 static INLINE void
 M68KQueuePush (s32 type, s32 arg)
 {
-  u32 h = m68kq_head;
+  u32 h;
+  if (type != M68KQ_EXEC && type != M68KQ_EXECS && m68k_owed_decilines)
+    M68KPayOwed();  // the 68K's owed chunks come first
+  h = m68kq_head;
   if (h - __atomic_load_n(&m68kq_tail, __ATOMIC_ACQUIRE) >= M68KQ_SIZE)
     M68KQueueDrain();
   m68kq[h % M68KQ_SIZE].type = type;
@@ -5566,6 +5616,8 @@ M68KExec (s32 cycles)
 #undef M68KExec
 #endif
 {
+  if (m68k_owed_decilines)
+    M68KPayOwed();
   if (UNLIKELY(m68k_thread_on < 0))
     M68KThreadDecide();
   if (m68k_thread_on && !__atomic_load_n(&m68k_pending_mint, __ATOMIC_ACQUIRE))
@@ -5575,6 +5627,44 @@ M68KExec (s32 cycles)
   }
   M68KJobWait();
   M68KExecInline(cycles);
+}
+
+/* The recompiler's line end (linkage_arm.s nextline): the line's last
+   deciline, after the owed ones */
+void
+M68KExecLastDeciline (void)
+{
+  if (m68k_owed_decilines)
+    M68KPayOwed();
+  M68KExec(M68KDecilineCycles(m68k_line_cycles[0] * 100 + m68k_line_cycles[1]));
+}
+
+static void
+M68KPayOwed (void)
+{
+  const u32 inc = m68k_line_cycles[0] * 100 + m68k_line_cycles[1];
+  const s32 base = inc / 1000;   // a chunk is base or base + 1 cycles (71/72)
+  u32 i, n = m68k_owed_decilines;
+  m68k_owed_decilines = 0;
+  if (UNLIKELY(m68k_thread_on < 0))
+    M68KThreadDecide();
+  if (m68k_thread_on && !__atomic_load_n(&m68k_pending_mint, __ATOMIC_ACQUIRE) && base < 0x8000)
+  {
+    while (n)
+    {
+      u32 k = n < M68K_OWED_MAX ? n : M68K_OWED_MAX, longer = 0;
+      for (i = 0; i < k; i++)
+        longer |= (M68KDecilineCycles(inc) - base) << i;
+      M68KQueuePush(M68KQ_EXECS, (base << 16) | (longer << 4) | k);
+      n -= k;
+    }
+    return;
+  }
+  M68KJobWait();
+  M68K_IDLE_CHAIN(1);
+  for (i = 0; i < n; i++)
+    M68KExecInline(M68KDecilineCycles(inc));
+  M68K_IDLE_CHAIN(0);
 }
 
 void new_scsp_run_sample()

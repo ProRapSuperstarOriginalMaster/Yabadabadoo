@@ -376,15 +376,18 @@ u32 FASTCALL Cs2ReadLong(SH2_struct *sh, u32 addr) {
                   // transfer data
                   if (Cs2Area->datatranstype != CDB_DATATRANSTYPE_INVALID)
                   {
-                     // get sector
+                     // get sector: Get Sector Data / Get Then Delete Sector
+                     // Data start at the sector offset the command asked for
+                     // (datatranssectpos); reading from the partition's first
+                     // sector made VF2 play one sector of a voice over and over
 
                      // Make sure we still have sectors to transfer
                      if (Cs2Area->datanumsecttrans < Cs2Area->datasectstotrans)
                      {
                         // Transfer Data
-                        const u8 *ptr = &Cs2Area->datatranspartition->block[Cs2Area->datanumsecttrans]->data[Cs2Area->datatransoffset];
+                        const u8 *ptr = &Cs2Area->datatranspartition->block[Cs2Area->datatranssectpos + Cs2Area->datanumsecttrans]->data[Cs2Area->datatransoffset];
 
-                        if (Cs2Area->datatranspartition->block[Cs2Area->datanumsecttrans] == NULL)
+                        if (Cs2Area->datatranspartition->block[Cs2Area->datatranssectpos + Cs2Area->datanumsecttrans] == NULL)
                         {
                            CDLOG("cs2\t: datatranspartition->block[Cs2Area->datanumsecttrans] was NULL");
                            return 0;
@@ -400,7 +403,7 @@ u32 FASTCALL Cs2ReadLong(SH2_struct *sh, u32 addr) {
                         Cs2Area->datatransoffset += 4;
 
                         // Make sure we're not beyond the sector size boundary
-                        if (Cs2Area->datatransoffset >= Cs2Area->datatranspartition->block[Cs2Area->datanumsecttrans]->size)
+                        if (Cs2Area->datatransoffset >= Cs2Area->datatranspartition->block[Cs2Area->datatranssectpos + Cs2Area->datanumsecttrans]->size)
                         {
                            Cs2Area->datatransoffset = 0;
                            Cs2Area->datanumsecttrans++;
@@ -519,8 +522,8 @@ void FASTCALL Cs2RapidCopyT1(void *dest, u32 count)
 
       while (count > 0 && Cs2Area->datanumsecttrans < Cs2Area->datasectstotrans)
       {
-         const u8 *src = &Cs2Area->datatranspartition->block[Cs2Area->datanumsecttrans]->data[Cs2Area->datatransoffset];
-         const u32 size = Cs2Area->datatranspartition->block[Cs2Area->datanumsecttrans]->size;
+         const u8 *src = &Cs2Area->datatranspartition->block[Cs2Area->datatranssectpos + Cs2Area->datanumsecttrans]->data[Cs2Area->datatransoffset];
+         const u32 size = Cs2Area->datatranspartition->block[Cs2Area->datatranssectpos + Cs2Area->datanumsecttrans]->size;
          const u32 max = size - Cs2Area->datatransoffset;
          const u32 copy = (max < count*4) ? max : count*4;
          memcpy(dest8, src, copy);
@@ -588,8 +591,8 @@ void FASTCALL Cs2RapidCopyT2(void *dest, u32 count)
 
       while (count > 0 && Cs2Area->datanumsecttrans < Cs2Area->datasectstotrans)
       {
-         const u8 *src = &Cs2Area->datatranspartition->block[Cs2Area->datanumsecttrans]->data[Cs2Area->datatransoffset];
-         const u32 size = Cs2Area->datatranspartition->block[Cs2Area->datanumsecttrans]->size;
+         const u8 *src = &Cs2Area->datatranspartition->block[Cs2Area->datatranssectpos + Cs2Area->datanumsecttrans]->data[Cs2Area->datatransoffset];
+         const u32 size = Cs2Area->datatranspartition->block[Cs2Area->datatranssectpos + Cs2Area->datanumsecttrans]->size;
          const u32 max = size - Cs2Area->datatransoffset;
          const u32 copy = (max < count*4) ? max : count*4;
          u32 i = 0;
@@ -2451,14 +2454,28 @@ static INLINE void CalcSectorOffsetNumber(u32 bufno, u32 *sectoffset, u32 *sectn
 {
    if (*sectoffset == 0xFFFF)
    {
-      // Last sector 
-      CDLOG("FIXME - Sector offset of 0xFFFF not supported\n");
+      // Last sector
+      *sectoffset = Cs2Area->partition[bufno].numblocks - 1;
    }
-   else if (*sectnum == 0xFFFF)
+   if (*sectnum == 0xFFFF)
    {
       // From sectoffset to last sector in partition
       *sectnum = Cs2Area->partition[bufno].numblocks - *sectoffset;
    }
+}
+
+/* The transfer reads the sectors from the offset on: a request that doesn't
+   fit in the partition is refused (wait status, as Mednafen does) */
+static INLINE int SectorRangeBad(u32 bufno, u32 sectoffset, u32 sectnum)
+{
+   u32 n = Cs2Area->partition[bufno].numblocks;
+   if (sectnum == 0 || sectoffset >= n || sectnum > n - sectoffset)
+   {
+      doCDReport(CDB_STAT_WAIT);
+      Cs2Area->reg.HIRQ |= CDB_HIRQ_CMOK;
+      return 1;
+   }
+   return 0;
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -2493,6 +2510,8 @@ void Cs2GetSectorData(void)
    }
 
    CalcSectorOffsetNumber(gsdbufno, &gsdsectoffset, &gsdsectnum);
+   if (SectorRangeBad(gsdbufno, gsdsectoffset, gsdsectnum))
+      return;
 
    // Setup Data Transfer
    Cs2Area->cdwnum = 0;
@@ -2594,6 +2613,8 @@ void Cs2GetThenDeleteSectorData(void)
    }
 
    CalcSectorOffsetNumber(gtdsdbufno, &gtdsdsectoffset, &gtdsdsectnum);
+   if (SectorRangeBad(gtdsdbufno, gtdsdsectoffset, gtdsdsectnum))
+      return;
 
    // Setup Data Transfer
    Cs2Area->cdwnum = 0;

@@ -25,12 +25,14 @@
 */
 
 #include "vidsoft.h"
+#include "vidsoftquad.h"
 #include "yabprof.h"
 #include "ygl.h"
 #include "vidshared.h"
 #include "debug.h"
 #include "vdp2.h"
 #include "titan/titan.h"
+#include "vidsoftkeep.h"
 
 #ifdef HAVE_LIBGL
 #define USE_OPENGL
@@ -103,6 +105,7 @@ void VIDSoftGetGlSize(int *width, int *height);
 void VIDSoftVdp1SwapFrameBuffer(void);
 void VIDSoftVdp1EraseFrameBuffer(Vdp1* regs, u8 * back_framebuffer);
 void VidsoftDrawSprite(Vdp2 * vdp2_regs, u8 * sprite_window_mask, u8* vdp1_front_framebuffer, u8 * vdp2_ram, Vdp1* vdp1_regs, Vdp2* vdp2_lines, u8*color_ram);
+int VidsoftDrawSprite8(Vdp2 *regs, u8 *fb, Vdp1 *vdp1_regs, Vdp2 *lines, u8 *color_ram, int vdp1width); /* vidsoftsprite8.c */
 void VIDSoftGetNativeResolution(int *width, int *height, int*interlace);
 void VIDSoftVdp2DispOff(void);
 
@@ -144,6 +147,13 @@ pixel_t *dispbuffer=NULL;
 u8 *vdp1framebuffer[2]= { NULL, NULL };
 u8 *vdp1frontframebuffer;
 u8 *vdp1backframebuffer;
+/* Exact skip (vdp2.c, where both are defined: this file sits at GCC's inlining
+   limit). Bumped when the shown sprite picture may change: a frame change or
+   a new framebuffer mode (how the buffer is read); a deferred draw into the
+   shown buffer counts in vdp1_st_run. */
+extern u32 vidsoft_vdp1_front_gen;
+/* the field whose picture is on screen: drawn, or skipped as unchanged */
+extern u32 vdp2_picture_frame;
 u8 sprite_window_mask[704 * 512];
 
 static int vdp1width;
@@ -229,11 +239,7 @@ int bad_cycle_setting[6] = { 0 };
  * register; they fit easily in the static TLS space glibc keeps for dlopen),
  * and the arrays are plain statics with one copy per drawing thread,
  * picked by vdp1_tid. */
-#if defined(__GNUC__) || defined(__clang__)
-#define VDP1_TLS __thread __attribute__((tls_model("initial-exec")))
-#else
-#define VDP1_TLS
-#endif
+/* VDP1_TLS: vidsoftquad.h */
 
 /* framebuffer rows this thread draws (all when not split) */
 static VDP1_TLS int vdp1_row_lo = INT_MIN, vdp1_row_hi = INT_MAX;
@@ -452,6 +458,7 @@ typedef struct
    Vdp1 regs;
    u8 *ram;          /* snapshot of VDP1 RAM at capture */
    u32 stale[4];     /* pages of ram older than Vdp1Ram */
+   int clipx, clipy; /* the largest system clip its list draws with */
 } Vdp1Job;
 static Vdp1Job vdp1_job[2];               /* per vdp1framebuffer[] index */
 static u32 vdp1_ctx_stale[4];             /* the same for vidsoft_vdp1_thread_context.ram */
@@ -460,7 +467,8 @@ static int vdp1_lazy_active;              /* this frame: skipping with exact VDP
 static int vdp1_lazy_defer;               /* this frame's draws are deferred */
 static int vdp1_lazy_next_shown;          /* the next frame is shown */
 static int vdp1_swap_gap = 1, vdp1_since_swap; /* frames between frame changes */
-static unsigned long vdp1_st_eager, vdp1_st_captured, vdp1_st_replaced, vdp1_st_run, vdp1_st_sync, vdp1_st_backoffs;
+static unsigned long vdp1_st_eager, vdp1_st_captured, vdp1_st_replaced, vdp1_st_sync, vdp1_st_backoffs;
+unsigned long vdp1_st_run;   /* also read by vdp2.c (exact skip) */
 static int vdp1_lazy_shown, vdp1_lazy_misses, vdp1_lazy_backoff;
 
 /* With less VDP1 work than this per frame a second thread costs more than
@@ -470,18 +478,6 @@ static int vdp1_lazy_shown, vdp1_lazy_misses, vdp1_lazy_backoff;
 static void VidsoftWaitForLayerThreads(void);
 
 typedef struct { s16 x; s16 y; } vdp1vertex;
-
-typedef struct
-{
-   int pagepixelwh, pagepixelwh_bits, pagepixelwh_mask;
-   int planepixelwidth, planepixelwidth_bits, planepixelwidth_mask;
-   int planepixelheight, planepixelheight_bits, planepixelheight_mask;
-   int screenwidth;
-   int screenheight;
-   int oldcellx, oldcelly, oldcellcheck;
-   int xmask, ymask;
-   u32 planetbl[16];
-} screeninfo_struct;
 
 //////////////////////////////////////////////////////////////////////////////
 
@@ -1920,6 +1916,16 @@ static void FASTCALL Vdp2DrawScroll(vdp2draw_struct *info, Vdp2* lines, Vdp2* re
       if (!info->enable)
          continue;
 
+      /* layer-line reuse (vidsoftkeep.c): nothing this line reads changed
+       * since the last field drew it, so its Titan row was kept; the cell
+       * cache starts afresh after it */
+      if (VidsoftKeepRow(info, output_y, Y, linescrollx))
+      {
+         sinfo.oldcellcheck = -1;
+         output_y++;
+         continue;
+      }
+
       {
          /* Loop invariants for this line, hoisted out of the pixel loop. With
           * no window enabled TestBothWindow() gives the same answer for every
@@ -2113,6 +2119,7 @@ transparent:
       }
       output_y++;
    }    
+   VidsoftKeepDrawn(info, ram);
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -2382,8 +2389,10 @@ static INLINE __attribute__((always_inline)) u32 Vdp2ColorRamGetColorCMI(const i
  * Same steps and results as Vdp2DrawRotationCoefLine(). CN is the colour
  * format, BM 1 for a bitmap screen; colormode is passed through for the
  * colour lookup. Used by Panzer Dragoon, Shining Force III (bitmap) and
- * others for their rotating floors and backgrounds. */
-static INLINE __attribute__((always_inline)) void Vdp2DrawRotationKLineBody(const int CN, const int BM, const int colormode,
+ * others for their rotating floors and backgrounds. HR 1 = hi-res: the
+ * rotation is computed for rbg0width (half the screen's) pixels and each is
+ * written to two Titan pixels, as Rbg0PutHiresPixel() does. */
+static INLINE __attribute__((always_inline)) void Vdp2DrawRotationKLineBody(const int CN, const int BM, const int HR, const int colormode,
    vdp2draw_struct *info, vdp2rotationparameterfp_struct *q, screeninfo_struct *qs, fixed32 Xs, fixed32 Ys,
    Vdp2 *regs, u8 *ram, u8 *color_ram, const u8 *wintab, clipping_struct *clip, int j)
 {
@@ -2491,34 +2500,183 @@ static INLINE __attribute__((always_inline)) void Vdp2DrawRotationKLineBody(cons
          pixel = DoColorOffset(info, pixel);
       else if (post_calc == 2)
          pixel = info->PostPixelFetchCalc(info, pixel);
-      line[i].pixel = pixel;
-      line[i].meta = meta;
+      if (HR)
+      {
+         line[2 * i].pixel = line[2 * i + 1].pixel = pixel;
+         line[2 * i].meta = line[2 * i + 1].meta = meta;
+      }
+      else
+      {
+         line[i].pixel = pixel;
+         line[i].meta = meta;
+      }
    }
 }
 
-#define ROT_KLINE_FN(NAME, CN, BM) \
+#define ROT_KLINE_FN(NAME, CN, BM, HR) \
 static void NAME(vdp2draw_struct *info, vdp2rotationparameterfp_struct *q, screeninfo_struct *qs, fixed32 Xs, fixed32 Ys, \
    Vdp2 *regs, u8 *ram, u8 *color_ram, const u8 *wintab, clipping_struct *clip, int j) \
 { \
    switch (Vdp2Internal.ColorMode) \
    { \
-   case 0: Vdp2DrawRotationKLineBody(CN, BM, 0, info, q, qs, Xs, Ys, regs, ram, color_ram, wintab, clip, j); break; \
-   case 1: Vdp2DrawRotationKLineBody(CN, BM, 1, info, q, qs, Xs, Ys, regs, ram, color_ram, wintab, clip, j); break; \
-   case 2: Vdp2DrawRotationKLineBody(CN, BM, 2, info, q, qs, Xs, Ys, regs, ram, color_ram, wintab, clip, j); break; \
-   default: Vdp2DrawRotationKLineBody(CN, BM, 3, info, q, qs, Xs, Ys, regs, ram, color_ram, wintab, clip, j); break; \
+   case 0: Vdp2DrawRotationKLineBody(CN, BM, HR, 0, info, q, qs, Xs, Ys, regs, ram, color_ram, wintab, clip, j); break; \
+   case 1: Vdp2DrawRotationKLineBody(CN, BM, HR, 1, info, q, qs, Xs, Ys, regs, ram, color_ram, wintab, clip, j); break; \
+   case 2: Vdp2DrawRotationKLineBody(CN, BM, HR, 2, info, q, qs, Xs, Ys, regs, ram, color_ram, wintab, clip, j); break; \
+   default: Vdp2DrawRotationKLineBody(CN, BM, HR, 3, info, q, qs, Xs, Ys, regs, ram, color_ram, wintab, clip, j); break; \
    } \
 }
-ROT_KLINE_FN(Vdp2RotKLine4bpp, 0, 0)
-ROT_KLINE_FN(Vdp2RotKLine8bpp, 1, 0)
-ROT_KLINE_FN(Vdp2RotKLine16bppPal, 2, 0)
-ROT_KLINE_FN(Vdp2RotKLine16bppRGB, 3, 0)
-ROT_KLINE_FN(Vdp2RotKLine32bpp, 4, 0)
-ROT_KLINE_FN(Vdp2RotKLine4bppBM, 0, 1)
-ROT_KLINE_FN(Vdp2RotKLine8bppBM, 1, 1)
-ROT_KLINE_FN(Vdp2RotKLine16bppPalBM, 2, 1)
-ROT_KLINE_FN(Vdp2RotKLine16bppRGBBM, 3, 1)
-ROT_KLINE_FN(Vdp2RotKLine32bppBM, 4, 1)
+ROT_KLINE_FN(Vdp2RotKLine4bpp, 0, 0, 0)
+ROT_KLINE_FN(Vdp2RotKLine8bpp, 1, 0, 0)
+ROT_KLINE_FN(Vdp2RotKLine16bppPal, 2, 0, 0)
+ROT_KLINE_FN(Vdp2RotKLine16bppRGB, 3, 0, 0)
+ROT_KLINE_FN(Vdp2RotKLine32bpp, 4, 0, 0)
+ROT_KLINE_FN(Vdp2RotKLine4bppBM, 0, 1, 0)
+ROT_KLINE_FN(Vdp2RotKLine8bppBM, 1, 1, 0)
+ROT_KLINE_FN(Vdp2RotKLine16bppPalBM, 2, 1, 0)
+ROT_KLINE_FN(Vdp2RotKLine16bppRGBBM, 3, 1, 0)
+ROT_KLINE_FN(Vdp2RotKLine32bppBM, 4, 1, 0)
+/* hi-res: only the cases the hi-res games draw (Die Hard Arcade: 4bpp tiles;
+ * Virtua Fighter 2, Fighters Megamix: 8bpp tiles) */
+ROT_KLINE_FN(Vdp2RotKLineHr4bpp, 0, 0, 1)
+ROT_KLINE_FN(Vdp2RotKLineHr8bpp, 1, 0, 1)
 #undef ROT_KLINE_FN
+/* by [bitmap][colour format] */
+static void (*const vdp2_rot_kline[2][5])(vdp2draw_struct *, vdp2rotationparameterfp_struct *, screeninfo_struct *,
+                                          fixed32, fixed32, Vdp2 *, u8 *, u8 *, const u8 *, clipping_struct *, int) = {
+   { Vdp2RotKLine4bpp, Vdp2RotKLine8bpp, Vdp2RotKLine16bppPal, Vdp2RotKLine16bppRGB, Vdp2RotKLine32bpp },
+   { Vdp2RotKLine4bppBM, Vdp2RotKLine8bppBM, Vdp2RotKLine16bppPalBM, Vdp2RotKLine16bppRGBBM, Vdp2RotKLine32bppBM } };
+
+/* The values of one tile for Vdp2RotLeanLine() */
+struct RotLeanTile
+{
+   u32 charaddr, fxy, alpha, meta;
+   const u8 *tp;          /* the tile's 64 bytes (ROTLEAN_PAL) */
+   const u32 *palp;       /* its 256 palette entries (ROTLEAN_PAL) */
+   int kind;              /* ROTLEAN_SKIP (priority 0), ROTLEAN_PAL, ROTLEAN_ANY */
+};
+#define ROTLEAN_SKIP 0
+#define ROTLEAN_PAL 1
+#define ROTLEAN_ANY 2
+
+static INLINE __attribute__((always_inline)) void Vdp2RotLeanTileVals(vdp2draw_struct *info, u8 *ram, struct RotLeanTile *t)
+{
+   /* GetAlpha() for special colour calculation mode 0 or 1 */
+   const u32 a = (info->specialcolormode == 1 && !(info->specialcolorfunction & 1)) ? 0x3F : info->alpha;
+   const u32 cb = info->charaddr & 0x7FFFF;
+   t->charaddr = info->charaddr;
+   t->fxy = ((info->flipfunction & 2) ? 0x38 : 0) | ((info->flipfunction & 1) ? 7 : 0);
+   t->alpha = a << 24;
+   t->meta = TitanPackMeta(info->priority, info->linescreen, info->titan_shadow_type, info->titan_shadow_enabled);
+   t->tp = ram + cb;
+   t->palp = vidsoft_pal + ((info->coloroffset + info->paladdr) & vidsoft_pal_mask);
+   /* ROTLEAN_PAL: the tile doesn't wrap at the end of VRAM, so masking its
+    * address once masks each pixel's; and with no bits under the dot in the
+    * palette address and the colour RAM offset, coloroffset + (paladdr | dot)
+    * is their sum + dot, whose entries don't wrap (the mask is 1023 or 2047) */
+   t->kind = info->priority == 0 ? ROTLEAN_SKIP :
+             (cb <= 0x7FFFF - 63 && !((info->coloroffset | info->paladdr) & 0xFF)) ? ROTLEAN_PAL : ROTLEAN_ANY;
+}
+
+/* Vdp2MapCalcXYFast()'s lookup of a new tile, out of the pixel loop */
+static __attribute__((noinline)) void Vdp2RotLeanNewTile(vdp2draw_struct *info, screeninfo_struct *sinfo, Vdp2 *regs, u8 *ram,
+   int x, int y, struct RotLeanTile *t)
+{
+   Vdp2MapCalcXYFast(info, &x, &y, sinfo, regs, ram);
+   Vdp2RotLeanTileVals(info, ram, t);
+}
+
+/* For the layer-line reuse (vidsoftkeep.c): the tile lookup at (x, y) of a
+ * rotated line, which leaves the cell cache as the pixel loop does there */
+void VidsoftRotLookup(vdp2draw_struct *info, screeninfo_struct *sinfo, Vdp2 *regs, u8 *ram, int x, int y)
+{
+   struct RotLeanTile t;
+   sinfo->oldcellcheck = -1;
+   Vdp2RotLeanNewTile(info, sinfo, regs, ram, x, y, &t);
+}
+
+/* One line of the no-coefficient rotation loop of Vdp2DrawRotationFP() in the
+ * case Sega Rally draws its road-side backgrounds in: 8bpp tiles of one cell,
+ * scale 1.0, no window, special colour calculation mode 0 or 1, no colour
+ * offset, and the palette built for this frame (vidsoft_pal). Same pixels and
+ * the same tile lookup state as that loop: the same position (mulfixed() by
+ * 1.0 is the identity, dX*i is a running sum, the same modulo 2^32) and mask;
+ * the tile's values (character address, palette, flip, alpha and priority,
+ * which special priority mode 1 sets per tile) are taken again when the
+ * position enters another tile, which is when Vdp2MapCalcXY() looks one up.
+ * The pixels of one tile are drawn by an inner loop that keeps its values in
+ * registers: the tile number is (pos >> 19) & (mask >> 3), so the position
+ * is still in the tile while the bits (mask >> 3) << 19 stay the same. */
+static __attribute__((noinline)) void Vdp2RotLeanLine(vdp2draw_struct *info, vdp2rotationparameterfp_struct *p, screeninfo_struct *sinfo,
+   fixed32 Xs, fixed32 Ys, Vdp2 *regs, u8 *ram, int j)
+{
+   const u32 dX = (u32)p->dX, dY = (u32)p->dY;
+   const u32 xmask = sinfo->xmask, ymask = sinfo->ymask;
+   const u32 xbits = (xmask >> 3) << 19, ybits = (ymask >> 3) << 19;
+   const u32 opaque_zero = info->transparencyenable ? 0 : 0x100;
+   const int width = rbg0width;
+   struct PixelData *const line = TitanGetLayerLine(info->titan_which_layer, j);
+   int claimed = 0;
+   struct RotLeanTile t;
+   u32 ax = (u32)Xs + (u32)p->Xp, ay = (u32)Ys + (u32)p->Yp;
+   int old = sinfo->oldcellcheck;
+   int i = 0;
+
+   Vdp2RotLeanTileVals(info, ram, &t);
+   while (i < width)
+   {
+      const u32 x = (ax >> 16) & xmask, y = (ay >> 16) & ymask;
+      const int check = ((y >> 3) << 16) | (x >> 3);
+      if (check != old)
+      {
+         Vdp2RotLeanNewTile(info, sinfo, regs, ram, x, y, &t);
+         old = check;
+      }
+      if (claimed && t.kind == ROTLEAN_PAL)
+      {
+         /* the rest of the pixels in this tile */
+         const u8 *const tp = t.tp;
+         const u32 *const palp = t.palp;
+         const u32 fxy = t.fxy, alpha = t.alpha, meta = t.meta;
+         const u32 ax0 = ax, ay0 = ay;
+         struct PixelData *out = line + i, *const end = line + width;
+         do
+         {
+            const u32 dot = tp[(((ax >> 16) & 7) | ((ay >> 13) & 0x38)) ^ fxy];
+            if (dot | opaque_zero)
+            {
+               out->pixel = alpha | (palp[dot] & 0xFFFFFF);
+               out->meta = meta;
+            }
+            out++;
+            ax += dX;
+            ay += dY;
+         } while (out < end && !(((ax ^ ax0) & xbits) | ((ay ^ ay0) & ybits)));
+         i = out - line;
+         continue;
+      }
+      /* one pixel */
+      if (t.kind != ROTLEAN_SKIP)
+      {
+         const u32 dot = T1ReadByte(ram, (t.charaddr + ((((y & 7) << 3) | (x & 7)) ^ t.fxy)) & 0x7FFFF);
+         if (dot | opaque_zero)
+         {
+            if (!claimed)
+            {
+               /* TitanPutPixel() clears a line that is stale from an earlier
+                * frame on its first write */
+               claimed = 1;
+               if (TitanClaimLayerLine(info->titan_which_layer, j))
+                  memset(line, 0, sizeof(struct PixelData) * vdp2width);
+            }
+            line[i].pixel = t.alpha | (vidsoft_pal[(info->coloroffset + (info->paladdr | dot)) & vidsoft_pal_mask] & 0xFFFFFF);
+            line[i].meta = t.meta;
+         }
+      }
+      ax += dX;
+      ay += dY;
+      i++;
+   }
+}
 
 static void FASTCALL Vdp2DrawRotationFP(vdp2draw_struct *info, vdp2rotationparameterfp_struct *parameter, Vdp2* lines, Vdp2* regs, u8* ram, u8* color_ram, struct CellScrollData * cell_data)
 {
@@ -2567,6 +2725,21 @@ static void FASTCALL Vdp2DrawRotationFP(vdp2draw_struct *info, vdp2rotationparam
             ReadLineWindowClip(info->islinewindow, clip, &linewnd0addr, &linewnd1addr, ram, regs);
             wintab = (info->wctl & 0x2a) && rbg0width <= 1024 ? VidsoftWinTable(info->wctl, clip, j, rbg0width, winbuf) : NULL;
 
+            if (!vdp2_x_hires && !info->isbitmap && info->colornumber == 1 && info->patternwh == 1 && info->cellw == 8 &&
+                p->kx == tofixed(1) && p->ky == tofixed(1) && (info->wctl & 0xaa) == 0 && info->specialcolormode <= 1 &&
+                info->PostPixelFetchCalc == &DoNothing && Vdp2Internal.ColorMode == vidsoft_pal_mode && color_ram == vidsoft_pal_src)
+               Vdp2RotLeanLine(info, p, &sinfo, mulfixed(p->A, xmul) + mulfixed(p->B, ymul) + C,
+                  mulfixed(p->D, xmul) + mulfixed(p->E, ymul) + F, regs, ram, j);
+            /* The coefficient loop's per-line loops give the same pixels:
+             * their running dX sum is mulfixed(dX, tofixed(i)) modulo 2^32,
+             * and with screen-over 0/1 they mask the position as this loop
+             * does. They take the priority once per line, so not with
+             * special priority mode 1 (a priority bit per tile). */
+            else if (!vdp2_x_hires && p->screenover <= 1 && info->colornumber <= 4 && info->priority != 0 && info->specialprimode != 1)
+               vdp2_rot_kline[info->isbitmap ? 1 : 0][info->colornumber](info, p, &sinfo,
+                  mulfixed(p->A, xmul) + mulfixed(p->B, ymul) + C, mulfixed(p->D, xmul) + mulfixed(p->E, ymul) + F,
+                  regs, ram, color_ram, wintab, clip, j);
+            else
             for (i = 0; i < rbg0width; i++)
             {
                u32 color, dot;
@@ -2734,7 +2907,30 @@ static void FASTCALL Vdp2DrawRotationFP(vdp2draw_struct *info, vdp2rotationparam
          wintab = (info->wctl & 0x2a) && rbg0width <= 1024 ? VidsoftWinTable(info->wctl, clip, j, rbg0width, winbuf) : NULL;
          rptab = userpwindow && rbg0width <= 1024 ? VidsoftWinTable(regs->WCTLD, rpwindow, j, rbg0width, rpbuf) : NULL;
 
-         if (!vdp2_x_hires)
+         /* hi-res, coefficients per line (as below), 4bpp or 8bpp tiles, and a
+          * rotation parameter window, if any, the same along the line: one
+          * parameter for the line, chosen as the loop below chooses it per
+          * pixel; the per-line loop for half the width, each pixel written
+          * twice. Not with special priority mode 1: the priority is per tile,
+          * which that loop takes once per line. */
+         if (vdp2_x_hires && p->deltaKAx == 0 && (p2 == NULL || !p2->coefenab || p2->deltaKAx == 0) && !dotlc &&
+             !info->isbitmap && info->colornumber <= 1 && info->priority != 0 && info->specialprimode != 1 &&
+             (!userpwindow || (rptab != NULL && !memchr(rptab, !rptab[0], rbg0width))))
+         {
+            void (*const hr)(vdp2draw_struct *, vdp2rotationparameterfp_struct *, screeninfo_struct *, fixed32, fixed32,
+                             Vdp2 *, u8 *, u8 *, const u8 *, clipping_struct *, int) =
+               info->colornumber == 0 ? Vdp2RotKLineHr4bpp : Vdp2RotKLineHr8bpp;
+            if (userpwindow ? rptab[0] : !p->msb)
+            {
+               if (!p->msb)
+                  hr(info, p, &sinfo, mulfixed(p->A, xmul) + mulfixed(p->B, ymul) + C,
+                     mulfixed(p->D, xmul) + mulfixed(p->E, ymul) + F, regs, ram, color_ram, wintab, clip, j);
+            }
+            else if (p2 != NULL && !(p2->coefenab && p2->msb))
+               hr(info, p2, &sinfo2, mulfixed(p2->A, xmul2) + mulfixed(p2->B, ymul2) + C2,
+                  mulfixed(p2->D, xmul2) + mulfixed(p2->E, ymul2) + F2, regs, ram, color_ram, wintab, clip, j);
+         }
+         else if (!vdp2_x_hires)
          {
             struct RotCoefLine L;
             L.info = info; L.p = p; L.p2 = p2; L.sinfo = &sinfo; L.sinfo2 = &sinfo2;
@@ -2770,14 +2966,9 @@ static void FASTCALL Vdp2DrawRotationFP(vdp2draw_struct *info, vdp2rotationparam
                {
                   q = p2; qs = &sinfo2; Xs = L.Xsp2; Ys = L.Ysp2;
                }
-               if (q != NULL)
-               {
-                  static void (*const kline[2][5])(vdp2draw_struct *, vdp2rotationparameterfp_struct *, screeninfo_struct *,
-                                                    fixed32, fixed32, Vdp2 *, u8 *, u8 *, const u8 *, clipping_struct *, int) = {
-                     { Vdp2RotKLine4bpp, Vdp2RotKLine8bpp, Vdp2RotKLine16bppPal, Vdp2RotKLine16bppRGB, Vdp2RotKLine32bpp },
-                     { Vdp2RotKLine4bppBM, Vdp2RotKLine8bppBM, Vdp2RotKLine16bppPalBM, Vdp2RotKLine16bppRGBBM, Vdp2RotKLine32bppBM } };
-                  kline[info->isbitmap ? 1 : 0][info->colornumber](info, q, qs, Xs, Ys, regs, ram, color_ram, wintab, clip, j);
-               }
+               /* (layer-line reuse, vidsoftkeep.c: 1 = the row was kept) */
+               if (q != NULL && !VidsoftKeepRot(info, q, qs, Xs, Ys, regs, ram, wintab, j))
+                  vdp2_rot_kline[info->isbitmap ? 1 : 0][info->colornumber](info, q, qs, Xs, Ys, regs, ram, color_ram, wintab, clip, j);
             }
             else
             switch (info->colornumber)
@@ -3598,6 +3789,7 @@ static void Vdp2DrawRBG0(Vdp2* lines, Vdp2* regs, u8* ram, u8* color_ram, struct
    info.LoadLineParams = (void(*)(void *, void*, int, Vdp2*)) LoadLineParamsRBG0;
 
    Vdp2DrawRotationFP(&info, parameter, lines, regs, ram, color_ram, cell_data);
+   VidsoftKeepRotDrawn(&info, ram);
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -3747,7 +3939,8 @@ void VidsoftSpriteThread(void * data)
       {
          vidsoft_thread_context.need_draw[TITAN_SPRITE] = 0;
          YAB_PROF_TBEGIN(PROF_T_SPRITE);
-         VidsoftDrawSprite(&vidsoft_thread_context.regs, sprite_window_mask, vdp1frontframebuffer, vidsoft_thread_context.ram, &vidsoft_thread_context.vdp1regs, vidsoft_thread_context.lines, vidsoft_thread_context.color_ram);
+         if (!(vdp1pixelsize == 1 && VidsoftDrawSprite8(&vidsoft_thread_context.regs, vdp1frontframebuffer, &vidsoft_thread_context.vdp1regs, vidsoft_thread_context.lines, vidsoft_thread_context.color_ram, vdp1width)))
+            VidsoftDrawSprite(&vidsoft_thread_context.regs, sprite_window_mask, vdp1frontframebuffer, vidsoft_thread_context.ram, &vidsoft_thread_context.vdp1regs, vidsoft_thread_context.lines, vidsoft_thread_context.color_ram);
          YAB_PROF_TEND(PROF_T_SPRITE);
          YabFlagSet(vidsoft_thread_context.draw_finished[TITAN_SPRITE], 1);
          YabFlagNotify();
@@ -3783,6 +3976,7 @@ int VIDSoftInit(void)
 
    vdp1backframebuffer = vdp1framebuffer[0];
    vdp1frontframebuffer = vdp1framebuffer[1];
+   vidsoft_vdp1_front_gen++;
    {
       int i;
       for (i = 0; i < 2; i++)
@@ -4065,6 +4259,7 @@ static void VidsoftVdp1SetMode(const Vdp1 *regs)
       it composes the frame's sprites: let it finish first, so it sees what
       the single-thread path sees */
    YabFlagWait(&vidsoft_thread_context.draw_finished[TITAN_SPRITE]);
+   vidsoft_vdp1_front_gen++;
    vdp1interlace = interlace;
    vdp1width = width;
    vdp1height = height;
@@ -4246,16 +4441,28 @@ static int VidsoftModeKey(const Vdp1 *regs)
 
 /* May a new erasing job replace the pending one without drawing it? Only
  * if its erase window covers everything the old job could have changed:
- * the old erase window and the old system clip rectangle. */
-static int VidsoftEraseCovers(const Vdp1 *nw, const Vdp1 *old, int old_erase)
+ * the old erase window and the framebuffer rows and columns inside the
+ * largest system clip its list draws with. */
+/* One past the last column VidsoftVdp1Erase clears: 8-bit framebuffers
+ * count the right edge in units of 16 pixels. */
+static int VidsoftEraseRight(const Vdp1 *r)
+{
+   if (r->TVMR & 1)
+      return (r->EWRR >> 9) * 16;
+   return ((r->EWRR >> 6) & 0x3F8) + 8;
+}
+
+static int VidsoftEraseCovers(const Vdp1 *nw, const Vdp1Job *old)
 {
    int nx0 = (nw->EWLR >> 6) & 0x1F8, ny0 = nw->EWLR & 0x1FF;
-   int nx1 = ((nw->EWRR >> 6) & 0x3F8) + 8, ny1 = (nw->EWRR & 0x1FF) + 1;
+   int nx1 = VidsoftEraseRight(nw), ny1 = (nw->EWRR & 0x1FF) + 1;
+   /* double interlace draws VDP1 line y into framebuffer row y / 2 */
+   int rows = ((old->regs.FBCR & 8) ? old->clipy / 2 : old->clipy) + 1;
    if (nx0 > 0 || ny0 > 0)
       return 0;
-   if (nx1 < old->systemclipX2 + 1 || ny1 < old->systemclipY2 + 1)
+   if (nx1 < old->clipx + 1 || ny1 < rows)
       return 0;
-   if (old_erase && (nx1 < ((old->EWRR >> 6) & 0x3F8) + 8 || ny1 < (old->EWRR & 0x1FF) + 1))
+   if (old->erase && (nx1 < VidsoftEraseRight(&old->regs) || ny1 < (old->regs.EWRR & 0x1FF) + 1))
       return 0;
    return 1;
 }
@@ -4269,7 +4476,7 @@ static void VidsoftVdp1Capture(int erase)
    if ((vdp1_job[other].pending && VidsoftModeKey(&vdp1_job[other].regs) != VidsoftModeKey(Vdp1Regs)))
       VidsoftVdp1RunJob(other);
    if (j->pending && (VidsoftModeKey(&j->regs) != VidsoftModeKey(Vdp1Regs) ||
-                      !erase || !VidsoftEraseCovers(Vdp1Regs, &j->regs, j->erase)))
+                      !erase || !VidsoftEraseCovers(Vdp1Regs, j)))
       VidsoftVdp1RunJob(idx);   /* the new draw goes on top of it */
    else if (j->pending)
       vdp1_st_replaced++;
@@ -4374,6 +4581,15 @@ static void VidsoftVdp1NoteSwap(int swapped)
       vdp1_since_swap++;
 }
 
+/* A frame change asked for during the VBlank, taken at VBlank-OUT (vdp2.c):
+ * it belongs to the VBlank-IN before it, which counted no change */
+void VIDSoftVdp1SwapAtVBlankOut(void)
+{
+   if (vdp1_since_swap > 0)
+      vdp1_since_swap--;
+   VIDSoftVdp1SwapFrameBuffer();
+}
+
 void VIDSoftVdp1DrawStart()
 {
    if (vidsoft_vdp1_thread_enabled)
@@ -4394,7 +4610,7 @@ void VIDSoftVdp1DrawStart()
          if (vdp1_job[idx].pending)
          {
             if (erase && VidsoftModeKey(&vdp1_job[idx].regs) == VidsoftModeKey(Vdp1Regs) &&
-                VidsoftEraseCovers(Vdp1Regs, &vdp1_job[idx].regs, vdp1_job[idx].erase))
+                VidsoftEraseCovers(Vdp1Regs, &vdp1_job[idx]))
             {
                vdp1_job[idx].pending = 0;
                vdp1_st_replaced++;
@@ -4422,6 +4638,11 @@ void VIDSoftVdp1DrawStart()
          Vdp1External.manualerase = 0;   /* as the erase itself does */
 
       Vdp1FakeDrawCommands(Vdp1Ram, Vdp1Regs);
+      {
+         Vdp1Job *j = &vdp1_job[VidsoftFbIndex(vdp1backframebuffer)];
+         j->clipx = Vdp1FakeClipX2;   /* read only while the job is pending */
+         j->clipy = Vdp1FakeClipY2;
+      }
    }
    else
    {
@@ -4483,10 +4704,7 @@ static INLINE u32 alphablend16(u32 d, u32 s, u32 level)
 	return r|g|b;
 }
 
-typedef struct _COLOR_PARAMS
-{
-	double r,g,b;
-} COLOR_PARAMS;
+/* COLOR_PARAMS: vidsoftquad.h */
 
 VDP1_TLS COLOR_PARAMS leftColumnColor;
 
@@ -4975,6 +5193,7 @@ typedef struct {
    int dil_skip;     /* y parity that CheckDil() rejects, or -1 */
    int user_clip;    /* user clipping: 0 off, 1 inside, 2 outside */
    int fb8;          /* 8-bit framebuffer (putpixel8() instead of putpixel()) */
+   int rev;          /* drawn last line first (vidsoftquad.c) */
 } Vdp1QuadState;
 
 static int Vdp1QuadSetup(Vdp1QuadState *st, Vdp1 *regs, vdp1cmd_struct *cmd)
@@ -5049,30 +5268,10 @@ static INLINE __attribute__((always_inline)) int Vdp1QuadPut(const int drawmode,
 }
 
 /* points of the line being drawn, in iterateOverLine() order, packed as
- * x | y << 16 (both stay within +-2000) */
+ * (u16)x | y << 16 (both stay within +-2000; QuadWalk() in vidsoftquad.c) */
 static u32 quad_pt_buf[2][2048];
-#define QUAD_PT(X, Y) (((u32)(X) & 0xFFFF) | ((u32)(Y) << 16))
 
-/* per-line values for QuadPlotPoints(), passed by value so they stay in
- * registers */
-typedef struct {
-   const u32 *pts;
-   u16 *fb;
-   u8 *fb8;
-   u8 *ram;
-   Vdp1 *regs;
-   vdp1cmd_struct *cmd;
-   u32 rowaddr, colorbank, colorlut;
-   int colormode, drawmode, flip, SPD, endcodes, isTextured, untexturedColor;
-   int mesh, msbon, dil_skip, cw, interlace, width, noclip, n, user_clip;
-   int step_q, step_r, linelength, row_lo, row_hi;
-   double texturestep, xredstep, xgreenstep, xbluestep;
-} QuadLine;
-
-typedef struct {
-   int cp, vis;
-   double lr, lg, lb;
-} QuadPen;
+/* QuadLine and QuadPen: vidsoftquad.h */
 
 /* DrawLineCallback(), i.e. getpixel() then putpixel() (putpixel8() if F8),
  * for each point of a line. CM and DM are a constant colour and drawing mode
@@ -5861,7 +6060,7 @@ static void DrawLineQuad(const Vdp1QuadState *st, int x1, int y1, int x2, int y2
    const int cw = characterWidth, interlace = vdp1interlace, width = vdp1width;
    int line = (int)linenumber;
    u32 rowaddr;
-   int a, ax, ay, dx, dy, n;
+   int n;
    int noclip;
    /* currentStep = (int)k * texturestep without floating point: when
     * texturestep is cw / linelength, k * cw / linelength is tracked as
@@ -5893,56 +6092,29 @@ static void DrawLineQuad(const Vdp1QuadState *st, int x1, int y1, int x2, int y2
    }
 
    /* the walk of iterateOverLine() with greedy set; point k is plotted with i == k */
-   dx = x2 - x1;
-   dy = y2 - y1;
-   ax = (dx >= 0) ? 1 : -1;
-   ay = (dy >= 0) ? 1 : -1;
-   a = 0;
-   n = 0;
-
-   if (abs(dx) > 999 || abs(dy) > 999)
+   if (abs(x2 - x1) > 999 || abs(y2 - y1) > 999)
    {
       VDP1RLOG_L999();
       return;
    }
+   n = QuadWalk(quad_pt, x1, y1, x2, y2);
+   /* where the walk left the pen, as the fallbacks below have always had it */
+   x1 = x2;
+   y1 = y2;
 
-   if (abs(dx) > abs(dy)) {
-      if (ax != ay) dx = -dx;
-      for (; x1 != x2; x1 += ax) {
-         quad_pt[n++] = QUAD_PT(x1, y1);
-         a += dy;
-         if (abs(a) >= abs(dx)) {
-            a -= dx;
-            y1 += ay;
-            if (ax == ay) { quad_pt[n++] = QUAD_PT(x1 + ax, y1 - ay); }
-            else { quad_pt[n++] = QUAD_PT(x1, y1); }
-         }
-      }
-   } else {
-      if (ax != ay) dy = -dy;
-      for (; y1 != y2; y1 += ay) {
-         quad_pt[n++] = QUAD_PT(x1, y1);
-         a += dx;
-         if (abs(a) >= abs(dy)) {
-            a -= dy;
-            x1 += ax;
-            if (ay == ax) { quad_pt[n++] = QUAD_PT(x1, y1); }
-            else { quad_pt[n++] = QUAD_PT(x1 - ax, y1 + ay); }
-         }
-      }
+   if (st->rev)
+   {
+      /* drawn last line first (vidsoftquad.c) */
+      QuadRevLine(vdp1_tid, n, rowaddr, noclip, int_step, step_q, step_r, linelength, x1, y1, x2, y2,
+                  texturestep, xredstep, xgreenstep, xbluestep);
+      return;
    }
-   quad_pt[n++] = QUAD_PT(x2, y2);
 
    {
       QuadLine L;
       QuadPen pen;
       int lean;
 
-      if (!int_step)
-      {
-         DrawLine(x1, y1, x2, y2, 1, linenumber, texturestep, xredstep, xgreenstep, xbluestep, regs, cmd, ram, back_framebuffer);
-         return;
-      }
       L.pts = quad_pt; L.fb = fb; L.fb8 = back_framebuffer; L.ram = ram; L.regs = regs; L.cmd = cmd;
       L.rowaddr = rowaddr; L.colorbank = colorbank; L.colorlut = colorlut;
       L.colormode = colormode; L.drawmode = st->drawmode; L.flip = flip; L.SPD = SPD;
@@ -5954,6 +6126,11 @@ static void DrawLineQuad(const Vdp1QuadState *st, int x1, int y1, int x2, int y2
       L.texturestep = texturestep; L.xredstep = xredstep; L.xgreenstep = xgreenstep; L.xbluestep = xbluestep;
       pen.cp = currentPixel; pen.vis = currentPixelIsVisible;
       pen.lr = leftColumnColor.r; pen.lg = leftColumnColor.g; pen.lb = leftColumnColor.b;
+      if (!int_step)
+      {
+         DrawLine(x1, y1, x2, y2, 1, linenumber, texturestep, xredstep, xgreenstep, xbluestep, regs, cmd, ram, back_framebuffer);
+         return;
+      }
 
       if (st->fb8)
       {
@@ -6160,6 +6337,7 @@ static void drawQuad(s16 tl_x, s16 tl_y, s16 bl_x, s16 bl_y, s16 tr_x, s16 tr_y,
 
 	Vdp1QuadState quad_state;
 	int quad_fast;
+	int miny, maxy, ii;
 
    if (is_pre_clipped(tl_x, tl_y, bl_x, bl_y, tr_x, tr_y, br_x, br_y, regs))
    {
@@ -6170,7 +6348,7 @@ static void drawQuad(s16 tl_x, s16 tl_y, s16 bl_x, s16 bl_y, s16 tr_x, s16 tr_y,
    {
       /* every point drawn lies within the corners' box: nothing to do if
        * that is all in rows another thread draws */
-      int miny = tl_y, maxy = tl_y;
+      miny = tl_y; maxy = tl_y;
       if (bl_y < miny) miny = bl_y; if (bl_y > maxy) maxy = bl_y;
       if (tr_y < miny) miny = tr_y; if (tr_y > maxy) maxy = tr_y;
       if (br_y < miny) miny = br_y; if (br_y > maxy) maxy = br_y;
@@ -6195,6 +6373,7 @@ static void drawQuad(s16 tl_x, s16 tl_y, s16 bl_x, s16 bl_y, s16 tr_x, s16 tr_y,
 	characterWidth = ((cmd->CMDSIZE >> 8) & 0x3F) * 8;
    characterHeight = cmd->CMDSIZE & 0xFF;
    quad_fast = Vdp1QuadSetup(&quad_state, regs, cmd);
+   quad_state.rev = 0;
 
 	intarrays[0] = xleft; intarrays[1] = yleft;
    totalleft = iterateOverLine(tl_x, tl_y, bl_x, bl_y, 0, intarrays, storeLineCoords, regs, cmd, ram, back_framebuffer);
@@ -6239,7 +6418,16 @@ static void drawQuad(s16 tl_x, s16 tl_y, s16 bl_x, s16 bl_y, s16 tr_x, s16 tr_y,
 		leftLineStep = (double)totalleft / totalright;
 	}
 
-	for(i = 0; i < total; i++) {
+   /* a quad whose mode never reads the framebuffer is drawn last line first,
+    * skipping the points a later line wrote (vidsoftquad.c) */
+#ifndef YAB_VDP1LOG
+   if (quad_fast)
+      quad_state.rev = QuadRevStart(vdp1_tid, cmd, regs, ram, back_framebuffer, quad_state.fb8, quad_state.dil_skip,
+                                    characterWidth, vdp1interlace, vdp1width, vdp1_row_lo, vdp1_row_hi,
+                                    VDP1_ROW(miny), VDP1_ROW(maxy), quad_pt_buf[vdp1_tid]);
+#endif
+
+	for(ii = 0; ii < total; ii++) {
 
 		int xlinelength;
 
@@ -6250,6 +6438,7 @@ static void drawQuad(s16 tl_x, s16 tl_y, s16 bl_x, s16 bl_y, s16 tr_x, s16 tr_y,
 
 		COLOR_PARAMS leftToRightStep = {0,0,0};
 
+		i = quad_state.rev ? total - 1 - ii : ii;
 		{
 			/* skip lines that are all in rows another thread draws */
 			int ya = yleft[(int)(i*leftLineStep)], yb = yright[(int)(i*rightLineStep)];
@@ -7240,8 +7429,7 @@ void VIDSoftVdp2DrawEnd(void)
     * again: half the picture was frozen or black). Repeat this field's
     * lines over them instead. */
    {
-      static u32 last_drawn_frame;
-      if (vdp2_interlace && vdp2_frame_number - last_drawn_frame != 1)
+      if (vdp2_interlace && vdp2_frame_number - vdp2_picture_frame != 1)
       {
          int start_line, line_increment, y;
          Vdp2GetInterlaceInfo(&start_line, &line_increment);
@@ -7253,7 +7441,6 @@ void VIDSoftVdp2DrawEnd(void)
                       vdp2width * sizeof(pixel_t));
          }
       }
-      last_drawn_frame = vdp2_frame_number;
    }
 
    VIDSoftVdp1SwapFrameBuffer();
@@ -7378,7 +7565,9 @@ void VIDSoftVdp2DrawScreens(void)
       VidsoftBuildPalette(Vdp2ColorRam);
 
    //draw vdp2 sprite layer on a thread if sprite window is not enabled
-   if (CanUseSpriteThread() && vidsoft_num_layer_threads > 0)
+   if (vdp2_sprite_kept)
+      ; /* nothing it reads changed: its lines stay (vdp2.c) */
+   else if (CanUseSpriteThread() && vidsoft_num_layer_threads > 0)
    {
       vidsoft_thread_context.vdp1regs = *Vdp1Regs;
       vidsoft_thread_context.draw_finished[TITAN_SPRITE] = 0;
@@ -7386,7 +7575,8 @@ void VIDSoftVdp2DrawScreens(void)
       YabThreadWake(YAB_THREAD_VIDSOFT_LAYER_SPRITE);
       num_threads_dispatched++;
    }
-   else
+   /* the common 8-bit framebuffer case has a lean loop (same output) */
+   else if (!(vdp1pixelsize == 1 && VidsoftDrawSprite8(Vdp2Regs, vdp1frontframebuffer, Vdp1Regs, Vdp2Lines, Vdp2ColorRam, vdp1width)))
    {
       VidsoftDrawSprite(Vdp2Regs, sprite_window_mask, vdp1frontframebuffer, Vdp2Ram, Vdp1Regs, Vdp2Lines, Vdp2ColorRam);
    }
@@ -7529,6 +7719,7 @@ void VIDSoftVdp1SwapFrameBuffer(void)
       temp = vdp1frontframebuffer;
       vdp1frontframebuffer = vdp1backframebuffer;
       vdp1backframebuffer = temp;
+      vidsoft_vdp1_front_gen++;
       Vdp1External.manualchange = 0;
    }
 }

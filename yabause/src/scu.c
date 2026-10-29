@@ -55,6 +55,7 @@ scubp_struct * ScuBP;
 volatile ScuDmaNow_struct ScuDmaNow;
 static int incFlg[4] = { 0 };
 static void ScuTestInterruptMask(void);
+static void ScuWriteIST(u32 val);
 struct ScuDspInterface scu_dsp_inf;
 void scu_dsp_init();
 //////////////////////////////////////////////////////////////////////////////
@@ -3743,7 +3744,7 @@ void FASTCALL ScuWriteByte(u32 addr, u8 val) {
    addr &= 0xFF;
    switch(addr) {
       case 0xA7:
-         ScuRegs->IST &= (0xFFFFFF00 | val); // double check this
+         ScuWriteIST(0xFFFFFF00 | val); // double check this
          return;
       default:
          LOG("Unhandled SCU Register byte write %08X\n", addr);
@@ -3909,7 +3910,7 @@ void FASTCALL ScuWriteLong(u32 addr, u32 val) {
          ScuTestInterruptMask();
          break;
       case 0xA4:
-         ScuRegs->IST &= val;
+         ScuWriteIST(val);
          break;
       case 0xA8:
          ScuRegs->AIACK = val;
@@ -3989,6 +3990,28 @@ void ScuTestInterruptMask()
          break;
       }
    }
+}
+
+//////////////////////////////////////////////////////////////////////////////
+
+// Writing 0 to an IST bit cancels that interrupt if it is still waiting behind
+// the mask; one already passed to the master stays (as in Beetle). The BIOS's
+// mask change (0x060007C0) unmasks sources and clears their IST bits in one go:
+// Vampire Savior hangs at boot if the stale VBlank-IN and VBlank-OUT both fire.
+static void ScuWriteIST(u32 val)
+{
+   unsigned int i, n = 0;
+
+   ScuRegs->IST &= val;
+   for (i = 0; i < ScuRegs->NumberOfInterrupts; i++)
+   {
+      if (ScuRegs->interrupts[i].statusbit & ~val)
+         continue;
+      if (n != i)
+         memcpy(&ScuRegs->interrupts[n], &ScuRegs->interrupts[i], sizeof(scuinterrupt_struct));
+      n++;
+   }
+   ScuRegs->NumberOfInterrupts = n;
 }
 
 //////////////////////////////////////////////////////////////////////////////

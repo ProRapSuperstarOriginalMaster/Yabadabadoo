@@ -122,6 +122,8 @@ YabauseDynarecOneFrameExec:
 	ldr	r12, .dlptr
 	str	r0, [r12, #m68kcycles-dynarec_local-28]
 	str	r1, [r12, #m68kcenticycles-dynarec_local-28]
+	ldr	r2, .m68klcptr
+	stmia	r2, {r0, r1} /* m68k_line_cycles (scsp.c): the owed 68K chunks' lengths */
 	mov	r2, #0
 	stmia	r12, {r4, r5, r6, r7, r8, r9, sl, fp, lr}
 	sub	fp, r12, #28
@@ -223,10 +225,12 @@ master_handle_interrupts:
 	.word	decilineusec_p
 .ufpptr:
 	.word	UsecFrac_p
-.scptr:
-	.word	saved_centicycles
 .icptr:
 	.word	invalidate_count
+.m68kodptr:
+	.word	m68k_owed_decilines
+.m68klcptr:
+	.word	m68k_line_cycles
 .ccptr:
 	.word	cached_code
 	.size	YabauseDynarecOneFrameExec, .-YabauseDynarecOneFrameExec
@@ -286,6 +290,15 @@ cc_interrupt:
 	.global	cc_interrupt_master
 	.type	cc_interrupt_master, %function
 cc_interrupt_master:
+	/* the 68K runs after every deciline, as in the interpreter's loop (yabause.c): decilines
+	   0-8 are owed (m68k_owed_decilines++, scsp.c runs them when due), the line's last one
+	   runs at nextline */
+	ldr	r0, [fp, #decilinecount-dynarec_local]
+	cmp	r0, #8
+	ldrls	r1, .m68kodptr
+	ldrls	r0, [r1]
+	addls	r0, r0, #1
+	strls	r0, [r1]
 	ldr	r0, [fp, #decilinecount-dynarec_local]
 	ldr	r6, [fp, #decilinecycles-dynarec_local]
 	cmp	r0, #8
@@ -383,19 +396,8 @@ nextline:
 	lsr	r0, r10, r8
 	and	r10, r10, r9
 	bl	Cs2Exec
-	/*movw	r8, #:lower16:saved_centicycles*/
 	str	r10, [r5] /* usecfrac */
-	/*movt	r8, #:upper16:saved_centicycles*/
-	ldr	r8, .scptr
-	ldr	r1, [fp, #m68kcenticycles-dynarec_local]
-	ldr	r2, [r8]
-	ldr	r0, [fp, #m68kcycles-dynarec_local]
-	add	r2, r2, r1
-	cmp	r2, #100
-	subcs	r2, r2, #100
-	addcs	r0, r0, #1
-	str	r2, [r8] /* saved_centicycles */
-	bl	M68KExec
+	bl	M68KExecLastDeciline /* the owed decilines, then the line's last */
 	ldr	r14, [fp, #master_ip-dynarec_local]
 	eors	r1, r6, r7 /* linecount==maxlinecount ? */
 	bne	newline
@@ -608,84 +610,78 @@ jump_vaddr_r12_master:
 	.global	jump_vaddr_r0_slave
 	.type	jump_vaddr_r0_slave, %function
 jump_vaddr_r0_slave:
-	eor	r2, r0, r0, lsl #16
+	add	r0, r0, #1
 	b	jump_vaddr_slave
 	.size	jump_vaddr_r0_slave, .-jump_vaddr_r0_slave
 	.global	jump_vaddr_r1_slave
 	.type	jump_vaddr_r1_slave, %function
 jump_vaddr_r1_slave:
-	eor	r2, r1, r1, lsl #16
-	mov	r0, r1
+	add	r0, r1, #1
 	b	jump_vaddr_slave
 	.size	jump_vaddr_r1_slave, .-jump_vaddr_r1_slave
 	.global	jump_vaddr_r2_slave
 	.type	jump_vaddr_r2_slave, %function
 jump_vaddr_r2_slave:
-	mov	r0, r2
-	eor	r2, r2, r2, lsl #16
+	add	r0, r2, #1
 	b	jump_vaddr_slave
 	.size	jump_vaddr_r2_slave, .-jump_vaddr_r2_slave
 	.global	jump_vaddr_r3_slave
 	.type	jump_vaddr_r3_slave, %function
 jump_vaddr_r3_slave:
-	eor	r2, r3, r3, lsl #16
-	mov	r0, r3
+	add	r0, r3, #1
 	b	jump_vaddr_slave
 	.size	jump_vaddr_r3_slave, .-jump_vaddr_r3_slave
 	.global	jump_vaddr_r4_slave
 	.type	jump_vaddr_r4_slave, %function
 jump_vaddr_r4_slave:
-	eor	r2, r4, r4, lsl #16
-	mov	r0, r4
+	add	r0, r4, #1
 	b	jump_vaddr_slave
 	.size	jump_vaddr_r4_slave, .-jump_vaddr_r4_slave
 	.global	jump_vaddr_r5_slave
 	.type	jump_vaddr_r5_slave, %function
 jump_vaddr_r5_slave:
-	eor	r2, r5, r5, lsl #16
-	mov	r0, r5
+	add	r0, r5, #1
 	b	jump_vaddr_slave
 	.size	jump_vaddr_r5_slave, .-jump_vaddr_r5_slave
 	.global	jump_vaddr_r6_slave
 	.type	jump_vaddr_r6_slave, %function
 jump_vaddr_r6_slave:
-	eor	r2, r6, r6, lsl #16
-	mov	r0, r6
+	add	r0, r6, #1
 	b	jump_vaddr_slave
 	.size	jump_vaddr_r6_slave, .-jump_vaddr_r6_slave
 	.global	jump_vaddr_r7_slave
 	.type	jump_vaddr_r7_slave, %function
 jump_vaddr_r7_slave:
-	eor	r2, r7, r7, lsl #16
-	mov	r0, r7
+	add	r0, r7, #1
 	b	jump_vaddr_slave
 	.size	jump_vaddr_r7_slave, .-jump_vaddr_r7_slave
 	.global	jump_vaddr_r8_slave
 	.type	jump_vaddr_r8_slave, %function
 jump_vaddr_r8_slave:
-	eor	r2, r8, r8, lsl #16
-	mov	r0, r8
+	add	r0, r8, #1
 	b	jump_vaddr_slave
 	.size	jump_vaddr_r8_slave, .-jump_vaddr_r8_slave
 	.global	jump_vaddr_r9_slave
 	.type	jump_vaddr_r9_slave, %function
 jump_vaddr_r9_slave:
-	eor	r2, r9, r9, lsl #16
-	mov	r0, r9
+	add	r0, r9, #1
 	b	jump_vaddr_slave
 	.size	jump_vaddr_r9_slave, .-jump_vaddr_r9_slave
 	.global	jump_vaddr_r12_slave
 	.type	jump_vaddr_r12_slave, %function
 jump_vaddr_r12_slave:
-	eor	r2, r12, r12, lsl #16
-	mov	r0, r12
+	add	r0, r12, #1
 	b	jump_vaddr_slave
 	.size	jump_vaddr_r12_slave, .-jump_vaddr_r12_slave
 	.global	jump_vaddr_slave
 	.type	jump_vaddr_slave, %function
 jump_vaddr_slave:
-	add	r2, r2, #65536
-	add	r0, r0, #1
+	/* r0 = the slave's key, pc + 1 (pc is even). Hash the key itself, as the
+	   master path and the C side do (ht_index() in sh2_dynarec.c, also
+	   dyna_linker below): adding 0x10000 to the master's hash instead gave
+	   another bin whenever address bit 16 was set, so those lookups always
+	   missed and walked jump_in. Falls through into jump_vaddr. */
+	eor	r2, r0, r0, lsl #16
 	.size	jump_vaddr_slave, .-jump_vaddr_slave
 	.global	jump_vaddr
 	.type	jump_vaddr, %function

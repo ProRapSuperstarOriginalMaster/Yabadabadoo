@@ -65,6 +65,7 @@ struct ds_frame
 #define DS_AUDIOACT  4     /* audio buffer status active */
 #define DS_UNDERRUN  8     /* frontend reported an underrun risk */
 #define DS_DECIDED   16    /* the frameskip decision ran in this call */
+#define DS_EXACTDUPE 32    /* the picture didn't change and wasn't drawn again (exact skip) */
 
 struct ds_input
 {
@@ -453,6 +454,13 @@ void devsession_picture(const uint16_t *fb, unsigned w, unsigned h)
    }
 }
 
+/* libretro.c, before the emulation of a call: will the next call's picture be hashed?
+   (Its drawing is decided at the end of this call.) */
+int devsession_picture_wanted_next(void)
+{
+   return ds_mode == DS_FULL && (ds_pic_due || (DS_REL + 1) % 60 == 59);
+}
+
 /* the statistics lines (once a second), for libretro.c to draw into the picture */
 int devsession_stats_text(const char **l1, const char **l2)
 {
@@ -500,6 +508,7 @@ static void ds_show_stats(uint64_t t)
    }
 }
 
+/* rendered: 1 = a picture was drawn, 2 = the last picture again, unchanged (exact skip) */
 void devsession_run_end(int rendered, const uint16_t *fb, unsigned w, unsigned h)
 {
    (void)fb; (void)w; (void)h;   /* pictures are hashed in devsession_picture() */
@@ -507,8 +516,10 @@ void devsession_run_end(int rendered, const uint16_t *fb, unsigned w, unsigned h
    ds_in_run = 0;
    ds_cur.run_us = (uint32_t)(t - ds_run_start_us);
    ds_cur.main_cpu_us = (uint32_t)(now_us(CLOCK_THREAD_CPUTIME_ID) - ds_main_cpu0);
-   if (rendered)
+   if (rendered == 1)
       ds_cur.flags |= DS_RENDERED;
+   else if (rendered == 2)
+      ds_cur.flags |= DS_EXACTDUPE;
    if (ds_file)
    {
       ds_record('F', &ds_cur, sizeof(ds_cur), ds_inputs, ds_cur.n_inputs * sizeof(*ds_inputs));
@@ -537,7 +548,7 @@ void devsession_run_end(int rendered, const uint16_t *fb, unsigned w, unsigned h
    if (ds_stats)
    {
       st_runs++;
-      st_drawn += rendered != 0;
+      st_drawn += rendered != 0;   /* pictures shown, unchanged ones too */
       st_skips += (ds_cur.flags & DS_SKIPNEXT) != 0;
       st_main += ds_cur.main_cpu_us;
       st_proc += ds_cur.proc_cpu_us;

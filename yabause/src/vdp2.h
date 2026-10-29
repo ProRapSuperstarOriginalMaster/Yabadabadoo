@@ -30,7 +30,17 @@ extern u8 * Vdp2Ram;
    brought up to date (one bit a page; see VidsoftSyncRamCopy) */
 extern u32 Vdp2RamDirty[4];
 #define VDP2_RAM_MARK(addr) (Vdp2RamDirty[((addr) >> 17) & 3] |= 1u << (((addr) >> 12) & 31))
-#define VDP2_RAM_MARK_ALL() memset(Vdp2RamDirty, 0xFF, sizeof(Vdp2RamDirty))
+#define VDP2_RAM_MARK_ALL() (memset(Vdp2RamDirty, 0xFF, sizeof(Vdp2RamDirty)), \
+                             memset(vdp2_vram_vchg, 0xFF, sizeof(vdp2_vram_vchg)))
+/* Pages of VDP2 RAM (VDP2_VCHG_SHIFT) and 32-byte blocks of colour RAM written with a
+   changed value since the last drawn field (layer-line reuse, vidsoftkeep.c) */
+#ifndef VDP2_VCHG_SHIFT
+#define VDP2_VCHG_SHIFT 8   /* VRAM granularity: 256 bytes (4 KB pages were too coarse: VF2, Megamix and Sega Rally NBG2) */
+#endif
+#define VDP2_VCHG_WORDS (0x80000 >> VDP2_VCHG_SHIFT >> 5)
+extern u32 vdp2_vram_vchg[VDP2_VCHG_WORDS], vdp2_cram_vchg[4];
+#define VDP2_VRAM_VCHG(addr) (vdp2_vram_vchg[((addr) & 0x7FFFF) >> (VDP2_VCHG_SHIFT + 5)] |= 1u << (((addr) >> VDP2_VCHG_SHIFT) & 31))
+#define VDP2_CRAM_VCHG(addr) (vdp2_cram_vchg[((addr) >> 10) & 3] |= 1u << (((addr) >> 5) & 31))
 extern u8 * Vdp2ColorRam;
 
 u8 FASTCALL     Vdp2RamReadByte(u32);
@@ -401,6 +411,7 @@ extern Vdp2External_struct Vdp2External;
 int Vdp2Init(void);
 void Vdp2DeInit(void);
 void Vdp2Reset(void);
+void Vdp2Vdp1ListResumed(void);
 void Vdp2VBlankIN(void);
 void Vdp2HBlankIN(void);
 void Vdp2HBlankOUT(void);
@@ -441,6 +452,14 @@ void DisableAutoFrameSkip(void);
 #define VDP2_FRAMESKIP_ALL       2 /* skip all rendering */
 void Vdp2SetExternalFrameSkip(int mode);
 void Vdp2SetExternalFrameSkipNext(int next_shown, int lazy);
+/* Exact skip of unchanged fields (vdp2.c) */
+void Vdp2ExactSkipInvalidate(void);
+void Vdp2SetExactSkipAllowed(int allowed);
+void Vdp2ExactSkipVerifyPicture(const u16 *pic, int width, int height);
+/* The software renderer doesn't draw the sprite layer this field: nothing it
+   reads changed since it was last drawn, its lines are kept (vdp2.c) */
+extern int vdp2_sprite_kept;
+extern u32 vdp2_exact_dupes;
 void Vdp2RestoreVideoCore(void);
 void Vdp2SetVdp1DrawEveryFrame(int every);
 extern int vdp2_skip_draw;

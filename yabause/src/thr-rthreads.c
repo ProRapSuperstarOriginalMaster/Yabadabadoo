@@ -73,21 +73,27 @@ static scond_t *flag_cond;
 /* Render workers can run at a lower priority than the emulation thread,
  * which is the critical path: on two cores, waking several workers
  * otherwise preempts it. On the Miyoo, nice +10 gave Princess Crown
- * +9% game speed and a third more shown frames under frameskip. The VDP1
- * and RBG0 threads stay at normal priority: they carry the heavy 3D work
- * the emulation thread waits for, and lowering them made Panzer Dragoon
- * Saga 20% slower. */
+ * +9% game speed and a third more shown frames under frameskip. The RBG0
+ * thread stays at normal priority: lowering it (with VDP1, before the
+ * workers ran as SCHED_BATCH) made Panzer Dragoon Saga 20% slower. The VDP1
+ * threads are niced too: on two cores the polygon thread otherwise takes
+ * the core from the emulation thread while the SH-2s run (Sega Rally -3%). */
 static int WorkerNiced(unsigned int id)
 {
-	return id >= YAB_THREAD_VIDSOFT_LAYER_NBG3 && id != YAB_THREAD_VIDSOFT_VDP1 &&
-	       id != YAB_THREAD_VIDSOFT_VDP1B && id != YAB_THREAD_VIDSOFT_LAYER_RBG0;
+	return id >= YAB_THREAD_VIDSOFT_LAYER_NBG3 && id != YAB_THREAD_VIDSOFT_LAYER_RBG0;
+}
+/* The heavy 3D workers, which run as SCHED_BATCH (see batch_mode) */
+static int WorkerBatch(unsigned int id)
+{
+	return id == YAB_THREAD_VIDSOFT_VDP1 || id == YAB_THREAD_VIDSOFT_VDP1B ||
+	       id == YAB_THREAD_VIDSOFT_LAYER_RBG0;
 }
 struct thd_start { void (*func)(void *); void *arg; int nice; int cpu; int batch; int id; };
 static int worker_nice;
 
 /* Test knob YAB_AFFINITY (two-core devices): 1 = emulation thread on CPU 0,
  * all workers on CPU 1; 2 = emulation thread on CPU 0 only; 3 = emulation
- * thread on CPU 0, normal-priority workers (VDP1, RBG0) on CPU 1;
+ * thread on CPU 0, normal-priority workers (RBG0) on CPU 1;
  * 4 = normal-priority workers on CPU 1 only. */
 static int affinity_mode = -1;
 
@@ -118,8 +124,8 @@ static int WorkerCpu(unsigned int id, int niced)
 	}
 }
 
-/* With low worker priority the VDP1 and RBG0 workers, which keep their CPU
- * share, run as SCHED_BATCH: they don't preempt the emulation thread when it
+/* With low worker priority the VDP1 and RBG0 workers also run as
+ * SCHED_BATCH: they don't preempt the emulation thread when it
  * wakes them, and run on the other core or when it waits. +2-5% on 3D games
  * at a fixed draw rate. Test knob YAB_WORKER_BATCH: 0 = off, 1 = all render
  * workers, 2 = only VDP1/RBG0. */
@@ -194,7 +200,7 @@ int YabThreadStart(unsigned int id, void (*func)(void *), void *arg)
 		}
 		{
 		int worker = id >= YAB_THREAD_VIDSOFT_LAYER_NBG3;
-		int batch = worker && (batch_mode == 1 || (batch_mode == 2 && !WorkerNiced(id)));
+		int batch = worker && (batch_mode == 1 || (batch_mode == 2 && WorkerBatch(id)));
 		if (nice || affinity_mode > 0 || batch)
 		{
 			struct thd_start *st = malloc(sizeof(*st));

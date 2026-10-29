@@ -48,6 +48,7 @@ u32 Vdp1RamDirty[4];
    change). Yabause draws the whole list at once, so the draw is repeated
    at the next VBlank-OUT (vdp2.c). */
 int Vdp1ListIncomplete;
+int Vdp1FakeClipX2, Vdp1FakeClipY2;
 u8 * Vdp1FrameBuffer;
 
 VideoInterface_struct *VIDCore=NULL;
@@ -79,6 +80,7 @@ u32 FASTCALL Vdp1RamReadLong(u32 addr) {
 
 void FASTCALL Vdp1RamWriteByte(u32 addr, u8 val) {
    addr &= 0x7FFFF;
+   if (vdp1time_inflight) Vdp1TimeWrite(addr, 1);
    VDP1_RAM_MARK(addr);
    T1WriteByte(Vdp1Ram, addr, val);
    SH2_DYNAREC_VRAM_WRITE(0, addr, 1);
@@ -88,6 +90,7 @@ void FASTCALL Vdp1RamWriteByte(u32 addr, u8 val) {
 
 void FASTCALL Vdp1RamWriteWord(u32 addr, u16 val) {
    addr &= 0x7FFFF;
+   if (vdp1time_inflight) Vdp1TimeWrite(addr, 2);
    VDP1_RAM_MARK(addr);
    T1WriteWord(Vdp1Ram, addr, val);
    SH2_DYNAREC_VRAM_WRITE(0, addr, 2);
@@ -97,6 +100,7 @@ void FASTCALL Vdp1RamWriteWord(u32 addr, u16 val) {
 
 void FASTCALL Vdp1RamWriteLong(u32 addr, u32 val) {
    addr &= 0x7FFFF;
+   if (vdp1time_inflight) Vdp1TimeWrite(addr, 4);
    VDP1_RAM_MARK(addr);
    T1WriteLong(Vdp1Ram, addr, val);
    SH2_DYNAREC_VRAM_WRITE(0, addr, 4);
@@ -105,6 +109,7 @@ void FASTCALL Vdp1RamWriteLong(u32 addr, u32 val) {
 //////////////////////////////////////////////////////////////////////////////
 
 u8 FASTCALL Vdp1FrameBufferReadByte(u32 addr) {
+   if (vdp1time_inflight) Vdp1TimeFinish();
    addr &= 0x3FFFF;
    if (VIDCore->Vdp1ReadFrameBuffer){
      u8 val;
@@ -117,6 +122,7 @@ u8 FASTCALL Vdp1FrameBufferReadByte(u32 addr) {
 //////////////////////////////////////////////////////////////////////////////
 
 u16 FASTCALL Vdp1FrameBufferReadWord(u32 addr) {
+   if (vdp1time_inflight) Vdp1TimeFinish();
    addr &= 0x3FFFF;
    if (VIDCore->Vdp1ReadFrameBuffer){
      u16 val;
@@ -129,6 +135,7 @@ u16 FASTCALL Vdp1FrameBufferReadWord(u32 addr) {
 //////////////////////////////////////////////////////////////////////////////
 
 u32 FASTCALL Vdp1FrameBufferReadLong(u32 addr) {
+   if (vdp1time_inflight) Vdp1TimeFinish();
    addr &= 0x3FFFF;
    if (VIDCore->Vdp1ReadFrameBuffer){
      u32 val;
@@ -141,6 +148,7 @@ u32 FASTCALL Vdp1FrameBufferReadLong(u32 addr) {
 //////////////////////////////////////////////////////////////////////////////
 
 void FASTCALL Vdp1FrameBufferWriteByte(u32 addr, u8 val) {
+   if (vdp1time_inflight) Vdp1TimeFinish();
    addr &= 0x3FFFF;
 
    if (VIDCore->Vdp1WriteFrameBuffer)
@@ -155,6 +163,7 @@ void FASTCALL Vdp1FrameBufferWriteByte(u32 addr, u8 val) {
 //////////////////////////////////////////////////////////////////////////////
 
 void FASTCALL Vdp1FrameBufferWriteWord(u32 addr, u16 val) {
+   if (vdp1time_inflight) Vdp1TimeFinish();
    addr &= 0x3FFFF;
 
    if (VIDCore->Vdp1WriteFrameBuffer)
@@ -169,6 +178,7 @@ void FASTCALL Vdp1FrameBufferWriteWord(u32 addr, u16 val) {
 //////////////////////////////////////////////////////////////////////////////
 
 void FASTCALL Vdp1FrameBufferWriteLong(u32 addr, u32 val) {
+   if (vdp1time_inflight) Vdp1TimeFinish();
    addr &= 0x3FFFF;
 
    if (VIDCore->Vdp1WriteFrameBuffer)
@@ -279,6 +289,7 @@ int Vdp1Init(void) {
 //////////////////////////////////////////////////////////////////////////////
 
 void Vdp1DeInit(void) {
+   Vdp1TimeStats();
    if (Vdp1Regs)
       free(Vdp1Regs);
    Vdp1Regs = NULL;
@@ -349,6 +360,7 @@ void VideoDeInit(void) {
 //////////////////////////////////////////////////////////////////////////////
 
 void Vdp1Reset(void) {
+   Vdp1TimeDiscard();
    Vdp1Regs->PTMR = 0;
    Vdp1Regs->MODR = 0x1000; // VDP1 Version 1
    VIDCore->Vdp1Reset();
@@ -579,6 +591,9 @@ void Vdp1FakeDrawCommands(u8 * ram, Vdp1 * regs)
    u32 commandCounter = 0;
    u32 returnAddr = 0xffffffff;
 
+   Vdp1FakeClipX2 = regs->systemclipX2;
+   Vdp1FakeClipY2 = regs->systemclipY2;
+
    while (!(command & 0x8000) && commandCounter < 2000) { // fix me
       // First, process the command
       if (!(command & 0x4000)) { // if (!skip)
@@ -599,6 +614,8 @@ void Vdp1FakeDrawCommands(u8 * ram, Vdp1 * regs)
             break;
          case 9: // system clipping coordinates
             VIDCore->Vdp1SystemClipping(ram, regs);
+            if (regs->systemclipX2 > Vdp1FakeClipX2) Vdp1FakeClipX2 = regs->systemclipX2;
+            if (regs->systemclipY2 > Vdp1FakeClipY2) Vdp1FakeClipY2 = regs->systemclipY2;
             break;
          case 10: // local coordinate
             VIDCore->Vdp1LocalCoordinate(ram, regs);
@@ -653,6 +670,7 @@ void Vdp1Draw(void)
 #undef Vdp1Draw
 #endif
 {
+   int later;
    if (!Vdp1External.disptoggle)
    {
       Vdp1NoDraw();
@@ -661,20 +679,37 @@ void Vdp1Draw(void)
 
    Vdp1Regs->addr = 0;
    Vdp1ListIncomplete = 0;
+   later = Vdp1TimeDrawStart();
 
-   // beginning of a frame
-   // BEF <- CEF
-   // CEF <- 0
-   Vdp1Regs->EDSR >>= 1;
-   /* this should be done after a frame change or a plot trigger */
-   Vdp1Regs->COPR = 0;
+   /* a list drawn at its modelled end (vdp1time.c) starts, as on the chip,
+      at the first HBlank after this: the status changes there */
+   if (!later)
+   {
+      // beginning of a frame
+      // BEF <- CEF
+      // CEF <- 0
+      Vdp1Regs->EDSR >>= 1;
+      /* this should be done after a frame change or a plot trigger */
+      Vdp1Regs->COPR = 0;
+   }
 
-   VIDCore->Vdp1DrawStart();
+   /* a list drawn at its modelled end (vdp1time.c): the registers as
+      drawing it leaves them now */
+   if (later)
+      Vdp1FakeDrawCommands(Vdp1Ram, Vdp1Regs);
+   else
+      VIDCore->Vdp1DrawStart();
 
-   // we set two bits to 1
-   Vdp1Regs->EDSR |= 2;
-   Vdp1Regs->COPR = Vdp1Regs->addr >> 3;
-   ScuSendDrawEnd();
+   /* draw end (CEF, COPR, the SCU interrupt): for a list drawn at its
+      modelled end, when it ends there, as the chip reports it (games that
+      wait for it rewrite their list only then) */
+   if (!later)
+   {
+      // we set two bits to 1
+      Vdp1Regs->EDSR |= 2;
+      Vdp1Regs->COPR = Vdp1Regs->addr >> 3;
+      ScuSendDrawEnd();
+   }
    VIDCore->Vdp1DrawEnd();
 }
 
@@ -752,6 +787,8 @@ int Vdp1LoadState(const void * stream, UNUSED int version, int size)
    int i = 0;
    u8 back_framebuffer[0x40000] = { 0 };
 #endif
+
+   Vdp1TimeDiscard();
 
    // Read registers
    MemStateRead((void *)Vdp1Regs, sizeof(Vdp1), 1, stream);

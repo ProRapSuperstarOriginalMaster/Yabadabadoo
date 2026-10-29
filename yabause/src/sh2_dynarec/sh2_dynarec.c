@@ -126,6 +126,16 @@ void DynarecMapDataArrays(void)
 }
 void DynarecWDTExec(u32 cycles) { WDTExec(CurrentSH2, cycles); }
 
+/* The sound CPU runs after every deciline (linkage_arm.s), as in the interpreter's frame loop
+   (yabause.c), not once per line: a line is ~1800 SH-2 cycles, so a CPU polling sound RAM for the
+   68K's answer saw it and replied before the 68K's next instruction (Vampire Savior: the master
+   wrote its next command between the 68K's ack and the store after it; the 68K then never built its
+   sound area map). The first nine decilines' chunks are only owed (cc_interrupt_master counts them
+   in m68k_owed_decilines, scsp.c) and run when the SH-2 side next touches the sound chip or at the
+   line's end (nextline: M68KExecLastDeciline): ten queue entries a line for the sound thread cost
+   ~1.5 ms a frame on the Miyoo, and a C call each deciline showed in the emulation thread's
+   profile. */
+
 #ifdef __i386__
 #include "assem_x86.h"
 #endif
@@ -354,6 +364,11 @@ void nullf(const char *format, ...) {}
 #define inv_debug nullf
 
 
+// The hash_table bin of a block's key (the SH-2 address; the slave's key is
+// address + 1). linkage_arm.s computes the same function in jump_vaddr,
+// jump_vaddr_slave and dyna_linker: keep them in step.
+static INLINE u32 ht_index(u32 vaddr) { return ((vaddr >> 16) ^ vaddr) & 0xFFFF; }
+
 // Get address from virtual address
 // This is called from the recompiled BRAF/BSRF instructions
 void *get_addr(u32 vaddr)
@@ -369,7 +384,7 @@ void *get_addr(u32 vaddr)
     if(head->vaddr==vaddr) {
   //printf("TRACE: count=%d next=%d (get_addr match %x: %x)\n",Count,next_interupt,vaddr,(int)head->addr);
   //printf("TRACE: (get_addr match %x: %x)\n",vaddr,(int)head->addr);
-      u32 *ht_bin=hash_table[((vaddr>>16)^vaddr)&0xFFFF];
+      u32 *ht_bin=hash_table[ht_index(vaddr)];
       ht_bin[3]=ht_bin[1];
       ht_bin[2]=ht_bin[0];
       ht_bin[1]=(int)head->addr;
@@ -419,7 +434,7 @@ void *get_addr(u32 vaddr)
             cached_code_words[((vstart<4194304?vstart:((vstart|0x400000)&0x7fffff))+i)>>5]|=1<<(((vstart+i)>>2)&7);
           }
         }
-        ht_bin=hash_table[((vaddr>>16)^vaddr)&0xFFFF];
+        ht_bin=hash_table[ht_index(vaddr)];
         if(ht_bin[0]==vaddr) {
           ht_bin[1]=(int)head->addr; // Replace existing entry
         }
@@ -444,7 +459,7 @@ void *get_addr_ht(u32 vaddr)
 {
   //printf("TRACE: count=%d next=%d (get_addr_ht %x)\n",Count,next_interupt,vaddr);
   //if(vaddr>>12==0x60a0) printf("TRACE: (get_addr_ht %x)\n",vaddr);
-  u32 *ht_bin=hash_table[((vaddr>>16)^vaddr)&0xFFFF];
+  u32 *ht_bin=hash_table[ht_index(vaddr)];
   //if(vaddr>>12==0x60a0) printf("%x %x %x %x\n",ht_bin[0],ht_bin[1],ht_bin[2],ht_bin[3]);
   if(ht_bin[0]==vaddr) return (void *)ht_bin[1];
   if(ht_bin[2]==vaddr) return (void *)ht_bin[3];
@@ -851,7 +866,7 @@ void *check_addr(u32 vaddr)
 {
   struct ll_entry *head;
   u32 page;
-  u32 *ht_bin=hash_table[((vaddr>>16)^vaddr)&0xFFFF];
+  u32 *ht_bin=hash_table[ht_index(vaddr)];
   if(ht_bin[0]==vaddr) {
     if(((ht_bin[1]-MAX_OUTPUT_BLOCK_SIZE-(u32)out)<<(32-TARGET_SIZE_2))>0x60000000+(MAX_OUTPUT_BLOCK_SIZE<<(32-TARGET_SIZE_2)))
       if(isclean(ht_bin[1])) return (void *)ht_bin[1];
@@ -896,7 +911,7 @@ void *check_addr(u32 vaddr)
 void remove_hash(int vaddr)
 {
   //printf("remove hash: %x\n",vaddr);
-  u32 *ht_bin=hash_table[(((vaddr)>>16)^vaddr)&0xFFFF];
+  u32 *ht_bin=hash_table[ht_index(vaddr)];
   if(ht_bin[2]==vaddr) {
     ht_bin[2]=ht_bin[3]=-1;
   }
@@ -1187,7 +1202,7 @@ void clean_blocks(u32 page)
               //printf("page=%x, addr=%x\n",page,head->vaddr);
               //assert(head->vaddr>>12==(page|0x80000));
               ll_add_nodup(jump_in+page,head->vaddr,clean_addr);
-              ht_bin=hash_table[((head->vaddr>>16)^head->vaddr)&0xFFFF];
+              ht_bin=hash_table[ht_index(head->vaddr)];
               if(ht_bin[0]==head->vaddr) {
                 ht_bin[1]=(int)clean_addr; // Replace existing entry
               }
@@ -1210,6 +1225,17 @@ void clean_blocks(u32 page)
 }
 
 
+// The address a PC-relative instruction (MOV.W/MOV.L @(disp,PC), MOVA) at
+// index i computes from, as if it sat there: its own, except in the delay
+// slot of BRA/BSR, where PC reads as the branch target+2 (SH-2 manual,
+// Beetle; Mortal Kombat Trilogy's sprite colour modes, U44), as if the slot
+// sat at target-2. The interpreter does the same (sh2int.c SH2delay).
+static u32 pcrel_pc(int i)
+{
+  if(i>0&&itype[i-1]==UJUMP) return ba[i-1]-2;
+  return start+i*2;
+}
+
 void do_consts(int i,u32 *isconst,u32 *constmap)
 {
   switch(itype[i]) {
@@ -1229,13 +1255,13 @@ void do_consts(int i,u32 *isconst,u32 *constmap)
     case RMW:
       break;
     case PCREL:
-      if(opcode[i]==12) sh2_set_const(isconst,constmap,rt1[i],((start+i*2+4)&~3)+imm[i]); // MOVA
+      if(opcode[i]==12) sh2_set_const(isconst,constmap,rt1[i],((pcrel_pc(i)+4)&~3)+imm[i]); // MOVA
       else { // PC-relative load (constant pool)
-        u32 addr=((start+i*2+4)&~3)+imm[i];
+        u32 addr=((pcrel_pc(i)+4)&~3)+imm[i];
         if((u32)((addr-start)>>1)<slen) {
           int value;
-          if(opcode[i]==9) value=(s16)source[((start+i*2+4)+imm[i]-start)>>1]; // MOV.W
-          else value=(source[(((start+i*2+4)&~3)+imm[i]-start)>>1]<<16)+source[(((start+i*2+4)&~3)+imm[i]+2-start)>>1]; // MOV.L
+          if(opcode[i]==9) value=(s16)source[((pcrel_pc(i)+4)+imm[i]-start)>>1]; // MOV.W
+          else value=(source[(addr-start)>>1]<<16)+source[(addr+2-start)>>1]; // MOV.L
           sh2_set_const(isconst,constmap,rt1[i],value);
         }
         else sh2_clear_const(isconst,constmap,rt1[i]);
@@ -1637,12 +1663,12 @@ void pcrel_alloc(struct regstat *current,int i)
 {
   u32 addr;
   alloc_reg(current,i,rt1[i]);
-  addr=((start+i*2+4)&~3)+imm[i];
+  addr=((pcrel_pc(i)+4)&~3)+imm[i];
   if(opcode[i]==12) { // MOVA, address generation only
     set_const(current,rt1[i],addr);
   }else if((unsigned)((addr-start)>>1)<slen) {
     if(opcode[i]==9) { // MOV.W
-      addr=(start+i*2+4)+imm[i];
+      addr=(pcrel_pc(i)+4)+imm[i];
       set_const(current,rt1[i],(s16)source[(addr-start)>>1]);
     }
     else // MOV.L
@@ -2713,8 +2739,8 @@ void pcrel_assemble(int i,struct regstat *i_regs)
       int jaddr=0;
       // This is to handle the exceptional case where we can not do constant propagation
       assert(opcode[i]!=12); // MOVA should always be able to do constant propagation
-      constaddr=((start+i*2+4)&~3)+imm[i];
-      if(opcode[i]==9) constaddr=(start+i*2+4)+imm[i]; // MOV.W
+      constaddr=((pcrel_pc(i)+4)&~3)+imm[i];
+      if(opcode[i]==9) constaddr=(pcrel_pc(i)+4)+imm[i]; // MOV.W
       assem_debug("Can't do constant propagation, doing PC-relatve load\n");
       //int map=get_reg(i_regs->regmap,MOREG);
       //int cache=get_reg(i_regs->regmap,MMREG);
@@ -3019,6 +3045,11 @@ int internal_branch(int addr)
   if(addr&1) return 0; // Indirect (register) jump
   if(addr>=start && addr<start+slen*2-2)
   {
+    int t=(addr-start)>>1;
+    // Entered directly, a PC-relative instruction in a BRA/BSR delay slot
+    // addresses from itself, not from the branch target (pcrel_pc): run it
+    // as the start of its own block
+    if(t>0&&itype[t]==PCREL&&itype[t-1]==UJUMP) return 0;
     return 1;
   }
   return 0;
@@ -4336,7 +4367,7 @@ static int idle_loop(int i)
       }
       else if((op&0xF000)==0xD000) { // MOV.L @(disp,PC),Rn
         idle_call_desc=IDLE_CALL_ABS;
-        idle_call_addr=((start+w*2+4)&~3)+(op&0xFF)*4;
+        idle_call_addr=((pcrel_pc(w)+4)&~3)+(op&0xFF)*4;
       }
       else return 0;
     }
@@ -4902,6 +4933,23 @@ void system_assemble(int i,struct regstat *i_regs)
     emit_addimm_and_set_flags(CLOCK_DIVIDER*(ccadj[i]+cycles[i]),HOST_CCREG);
     //add_stub(CC_STUB,(int)out,jump_vaddr_reg[slave][t],0,i,-1,TAKEN,0); // FIXME
     //emit_jns(0);
+    if((source[i]&0xFF00)!=0xC300) {
+      // An invalid opcode: its handler may be junk too, and ILLEGAL -> handler ->
+      // ILLEGAL would never reach a cycle check. End the slice here when the
+      // cycles are used up (as do_ccstub does for a register jump).
+      pointer slow=(pointer)out;
+      emit_jns(0);
+      emit_jmp(jump_vaddr_reg[slave][t]);
+      set_jump_target(slow,(pointer)out);
+      emit_writeword(t,slave?(int)&slave_pc:(int)&master_pc);
+      if(slave) {
+        emit_load_return_address(SLAVERA_REG);
+        emit_jmp((pointer)cc_interrupt);
+      }
+      else
+        emit_call((pointer)slave_entry);
+      emit_readword(slave?(int)&slave_pc:(int)&master_pc,t);
+    }
     emit_jmp(jump_vaddr_reg[slave][t]);
   }
 }
@@ -5078,6 +5126,7 @@ void clean_registers(int istart,int iend,int wr)
 {
   int i;
   int r;
+  u32 freem,m;
   u32 will_dirty_i,will_dirty_next,temp_will_dirty;
   u32 wont_dirty_i,wont_dirty_next,temp_wont_dirty;
   if(iend==slen-1) {
@@ -5429,7 +5478,19 @@ void clean_registers(int istart,int iend,int wr)
     }
     will_dirty_next=will_dirty_i;
     wont_dirty_next=wont_dirty_i;
-    for(r=0;r<HOST_REGS;r++) {
+    // A register free in the current map (-1) ends up not "will dirty", and
+    // "won't dirty" only if an instruction's target is (-1&63): no need to
+    // test each one
+    freem=0;
+    for(r=0;r<HOST_REGS;r++)
+      if(r!=EXCLUDE_REG&&regs[i].regmap[r]==-1) freem|=1<<r;
+    will_dirty_i&=~freem;
+    if(rt1[i]==(-1&63)||rt2[i]==(-1&63)||
+       (i>istart&&itype[i]!=RJUMP&&itype[i]!=UJUMP&&itype[i]!=CJUMP&&itype[i]!=SJUMP&&
+        (rt1[i-1]==(-1&63)||rt2[i-1]==(-1&63))))
+      wont_dirty_i|=freem;
+    for(m=~freem&((1<<HOST_REGS)-1);m;m&=m-1) {
+      r=__builtin_ctz(m);
       if(r!=EXCLUDE_REG) {
         if((regs[i].regmap[r]&63)==rt1[i]) will_dirty_i|=1<<r;
         if((regs[i].regmap[r]&63)==rt2[i]) will_dirty_i|=1<<r;
@@ -5508,7 +5569,17 @@ void clean_registers(int istart,int iend,int wr)
     // Deal with changed mappings
     temp_will_dirty=will_dirty_i;
     temp_wont_dirty=wont_dirty_i;
-    for(r=0;r<HOST_REGS;r++) {
+    // registers free in both maps keep their will/won't bits: only wasdirty
+    // changes for them, the same way for all
+    freem=0;
+    for(r=0;r<HOST_REGS;r++)
+      if(r!=EXCLUDE_REG&&(regs[i].regmap[r]&regmap_pre[i][r])==-1) freem|=1<<r;
+    if(wr) {
+      regs[i].wasdirty&=wont_dirty_i|~freem;
+      regs[i].wasdirty|=will_dirty_i&freem;
+    }
+    for(m=~freem&((1<<HOST_REGS)-1);m;m&=m-1) {
+      r=__builtin_ctz(m);
       if(r!=EXCLUDE_REG) {
         int nr;
         if(regs[i].regmap[r]==regmap_pre[i][r]) {
@@ -5846,6 +5917,314 @@ void SH2DynarecVramWrite(int r, u32 addr, u32 size)
   }
 }
 
+// Pass 4: cull unused host registers (needed_reg[], and drop allocations
+// that are never used). A host register that holds nothing in the maps a
+// loop below tests (-1 in each) can only be affected through values that
+// are the same for every such register, so those loops work out that
+// effect once per instruction and run their per-register tests only for
+// the occupied registers: the same result in a third of the steps.
+static void cull_unused_regs(void)
+{
+  int i;
+  u64 nr=0;
+  
+  for (i=slen-1;i>=0;i--)
+  {
+    int hr;
+    u32 free_em=0,free_pem=0,m;
+    // free_em: entry and current map both -1; free_pem: also the pre map
+    for(hr=0;hr<HOST_REGS;hr++) {
+      if((regs[i].regmap_entry[hr]&regs[i].regmap[hr])==-1) {
+        free_em|=1<<hr;
+        if(regmap_pre[i][hr]==-1) free_pem|=1<<hr;
+      }
+    }
+    if(itype[i]==RJUMP||itype[i]==UJUMP||itype[i]==CJUMP||itype[i]==SJUMP)
+    {
+      if(ba[i]<start || ba[i]>=(start+slen*2))
+      {
+        // Branch out of this block, don't need anything
+        nr=0;
+      }
+      else
+      {
+        // Internal branch
+        // Need whatever matches the target
+        int t=(ba[i]-start)>>1;
+        nr=0;
+        for(hr=0;hr<HOST_REGS;hr++)
+        {
+          if(regs[i].regmap_entry[hr]>=0) {
+            if(regs[i].regmap_entry[hr]==regs[t].regmap_entry[hr]) nr|=1<<hr;
+          }
+        }
+      }
+      // Conditional branch may need registers for following instructions
+      if(itype[i]==SJUMP)
+      {
+        if(i<slen-2) {
+          nr|=needed_reg[i+2];
+          for(hr=0;hr<HOST_REGS;hr++)
+          {
+            if(regmap_pre[i+2][hr]>=0&&get_reg(regs[i+2].regmap_entry,regmap_pre[i+2][hr])<0) nr&=~(1<<hr);
+            //if((regmap_entry[i+2][hr])>=0) if(!((nr>>hr)&1)) printf("%x-bogus(%d=%d)\n",start+i*2,hr,regmap_entry[i+2][hr]);
+          }
+        }
+      }
+      else if(itype[i]==CJUMP)
+      {
+        if(i<slen-2) {
+          nr|=needed_reg[i+1];
+          for(hr=0;hr<HOST_REGS;hr++)
+          {
+            if(regmap_pre[i+1][hr]>=0&&get_reg(regs[i+1].regmap_entry,regmap_pre[i+1][hr])<0) nr&=~(1<<hr);
+            //if((regmap_entry[i+2][hr])>=0) if(!((nr>>hr)&1)) printf("%x-bogus(%d=%d)\n",start+i*2,hr,regmap_entry[i+2][hr]);
+          }
+        }
+      }
+      // Don't need stuff which is overwritten
+      for(hr=0;hr<HOST_REGS;hr++) {
+        if(regs[i].regmap[hr]!=regmap_pre[i][hr]) nr&=~(1<<hr);
+        if(regs[i].regmap[hr]<0) nr&=~(1<<hr);
+      }
+      // Merge in delay slot
+      if(itype[i]!=CJUMP) {
+      if((rt1[i+1]>=0&&rt1[i+1]==(-1&63))||(rt2[i+1]>=0&&rt2[i+1]==(-1&63))) nr&=~(u64)free_pem;
+      for(m=~free_pem&((1<<HOST_REGS)-1);m;m&=m-1)
+      {
+        hr=__builtin_ctz(m);
+        // These are overwritten by the delay slot
+        if(rt1[i+1]>=0&&rt1[i+1]==(regs[i].regmap[hr]&63)) nr&=~(1<<hr);
+        if(rt2[i+1]>=0&&rt2[i+1]==(regs[i].regmap[hr]&63)) nr&=~(1<<hr);
+        if(rs1[i+1]>=0&&rs1[i+1]==regmap_pre[i][hr]) nr|=1<<hr;
+        if(rs2[i+1]>=0&&rs2[i+1]==regmap_pre[i][hr]) nr|=1<<hr;
+        if(rs3[i+1]>=0&&rs3[i+1]==regmap_pre[i][hr]) nr|=1<<hr;
+        if(rs1[i+1]>=0&&rs1[i+1]==regs[i].regmap_entry[hr]) nr|=1<<hr;
+        if(rs2[i+1]>=0&&rs2[i+1]==regs[i].regmap_entry[hr]) nr|=1<<hr;
+        if(rs3[i+1]>=0&&rs3[i+1]==regs[i].regmap_entry[hr]) nr|=1<<hr;
+        //if(dep1[i+1]&&!((unneeded_reg_upper[i]>>dep1[i+1])&1)) {
+        //  if(dep1[i+1]==(regmap_pre[i][hr]&63)) nr|=1<<hr;
+        //  if(dep2[i+1]==(regmap_pre[i][hr]&63)) nr|=1<<hr;
+        //}
+        //if(dep2[i+1]&&!((unneeded_reg_upper[i]>>dep2[i+1])&1)) {
+        //  if(dep1[i+1]==(regs[i].regmap_entry[hr]&63)) nr|=1<<hr;
+        //  if(dep2[i+1]==(regs[i].regmap_entry[hr]&63)) nr|=1<<hr;
+        //}
+        if(regs[i].regmap_entry[hr]==SR) nr|=1<<hr;
+        if(regs[i].regmap[hr]==SR) nr|=1<<hr;
+        if(regmap_pre[i][hr]==SR) nr|=1<<hr;
+      }
+      }
+    }
+    else if(itype[i]==SYSTEM)
+    {
+      // TRAPA instruction (software interrupt)
+      nr=0;
+      for(hr=0;hr<HOST_REGS;hr++)
+      {
+        // Source registers are needed
+        if(regmap_pre[i][hr]==15) nr|=1<<hr;
+        if(regmap_pre[i][hr]==SR) nr|=1<<hr;
+        if(regmap_pre[i][hr]==VBR) nr|=1<<hr;
+        if(regmap_pre[i][hr]==CCREG) nr|=1<<hr;
+        if(regs[i].regmap_entry[hr]==15) nr|=1<<hr;
+        if(regs[i].regmap_entry[hr]==SR) nr|=1<<hr;
+        if(regs[i].regmap_entry[hr]==VBR) nr|=1<<hr;
+        if(regs[i].regmap_entry[hr]==CCREG) nr|=1<<hr;
+      }
+    }
+    else // Non-branch
+    {
+      if(i<slen-1) {
+        for(hr=0;hr<HOST_REGS;hr++) {
+          if(regs[i].regmap[hr]<0) {nr&=~(1<<hr);continue;}
+          if(regmap_pre[i+1][hr]>=0&&get_reg(regs[i+1].regmap_entry,regmap_pre[i+1][hr])<0) nr&=~(1<<hr);
+          if(regs[i].regmap[hr]!=regmap_pre[i+1][hr]) nr&=~(1<<hr);
+          if(regs[i].regmap[hr]!=regmap_pre[i][hr]) nr&=~(1<<hr);
+        }
+      }
+    }
+    if((rt1[i]>=0&&rt1[i]==(-1&63))||(rt2[i]>=0&&rt2[i]==(-1&63))) nr&=~(u64)free_pem;
+    for(m=~free_pem&((1<<HOST_REGS)-1);m;m&=m-1)
+    {
+      hr=__builtin_ctz(m);
+      // Overwritten registers are not needed
+      if(rt1[i]>=0&&rt1[i]==(regs[i].regmap[hr]&63)) nr&=~(1<<hr);
+      if(rt2[i]>=0&&rt2[i]==(regs[i].regmap[hr]&63)) nr&=~(1<<hr);
+      // Source registers are needed
+      if(rs1[i]>=0&&rs1[i]==regmap_pre[i][hr]) nr|=1<<hr;
+      if(rs2[i]>=0&&rs2[i]==regmap_pre[i][hr]) nr|=1<<hr;
+      if(rs3[i]>=0&&rs3[i]==regmap_pre[i][hr]) nr|=1<<hr;
+      if(rs1[i]>=0&&rs1[i]==regs[i].regmap_entry[hr]) nr|=1<<hr;
+      if(rs2[i]>=0&&rs2[i]==regs[i].regmap_entry[hr]) nr|=1<<hr;
+      if(rs3[i]>=0&&rs3[i]==regs[i].regmap_entry[hr]) nr|=1<<hr;
+      //if(dep1[i]&&!((unneeded_reg_upper[i]>>dep1[i])&1)) {
+      //  if(dep1[i]==(regmap_pre[i][hr]&63)) nr|=1<<hr;
+      //  if(dep1[i]==(regs[i].regmap_entry[hr]&63)) nr|=1<<hr;
+      //}
+      //if(dep2[i]&&!((unneeded_reg_upper[i]>>dep2[i])&1)) {
+      //  if(dep2[i]==(regmap_pre[i][hr]&63)) nr|=1<<hr;
+      //  if(dep2[i]==(regs[i].regmap_entry[hr]&63)) nr|=1<<hr;
+      //}
+      if(regs[i].regmap_entry[hr]==SR) nr|=1<<hr;
+      if(regs[i].regmap[hr]==SR) nr|=1<<hr;
+      if(regmap_pre[i][hr]==SR) nr|=1<<hr;
+      // Don't store a register immediately after writing it,
+      // may prevent dual-issue.
+      // But do so if this is a branch target, otherwise we
+      // might have to load the register before the branch.
+      if(i>0&&!bt[i]&&((regs[i].wasdirty>>hr)&1)) {
+        if(regmap_pre[i][hr]>=0&&!((unneeded_reg[i]>>regmap_pre[i][hr])&1)) {
+          if(rt1[i-1]==(regmap_pre[i][hr]&63)) nr|=1<<hr;
+          if(rt2[i-1]==(regmap_pre[i][hr]&63)) nr|=1<<hr;
+        }
+        if(regs[i].regmap_entry[hr]>=0&&!((unneeded_reg[i]>>regs[i].regmap_entry[hr])&1)) {
+          if(rt1[i-1]==(regs[i].regmap_entry[hr]&63)) nr|=1<<hr;
+          if(rt2[i-1]==(regs[i].regmap_entry[hr]&63)) nr|=1<<hr;
+        }
+      }
+    }
+    // Cycle count is needed at branches.  Assume it is needed at the target too.
+    if(i==0||bt[i]||itype[i]==CJUMP||itype[i]==SJUMP) {
+      if(regmap_pre[i][HOST_CCREG]==CCREG) nr|=1<<HOST_CCREG;
+      if(regs[i].regmap_entry[HOST_CCREG]==CCREG) nr|=1<<HOST_CCREG;
+    }
+    // Save it
+    needed_reg[i]=nr;
+    
+    // Deallocate unneeded registers. Outside branches, a register free in the
+    // entry and current maps is left alone unless every operand and temporary
+    // of the instruction is a register (then -1 matches none of them).
+    m=0;
+    if(itype[i]!=RJUMP&&itype[i]!=UJUMP&&itype[i]!=SJUMP&&itype[i]!=CJUMP) {
+      int temp1=-1,temp2=-1;
+      if(itype[i]==LOAD || itype[i]==STORE || itype[i]==RMW ||
+         itype[i]==PCREL || itype[i]==SYSTEM )
+        temp1=MOREG;
+      if(itype[i]==COMPLEX) {
+        temp1=MACH;
+        temp2=MACL;
+      }
+      else if(itype[i]==SYSTEM) {
+        temp2=CCREG;
+      }
+      if(i==0||rt1[i]==-1||rt2[i]==-1||rs1[i]==-1||rs2[i]==-1||rs3[i]==-1||temp1==-1||temp2==-1)
+        m=free_em;
+    }
+    for(m=~(u32)nr&~m&((1<<HOST_REGS)-1);m;m&=m-1)
+    {
+      hr=__builtin_ctz(m);
+      {
+        if(regs[i].regmap_entry[hr]!=CCREG) regs[i].regmap_entry[hr]=-1;
+        if((regs[i].regmap[hr]&63)!=rs1[i] && (regs[i].regmap[hr]&63)!=rs2[i] &&
+           (regs[i].regmap[hr]&63)!=rt1[i] && (regs[i].regmap[hr]&63)!=rt2[i] &&
+           (regs[i].regmap[hr]&63)!=PTEMP && (regs[i].regmap[hr]&63)!=CCREG)
+        {
+          if(itype[i]==CJUMP) {
+            regs[i].regmap[hr]=-1;
+            regs[i].isdoingcp&=~(1<<hr);
+            if(i<slen-1) {
+              regmap_pre[i+1][hr]=-1;
+              regs[i+1].wasdoingcp&=~(1<<hr);
+            }
+          }
+        }
+        if(itype[i]==RJUMP||itype[i]==UJUMP||itype[i]==SJUMP)
+        {
+          int temp1=-1,temp2=-1;
+          //if(get_reg(regs[i].regmap,rt1[i+1]|64)>=0||get_reg(branch_regs[i].regmap,rt1[i+1]|64)>=0)
+          //{
+          //  d1=dep1[i+1];
+          //  d2=dep2[i+1];
+          //}
+          if(itype[i+1]==LOAD || itype[i+1]==STORE || 
+             itype[i+1]==RMW || itype[i+1]==PCREL ||
+             itype[i+1]==SYSTEM || source[i]==0x002B /* RTE */ )
+            temp1=MOREG;
+          if(itype[i+1]==COMPLEX) {
+            temp1=MACH;
+            temp2=MACL;
+          }
+          if(regs[i].regmap[hr]!=rs1[i] && regs[i].regmap[hr]!=rs2[i] && regs[i].regmap[hr]!=rs3[i] && 
+             regs[i].regmap[hr]!=rt1[i] && regs[i].regmap[hr]!=rt2[i] &&
+             regs[i].regmap[hr]!=rs1[i+1] && regs[i].regmap[hr]!=rs2[i+1] && regs[i].regmap[hr]!=rs3[i+1] &&
+             regs[i].regmap[hr]!=rt1[i+1] && regs[i].regmap[hr]!=rt2[i+1] &&
+             regs[i].regmap[hr]!=RHASH && regs[i].regmap[hr]!=RHTBL &&
+             regs[i].regmap[hr]!=RTEMP && regs[i].regmap[hr]!=PTEMP &&
+             regs[i].regmap[hr]!=CCREG &&
+             regs[i].regmap[hr]!=temp1 && regs[i].regmap[hr]!=temp2 )
+          {
+            regs[i].regmap[hr]=-1;
+            regs[i].isdoingcp&=~(1<<hr);
+            if(branch_regs[i].regmap[hr]!=rs1[i] && branch_regs[i].regmap[hr]!=rs2[i] && branch_regs[i].regmap[hr]!=rs3[i] &&
+               branch_regs[i].regmap[hr]!=rt1[i] && branch_regs[i].regmap[hr]!=rt2[i] &&
+               branch_regs[i].regmap[hr]!=rs1[i+1] && branch_regs[i].regmap[hr]!=rs2[i+1] && branch_regs[i].regmap[hr]!=rs3[i+1] &&
+               branch_regs[i].regmap[hr]!=rt1[i+1] && branch_regs[i].regmap[hr]!=rt2[i+1] &&
+               branch_regs[i].regmap[hr]!=RHASH && branch_regs[i].regmap[hr]!=RHTBL &&
+               branch_regs[i].regmap[hr]!=RTEMP && branch_regs[i].regmap[hr]!=PTEMP &&
+               branch_regs[i].regmap[hr]!=CCREG &&
+               branch_regs[i].regmap[hr]!=temp1 && branch_regs[i].regmap[hr]!=temp2)
+            {
+              branch_regs[i].regmap[hr]=-1;
+              branch_regs[i].regmap_entry[hr]=-1;
+              if(itype[i]!=RJUMP&&itype[i]!=UJUMP)
+              {
+                if(i<slen-2) {
+                  regmap_pre[i+2][hr]=-1;
+                  regs[i+2].wasdoingcp&=~(1<<hr);
+                }
+              }
+            }
+          }
+        }
+        else
+        {
+          // Non-branch
+          if(i>0)
+          {
+            int temp1=-1,temp2=-1;
+            //if(get_reg(regs[i].regmap,rt1[i]|64)>=0)
+            //{
+            //  d1=dep1[i];
+            //  d2=dep2[i];
+            //}
+            if(itype[i]==LOAD || itype[i]==STORE || itype[i]==RMW ||
+               itype[i]==PCREL || itype[i]==SYSTEM )
+              temp1=MOREG;
+            if(itype[i]==COMPLEX) {
+              temp1=MACH;
+              temp2=MACL;
+            }
+            else if(itype[i]==SYSTEM) {
+              temp2=CCREG;
+            }
+            if(regs[i].regmap[hr]!=rt1[i] && regs[i].regmap[hr]!=rt2[i] &&
+               regs[i].regmap[hr]!=rs1[i] && regs[i].regmap[hr]!=rs2[i] &&
+               regs[i].regmap[hr]!=rs3[i] &&
+               regs[i].regmap[hr]!=temp1 && regs[i].regmap[hr]!=temp2 &&
+               regs[i].regmap[hr]!=CCREG)
+            {
+              if(i<slen-1&&!is_ds[i]) {
+                if(regmap_pre[i+1][hr]!=-1 || regs[i].regmap[hr]!=-1)
+                if(regmap_pre[i+1][hr]!=regs[i].regmap[hr])
+                {
+                  printf("fail: %x (%d %d!=%d)\n",start+i*2,hr,regmap_pre[i+1][hr],regs[i].regmap[hr]);
+                  assert(regmap_pre[i+1][hr]==regs[i].regmap[hr]);
+                }
+                regmap_pre[i+1][hr]=-1;
+                if(regs[i+1].regmap_entry[hr]==CCREG) regs[i+1].regmap_entry[hr]=-1;
+                regs[i+1].wasdoingcp&=~(1<<hr);
+              }
+              regs[i].regmap[hr]=-1;
+              regs[i].isdoingcp&=~(1<<hr);
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
 #ifdef YAB_PROFILE
 static int sh2_recompile_block_body(int addr);
 int sh2_recompile_block(int addr) { int r; YAB_PROF_BEGIN(PROF_SH2_COMPILE); r = sh2_recompile_block_body(addr); YAB_PROF_END(PROF_SH2_COMPILE); return r; }
@@ -5860,6 +6239,7 @@ int sh2_recompile_block(int addr)
   int i,j;
   int done=0;
   unsigned int type,mode,op,op2,op3;
+  int illegal;
   unsigned int lastconst=0;
   unsigned int writelimit=0xFFFFFFFF;
   u32 p_constmap[SH2_REGS];
@@ -6170,6 +6550,12 @@ int sh2_recompile_block(int addr)
       case 0x0E: strcpy(insn[i],"MOV"); type=IMM8; break;
       default: strcpy(insn[i],"???"); type=NI; break;
     }
+    // An invalid opcode takes the illegal instruction exception (vector 4), as
+    // in the interpreter: compiled as TRAPA #4. In a delay slot it stays a no-op.
+    illegal=0;
+    if(type==NI&&!(i>0&&(itype[i-1]==UJUMP||itype[i-1]==RJUMP||itype[i-1]==SJUMP))) {
+      strcpy(insn[i],"ILLEGAL"); type=SYSTEM; opcode[i]=op=12; op2=op3=0; illegal=1;
+    }
     itype[i]=type;
     addrmode[i]=mode;
     opcode2[i]=op2;
@@ -6283,10 +6669,10 @@ int sh2_recompile_block(int addr)
         else imm[i]<<=2;
         // Extend block to include consts
         // FIXME: Don't go past limit
-        if (op==9 && lastconst < (start+i*2+4)+imm[i]) // MOV.W
-          lastconst = (start+i*2+4)+imm[i];
-        if (op==13 && lastconst < ((start+i*2+4)&~3)+imm[i]+2) // MOV.L
-          lastconst = ((start+i*2+4)&~3)+imm[i]+2;
+        if (op==9 && lastconst < (pcrel_pc(i)+4)+imm[i]) // MOV.W
+          lastconst = (pcrel_pc(i)+4)+imm[i];
+        if (op==13 && lastconst < ((pcrel_pc(i)+4)&~3)+imm[i]+2) // MOV.L
+          lastconst = ((pcrel_pc(i)+4)&~3)+imm[i]+2;
         //printf("lastconst=%x\n",lastconst);
         break;
       case MOV:
@@ -6497,7 +6883,7 @@ int sh2_recompile_block(int addr)
           //rs2[i]=CCREG;
           rs2[i]=VBR;
           rs3[i]=15; // Stack pointer
-          imm[i]=(unsigned int)((unsigned char)source[i]);
+          imm[i]=illegal?4:(unsigned int)((unsigned char)source[i]);
           cycles[i]=8;
         }
         else { // SLEEP
@@ -6649,6 +7035,15 @@ int sh2_recompile_block(int addr)
   }
   slen=i;
   assert(slen>0);
+  // A branch in the delay slot that ends the block (illegal on the SH-2: only
+  // junk does this, e.g. a CPU running through memory being overwritten) has no
+  // slot of its own; compile it as an invalid opcode instead of failing below.
+  if(slen>1&&(itype[slen-1]==UJUMP||itype[slen-1]==SJUMP||itype[slen-1]==RJUMP)
+           &&(itype[slen-2]==UJUMP||itype[slen-2]==SJUMP||itype[slen-2]==RJUMP)) {
+    itype[slen-1]=NI;
+    rs1[slen-1]=rs2[slen-1]=rs3[slen-1]=rt1[slen-1]=rt2[slen-1]=-1;
+    ba[slen-1]=-1;
+  }
 
   /* Pass 2 - Register dependencies and branch targets */
 
@@ -7186,273 +7581,7 @@ int sh2_recompile_block(int addr)
   
   /* Pass 4 - Cull unused host registers */
   
-  {
-  u64 nr=0;
-  
-  for (i=slen-1;i>=0;i--)
-  {
-    int hr;
-    if(itype[i]==RJUMP||itype[i]==UJUMP||itype[i]==CJUMP||itype[i]==SJUMP)
-    {
-      if(ba[i]<start || ba[i]>=(start+slen*2))
-      {
-        // Branch out of this block, don't need anything
-        nr=0;
-      }
-      else
-      {
-        // Internal branch
-        // Need whatever matches the target
-        int t=(ba[i]-start)>>1;
-        nr=0;
-        for(hr=0;hr<HOST_REGS;hr++)
-        {
-          if(regs[i].regmap_entry[hr]>=0) {
-            if(regs[i].regmap_entry[hr]==regs[t].regmap_entry[hr]) nr|=1<<hr;
-          }
-        }
-      }
-      // Conditional branch may need registers for following instructions
-      if(itype[i]==SJUMP)
-      {
-        if(i<slen-2) {
-          nr|=needed_reg[i+2];
-          for(hr=0;hr<HOST_REGS;hr++)
-          {
-            if(regmap_pre[i+2][hr]>=0&&get_reg(regs[i+2].regmap_entry,regmap_pre[i+2][hr])<0) nr&=~(1<<hr);
-            //if((regmap_entry[i+2][hr])>=0) if(!((nr>>hr)&1)) printf("%x-bogus(%d=%d)\n",start+i*2,hr,regmap_entry[i+2][hr]);
-          }
-        }
-      }
-      else if(itype[i]==CJUMP)
-      {
-        if(i<slen-2) {
-          nr|=needed_reg[i+1];
-          for(hr=0;hr<HOST_REGS;hr++)
-          {
-            if(regmap_pre[i+1][hr]>=0&&get_reg(regs[i+1].regmap_entry,regmap_pre[i+1][hr])<0) nr&=~(1<<hr);
-            //if((regmap_entry[i+2][hr])>=0) if(!((nr>>hr)&1)) printf("%x-bogus(%d=%d)\n",start+i*2,hr,regmap_entry[i+2][hr]);
-          }
-        }
-      }
-      // Don't need stuff which is overwritten
-      for(hr=0;hr<HOST_REGS;hr++) {
-        if(regs[i].regmap[hr]!=regmap_pre[i][hr]) nr&=~(1<<hr);
-        if(regs[i].regmap[hr]<0) nr&=~(1<<hr);
-      }
-      // Merge in delay slot
-      if(itype[i]!=CJUMP) 
-      for(hr=0;hr<HOST_REGS;hr++)
-      {
-        // These are overwritten by the delay slot
-        if(rt1[i+1]>=0&&rt1[i+1]==(regs[i].regmap[hr]&63)) nr&=~(1<<hr);
-        if(rt2[i+1]>=0&&rt2[i+1]==(regs[i].regmap[hr]&63)) nr&=~(1<<hr);
-        if(rs1[i+1]>=0&&rs1[i+1]==regmap_pre[i][hr]) nr|=1<<hr;
-        if(rs2[i+1]>=0&&rs2[i+1]==regmap_pre[i][hr]) nr|=1<<hr;
-        if(rs3[i+1]>=0&&rs3[i+1]==regmap_pre[i][hr]) nr|=1<<hr;
-        if(rs1[i+1]>=0&&rs1[i+1]==regs[i].regmap_entry[hr]) nr|=1<<hr;
-        if(rs2[i+1]>=0&&rs2[i+1]==regs[i].regmap_entry[hr]) nr|=1<<hr;
-        if(rs3[i+1]>=0&&rs3[i+1]==regs[i].regmap_entry[hr]) nr|=1<<hr;
-        //if(dep1[i+1]&&!((unneeded_reg_upper[i]>>dep1[i+1])&1)) {
-        //  if(dep1[i+1]==(regmap_pre[i][hr]&63)) nr|=1<<hr;
-        //  if(dep2[i+1]==(regmap_pre[i][hr]&63)) nr|=1<<hr;
-        //}
-        //if(dep2[i+1]&&!((unneeded_reg_upper[i]>>dep2[i+1])&1)) {
-        //  if(dep1[i+1]==(regs[i].regmap_entry[hr]&63)) nr|=1<<hr;
-        //  if(dep2[i+1]==(regs[i].regmap_entry[hr]&63)) nr|=1<<hr;
-        //}
-        if(regs[i].regmap_entry[hr]==SR) nr|=1<<hr;
-        if(regs[i].regmap[hr]==SR) nr|=1<<hr;
-        if(regmap_pre[i][hr]==SR) nr|=1<<hr;
-      }
-    }
-    else if(itype[i]==SYSTEM)
-    {
-      // TRAPA instruction (software interrupt)
-      nr=0;
-      for(hr=0;hr<HOST_REGS;hr++)
-      {
-        // Source registers are needed
-        if(regmap_pre[i][hr]==15) nr|=1<<hr;
-        if(regmap_pre[i][hr]==SR) nr|=1<<hr;
-        if(regmap_pre[i][hr]==VBR) nr|=1<<hr;
-        if(regmap_pre[i][hr]==CCREG) nr|=1<<hr;
-        if(regs[i].regmap_entry[hr]==15) nr|=1<<hr;
-        if(regs[i].regmap_entry[hr]==SR) nr|=1<<hr;
-        if(regs[i].regmap_entry[hr]==VBR) nr|=1<<hr;
-        if(regs[i].regmap_entry[hr]==CCREG) nr|=1<<hr;
-      }
-    }
-    else // Non-branch
-    {
-      if(i<slen-1) {
-        for(hr=0;hr<HOST_REGS;hr++) {
-          if(regmap_pre[i+1][hr]>=0&&get_reg(regs[i+1].regmap_entry,regmap_pre[i+1][hr])<0) nr&=~(1<<hr);
-          if(regs[i].regmap[hr]!=regmap_pre[i+1][hr]) nr&=~(1<<hr);
-          if(regs[i].regmap[hr]!=regmap_pre[i][hr]) nr&=~(1<<hr);
-          if(regs[i].regmap[hr]<0) nr&=~(1<<hr);
-        }
-      }
-    }
-    for(hr=0;hr<HOST_REGS;hr++)
-    {
-      // Overwritten registers are not needed
-      if(rt1[i]>=0&&rt1[i]==(regs[i].regmap[hr]&63)) nr&=~(1<<hr);
-      if(rt2[i]>=0&&rt2[i]==(regs[i].regmap[hr]&63)) nr&=~(1<<hr);
-      // Source registers are needed
-      if(rs1[i]>=0&&rs1[i]==regmap_pre[i][hr]) nr|=1<<hr;
-      if(rs2[i]>=0&&rs2[i]==regmap_pre[i][hr]) nr|=1<<hr;
-      if(rs3[i]>=0&&rs3[i]==regmap_pre[i][hr]) nr|=1<<hr;
-      if(rs1[i]>=0&&rs1[i]==regs[i].regmap_entry[hr]) nr|=1<<hr;
-      if(rs2[i]>=0&&rs2[i]==regs[i].regmap_entry[hr]) nr|=1<<hr;
-      if(rs3[i]>=0&&rs3[i]==regs[i].regmap_entry[hr]) nr|=1<<hr;
-      //if(dep1[i]&&!((unneeded_reg_upper[i]>>dep1[i])&1)) {
-      //  if(dep1[i]==(regmap_pre[i][hr]&63)) nr|=1<<hr;
-      //  if(dep1[i]==(regs[i].regmap_entry[hr]&63)) nr|=1<<hr;
-      //}
-      //if(dep2[i]&&!((unneeded_reg_upper[i]>>dep2[i])&1)) {
-      //  if(dep2[i]==(regmap_pre[i][hr]&63)) nr|=1<<hr;
-      //  if(dep2[i]==(regs[i].regmap_entry[hr]&63)) nr|=1<<hr;
-      //}
-      if(regs[i].regmap_entry[hr]==SR) nr|=1<<hr;
-      if(regs[i].regmap[hr]==SR) nr|=1<<hr;
-      if(regmap_pre[i][hr]==SR) nr|=1<<hr;
-      // Don't store a register immediately after writing it,
-      // may prevent dual-issue.
-      // But do so if this is a branch target, otherwise we
-      // might have to load the register before the branch.
-      if(i>0&&!bt[i]&&((regs[i].wasdirty>>hr)&1)) {
-        if(regmap_pre[i][hr]>=0&&!((unneeded_reg[i]>>regmap_pre[i][hr])&1)) {
-          if(rt1[i-1]==(regmap_pre[i][hr]&63)) nr|=1<<hr;
-          if(rt2[i-1]==(regmap_pre[i][hr]&63)) nr|=1<<hr;
-        }
-        if(regs[i].regmap_entry[hr]>=0&&!((unneeded_reg[i]>>regs[i].regmap_entry[hr])&1)) {
-          if(rt1[i-1]==(regs[i].regmap_entry[hr]&63)) nr|=1<<hr;
-          if(rt2[i-1]==(regs[i].regmap_entry[hr]&63)) nr|=1<<hr;
-        }
-      }
-    }
-    // Cycle count is needed at branches.  Assume it is needed at the target too.
-    if(i==0||bt[i]||itype[i]==CJUMP||itype[i]==SJUMP) {
-      if(regmap_pre[i][HOST_CCREG]==CCREG) nr|=1<<HOST_CCREG;
-      if(regs[i].regmap_entry[HOST_CCREG]==CCREG) nr|=1<<HOST_CCREG;
-    }
-    // Save it
-    needed_reg[i]=nr;
-    
-    // Deallocate unneeded registers
-    for(hr=0;hr<HOST_REGS;hr++)
-    {
-      if(!((nr>>hr)&1)) {
-        if(regs[i].regmap_entry[hr]!=CCREG) regs[i].regmap_entry[hr]=-1;
-        if((regs[i].regmap[hr]&63)!=rs1[i] && (regs[i].regmap[hr]&63)!=rs2[i] &&
-           (regs[i].regmap[hr]&63)!=rt1[i] && (regs[i].regmap[hr]&63)!=rt2[i] &&
-           (regs[i].regmap[hr]&63)!=PTEMP && (regs[i].regmap[hr]&63)!=CCREG)
-        {
-          if(itype[i]==CJUMP) {
-            regs[i].regmap[hr]=-1;
-            regs[i].isdoingcp&=~(1<<hr);
-            if(i<slen-1) {
-              regmap_pre[i+1][hr]=-1;
-              regs[i+1].wasdoingcp&=~(1<<hr);
-            }
-          }
-        }
-        if(itype[i]==RJUMP||itype[i]==UJUMP||itype[i]==SJUMP)
-        {
-          int temp1=-1,temp2=-1;
-          //if(get_reg(regs[i].regmap,rt1[i+1]|64)>=0||get_reg(branch_regs[i].regmap,rt1[i+1]|64)>=0)
-          //{
-          //  d1=dep1[i+1];
-          //  d2=dep2[i+1];
-          //}
-          if(itype[i+1]==LOAD || itype[i+1]==STORE || 
-             itype[i+1]==RMW || itype[i+1]==PCREL ||
-             itype[i+1]==SYSTEM || source[i]==0x002B /* RTE */ )
-            temp1=MOREG;
-          if(itype[i+1]==COMPLEX) {
-            temp1=MACH;
-            temp2=MACL;
-          }
-          if(regs[i].regmap[hr]!=rs1[i] && regs[i].regmap[hr]!=rs2[i] && regs[i].regmap[hr]!=rs3[i] && 
-             regs[i].regmap[hr]!=rt1[i] && regs[i].regmap[hr]!=rt2[i] &&
-             regs[i].regmap[hr]!=rs1[i+1] && regs[i].regmap[hr]!=rs2[i+1] && regs[i].regmap[hr]!=rs3[i+1] &&
-             regs[i].regmap[hr]!=rt1[i+1] && regs[i].regmap[hr]!=rt2[i+1] &&
-             regs[i].regmap[hr]!=RHASH && regs[i].regmap[hr]!=RHTBL &&
-             regs[i].regmap[hr]!=RTEMP && regs[i].regmap[hr]!=PTEMP &&
-             regs[i].regmap[hr]!=CCREG &&
-             regs[i].regmap[hr]!=temp1 && regs[i].regmap[hr]!=temp2 )
-          {
-            regs[i].regmap[hr]=-1;
-            regs[i].isdoingcp&=~(1<<hr);
-            if(branch_regs[i].regmap[hr]!=rs1[i] && branch_regs[i].regmap[hr]!=rs2[i] && branch_regs[i].regmap[hr]!=rs3[i] &&
-               branch_regs[i].regmap[hr]!=rt1[i] && branch_regs[i].regmap[hr]!=rt2[i] &&
-               branch_regs[i].regmap[hr]!=rs1[i+1] && branch_regs[i].regmap[hr]!=rs2[i+1] && branch_regs[i].regmap[hr]!=rs3[i+1] &&
-               branch_regs[i].regmap[hr]!=rt1[i+1] && branch_regs[i].regmap[hr]!=rt2[i+1] &&
-               branch_regs[i].regmap[hr]!=RHASH && branch_regs[i].regmap[hr]!=RHTBL &&
-               branch_regs[i].regmap[hr]!=RTEMP && branch_regs[i].regmap[hr]!=PTEMP &&
-               branch_regs[i].regmap[hr]!=CCREG &&
-               branch_regs[i].regmap[hr]!=temp1 && branch_regs[i].regmap[hr]!=temp2)
-            {
-              branch_regs[i].regmap[hr]=-1;
-              branch_regs[i].regmap_entry[hr]=-1;
-              if(itype[i]!=RJUMP&&itype[i]!=UJUMP)
-              {
-                if(i<slen-2) {
-                  regmap_pre[i+2][hr]=-1;
-                  regs[i+2].wasdoingcp&=~(1<<hr);
-                }
-              }
-            }
-          }
-        }
-        else
-        {
-          // Non-branch
-          if(i>0)
-          {
-            int temp1=-1,temp2=-1;
-            //if(get_reg(regs[i].regmap,rt1[i]|64)>=0)
-            //{
-            //  d1=dep1[i];
-            //  d2=dep2[i];
-            //}
-            if(itype[i]==LOAD || itype[i]==STORE || itype[i]==RMW ||
-               itype[i]==PCREL || itype[i]==SYSTEM )
-              temp1=MOREG;
-            if(itype[i]==COMPLEX) {
-              temp1=MACH;
-              temp2=MACL;
-            }
-            else if(itype[i]==SYSTEM) {
-              temp2=CCREG;
-            }
-            if(regs[i].regmap[hr]!=rt1[i] && regs[i].regmap[hr]!=rt2[i] &&
-               regs[i].regmap[hr]!=rs1[i] && regs[i].regmap[hr]!=rs2[i] &&
-               regs[i].regmap[hr]!=rs3[i] &&
-               regs[i].regmap[hr]!=temp1 && regs[i].regmap[hr]!=temp2 &&
-               regs[i].regmap[hr]!=CCREG)
-            {
-              if(i<slen-1&&!is_ds[i]) {
-                if(regmap_pre[i+1][hr]!=-1 || regs[i].regmap[hr]!=-1)
-                if(regmap_pre[i+1][hr]!=regs[i].regmap[hr])
-                {
-                  printf("fail: %x (%d %d!=%d)\n",start+i*2,hr,regmap_pre[i+1][hr],regs[i].regmap[hr]);
-                  assert(regmap_pre[i+1][hr]==regs[i].regmap[hr]);
-                }
-                regmap_pre[i+1][hr]=-1;
-                if(regs[i+1].regmap_entry[hr]==CCREG) regs[i+1].regmap_entry[hr]=-1;
-                regs[i+1].wasdoingcp&=~(1<<hr);
-              }
-              regs[i].regmap[hr]=-1;
-              regs[i].isdoingcp&=~(1<<hr);
-            }
-          }
-        }
-      }
-    }
-  }
-  }
+  cull_unused_regs();
   
   /* Pass 5 - Pre-allocate registers */
   
@@ -8595,7 +8724,7 @@ int sh2_recompile_block(int addr)
         // replace it with the new address.
         // Don't add new entries.  We'll insert the
         // ones that actually get used in check_addr().
-        ht_bin=hash_table[((vaddr>>16)^vaddr)&0xFFFF];
+        ht_bin=hash_table[ht_index(vaddr)];
         if(ht_bin[0]==vaddr) {
           ht_bin[1]=entry_point;
         }

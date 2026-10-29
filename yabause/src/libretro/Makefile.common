@@ -121,9 +121,13 @@ ifeq ($(HAVE_GRIFFIN), 1)
 else
 	SOURCES_C +=  $(SOURCE_DIR)/snddummy.c \
 		$(SOURCE_DIR)/vdp1.c \
+		$(SOURCE_DIR)/vdp1time.c \
 		$(SOURCE_DIR)/vdp2.c \
 		$(SOURCE_DIR)/vidshared.c \
 		$(SOURCE_DIR)/vidsoft.c \
+		$(SOURCE_DIR)/vidsoftkeep.c \
+		$(SOURCE_DIR)/vidsoftsprite8.c \
+		$(SOURCE_DIR)/vidsoftquad.c \
 		$(SOURCE_DIR)/titan/titan.c \
 		$(SOURCE_DIR)/yabause.c \
 		$(CORE_DIR)/libretro.c \
