@@ -55,6 +55,7 @@
 #include "yabause.h"
 #include "vdp1.h"
 #include "scu.h"
+#include "vdp2.h"
 
 #define VDP1TIME_MAXCMDS 2048
 #define VDP1TIME_MAXWRITES 16384
@@ -678,6 +679,7 @@ void Vdp1TimeSaveState(void **stream)
       memcpy(e + 12, &size, 4);
       memcpy(e + 16, w->old, 4);
    }
+   const int offset = MemStateWriteHeader(stream, "VDPT", 1);
    MemStateWrite((void *)&inflight, 4, 1, stream);
    MemStateWrite((void *)&regs, sizeof(Vdp1), 1, stream);
    MemStateWrite((void *)&later, 4, 1, stream);
@@ -686,22 +688,35 @@ void Vdp1TimeSaveState(void **stream)
    MemStateWrite((void *)&len, sizeof(double), 1, stream);
    MemStateWrite((void *)&nwrites, 4, 1, stream);
    MemStateWrite((void *)wr, sizeof(wr), 1, stream);
+   MemStateFinishHeader(stream, offset);
    if (inflight)
       vdp1time_saved++;
 }
 
-/* A state load (after the registers and VDP1 RAM): resume the list that
-   was drawing, as Beetle does; the walk is redone on VDP1 RAM as the list
-   started (the journaled writes undone). Older states hold none: a list
-   drawing then is lost, as before. */
-void Vdp1TimeLoadState(const void *stream, int version)
+/* A state load, after everything else (the clock type is restored): resume
+   the list that was drawing, as Beetle does; the walk is redone on VDP1 RAM
+   as the list started (the journaled writes undone). The block sits at the
+   end of the state, before end (the movie position): states without it
+   (older cores) leave the list lost, as before. */
+void Vdp1TimeLoadState(const void *stream, int end)
 {
    u32 inflight = 0, later, started, nwrites, i;
    double elapsed, len;
    Vdp1 regs;
+   int version, size;
    vdp1time_inflight = 0;
-   if (version < 2)
+   if (MemStateGetOffset() + 12 > end)
       return;
+   {
+      const int at = MemStateGetOffset();
+      const int expect = 4 * 4 + (int)sizeof(Vdp1) + 2 * (int)sizeof(double) + VDP1TIME_MAXWRITES * VDP1TIME_STATEWR;
+      if (MemStateCheckRetrieveHeader(stream, "VDPT", &version, &size) != 0 || version != 1 || size != expect
+          || at + 12 + size > end)
+      {
+         MemStateSetOffset(at);
+         return;
+      }
+   }
    MemStateRead((void *)&inflight, 4, 1, stream);
    MemStateRead((void *)&regs, sizeof(Vdp1), 1, stream);
    MemStateRead((void *)&later, 4, 1, stream);
@@ -769,6 +784,7 @@ void Vdp1TimeLoadState(const void *stream, int version)
    vdp1time_nwrites = nwrites;
    vdp1time_inflight = 1;
    vdp1time_resumed++;
+   Vdp2Vdp1ListResumed();
 }
 
 void Vdp1TimeStats(void)

@@ -1552,6 +1552,9 @@ int YabSaveStateStream(void ** stream)
 
    MemStateWrite((void *)buf, totalsize, 1, stream);
 
+   // a VDP1 list still drawing (vdp1time.c); before the movie position, so
+   // cores without it skip it
+   Vdp1TimeSaveState(stream);
    movieposition=MemStateGetOffset();
    //write the movie to the end of the savestate
    SaveMovieInState(stream);
@@ -1831,6 +1834,7 @@ int YabLoadStateStream(const void * stream, size_t size_stream)
    YuiSwapBuffers();
    free(buf);
 
+   Vdp1TimeLoadState(stream, movieposition);
    MemStateSetOffset(movieposition);
    MovieReadState(stream);
    }

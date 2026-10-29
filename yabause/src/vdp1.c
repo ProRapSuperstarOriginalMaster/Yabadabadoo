@@ -762,16 +762,13 @@ int Vdp1SaveState(void ** stream)
    u8 back_framebuffer[0x40000] = { 0 };
 #endif
 
-   offset = MemStateWriteHeader(stream, "VDP1", 2);
+   offset = MemStateWriteHeader(stream, "VDP1", 1);
 
    // Write registers
    MemStateWrite((void *)Vdp1Regs, sizeof(Vdp1), 1, stream);
 
    // Write VDP1 ram
    MemStateWrite((void *)Vdp1Ram, 0x80000, 1, stream);
-
-   // Version 2: a list still drawing (vdp1time.c)
-   Vdp1TimeSaveState(stream);
 
 #ifdef IMPROVED_SAVESTATES
    for (i = 0; i < 0x40000; i++)
@@ -784,13 +781,14 @@ int Vdp1SaveState(void ** stream)
 
 //////////////////////////////////////////////////////////////////////////////
 
-int Vdp1LoadState(const void * stream, int version, int size)
+int Vdp1LoadState(const void * stream, UNUSED int version, int size)
 {
-   const int start = MemStateGetOffset();
 #ifdef IMPROVED_SAVESTATES
    int i = 0;
    u8 back_framebuffer[0x40000] = { 0 };
 #endif
+
+   Vdp1TimeDiscard();
 
    // Read registers
    MemStateRead((void *)Vdp1Regs, sizeof(Vdp1), 1, stream);
@@ -799,16 +797,12 @@ int Vdp1LoadState(const void * stream, int version, int size)
    MemStateRead((void *)Vdp1Ram, 0x80000, 1, stream);
    VDP1_RAM_MARK_ALL();
 
-   // Version 2: a list still drawing (vdp1time.c)
-   Vdp1TimeLoadState(stream, version);
-
 #ifdef IMPROVED_SAVESTATES
    MemStateRead((void *)back_framebuffer, 0x40000, 1, stream);
 
    for (i = 0; i < 0x40000; i++)
       Vdp1FrameBufferWriteByte(i, back_framebuffer[i]);
 #endif
-   MemStateSetOffset(start + size);
    return size;
 }
 
