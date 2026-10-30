@@ -804,61 +804,33 @@ WriteInvalidateByte:
 	.global	div1
 	.type	div1, %function
 div1:
-	/* r0 = dividend */
-	/* r1 = divisor */
-	/* r2 = sr */
+	/* r0 = dividend (Rn), r1 = divisor (Rm), r2 = SR; returns Rn in r0 and
+	   SR in r2. As sh2int.c: q = old bit 31 of Rn, Rn = Rn<<1 | T, then
+	   Rn -= Rm if old Q == M (q ^= borrow) else Rn += Rm (q ^= carry),
+	   Q = q ^ M, T = (Q == M) */
+	lsrs	r3, r2, #1 /* carry = T */
+	adcs	r0, r0, r0 /* rn=(rn<<1)+T, carry = old bit 31 */
+	mov	r3, #0
+	adc	r3, r3, #0 /* q */
+	eor	r4, r2, r2, lsr #1 /* bit 8: old Q ^ M */
+	tst	r4, #0x100
+	bne	1f
+	subs	r0, r0, r1
+	eorcc	r3, r3, #1 /* borrow */
+	b	2f
+1:
+	adds	r0, r0, r1
+	eorcs	r3, r3, #1 /* carry */
+2:
 	tst	r2, #0x200
-	bne	div1_negative_divisor
-	lsrs	r2, r2, #1 /* Get T bit and shift out */
-	adcs	r0, r0, r0 /* rn=(rn<<1)+T */
-	adc	r3, r3, r3 /* New Q in r3 */
-	mov	r4, r1     /* divisor (rm) */
-	tst	r2, #0x80  /* Get (shifted) Q bit */
-	mov	r5, #1
-	rsbeq	r4, r1, #0 /* inverted if old_Q clear */
-	moveq	r5, #0     /* 0 if old_Q clear, 1 otherwise */
-	adds	r0, r4, r0 /* rn+rm if old_Q, rn-rm if !old_Q */
-		           /* carry set if rn < old_rn */
-	adc	r3, r5, r3 /* low bit = (rn<old_rn)^new_Q^old_Q */
-	                   /* inverted for old_Q==1, ie (rn>=old_rn)^new_Q */
-	orr	r2, r2, #0x80 /* set (shifted) Q bit */
-	and	r3, r3, #1
-	orrs	r5, r4, r5 /* zero if old_Q==0 && rn==old_rn */
-	eoreq	r3, r3, #1 /* invert result for old_Q==0 && rn==old_rn */
-	orr	r2, r3, r2, lsl #1 /* New T = (Q==M) */
-	eor	r2, r2, r3, lsl #8 /* save new Q (=!T) */
-/*
-	mov	r4, r0
-	mov	r5, r1
-	mov	r6, r2
-	mov	r7, r14
-	bl	debug_division
-	mov	r0, r4
-	mov	r1, r5
-	mov	r2, r6
-	mov	r14, r7
-*/
-	mov	pc, lr
-div1_negative_divisor:
-	lsrs	r2, r2, #1 /* Get T bit and shift out */
-	adcs	r0, r0, r0 /* rn=(rn<<1)+T */
-	adc	r3, r3, r3 /* New Q in r3 */
-	mov	r4, r1     /* divisor (rm) */
-	tst	r2, #0x80  /* Get (shifted) Q bit */
-	mov	r5, #1
-	rsbne	r4, r1, #0 /* inverted if old_Q clear */
-	movne	r5, #0     /* 0 if old_Q set, 1 otherwise */
-	adds	r0, r4, r0 /* rn+rm if !old_Q, rn-rm if old_Q */
-		           /* carry set if rn < old_rn */
-	adc	r3, r5, r3 /* low bit = (rn<old_rn)^new_Q^old_Q */
-	                   /* inverted for old_Q==1, ie (rn>=old_rn)^new_Q */
-	bic	r2, r2, #0x80 /* clear (shifted) Q bit */
-	and	r3, r3, #1
-	orrs	r5, r4, r5 /* zero if old_Q==1 && rn==old_rn */
-	/*eoreq	r3, r3, #1 /* invert result for old_Q==1 && rn==old_rn */
-	eorne	r3, r3, #1 /* don't invert result for old_Q==1 && rn==old_rn */
-	orr	r2, r3, r2, lsl #1 /* New T = (Q==M) */
-	orr	r2, r2, r3, lsl #8 /* save new Q (=T) */
+	eorne	r3, r3, #1 /* Q = q ^ M */
+	bic	r2, r2, #0x100
+	bic	r2, r2, #1
+	orr	r2, r2, r3, lsl #8
+	eor	r4, r3, r2, lsr #9 /* bit 0: Q ^ M */
+	and	r4, r4, #1
+	eor	r4, r4, #1
+	orr	r2, r2, r4 /* T = (Q == M) */
 	mov	pc, lr
 	.size	div1, .-div1
 
@@ -913,13 +885,18 @@ macl:
 	tst	r4, #2
 	moveq	pc, lr
 macl_saturation:
-	cmn	r1, #0x8000
+	/* S=1: a sum outside 48 bits is limited towards the sign of the
+	   product (the manual's text, and Mednafen), also when the 64-bit sum
+	   wrapped */
+	add	r7, r1, #0x8000
+	cmp	r7, #0x10000
+	movlo	pc, lr /* MACH within -0x8000..0x7FFF */
+	teq	r10, r12
 	mov	r7, #0x8000
-	movlt	r0, #0
-	rsblt	r1, r7, #0
-	cmp	r1, #0x8000
-	mvnge	r0, #0
-	subge	r1, r7, #1
+	movmi	r0, #0
+	rsbmi	r1, r7, #0 /* 0xFFFF8000 */
+	mvnpl	r0, #0
+	subpl	r1, r7, #1 /* 0x00007FFF */
 	mov	pc, lr
 	.size	macl, .-macl
 
@@ -973,15 +950,21 @@ macw:
 	asr	r10, r10, #16
 	asr	r12, r12, #16
 	mov	r14, r7
-	smlal	r0, r1, r10, r12
 	tst	r4, #2
-	moveq	pc, lr
+	bne	macw_saturation
+	smlal	r0, r1, r10, r12
+	mov	pc, lr
 macw_saturation:
-	cmn	r0, #0x80000000
-	adcs	r7, r1, #0
-	mvnne	r0, #0x80000000 /* 0x7FFFFFFF */
-	movlt	r0, #0x80000000 /* 0x80000000 */
-	mov	r1, r9
+	/* S=1: MACL alone takes the sum; on overflow it is limited towards the
+	   sign of the product and bit 0 of MACH is set (the manual's text, and
+	   Mednafen) */
+	mul	r7, r10, r12
+	adds	r0, r0, r7
+	movvc	pc, lr
+	orr	r1, r1, #1
+	cmp	r7, #0
+	mvnge	r0, #0x80000000 /* 0x7FFFFFFF */
+	movlt	r0, #0x80000000
 	mov	pc, lr
 	.size	macw, .-macw
 .macmmptr:

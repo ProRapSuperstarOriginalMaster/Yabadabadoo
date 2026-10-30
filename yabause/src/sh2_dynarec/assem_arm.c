@@ -1158,6 +1158,14 @@ void emit_shrdimm(int rs,int rs2,unsigned int imm,int rt)
   assem_debug("shrd %%%s,%%%s,%d\n",regname[rt],regname[rs2],imm);
   assert(imm>0);
   assert(imm<32);
+  if(rs==rs2) { // XTRCT Rn,Rn
+    emit_rorimm(rs,imm,rt);
+    return;
+  }
+  if(rs2==rt) { // rt is written first
+    emit_mov(rs2,HOST_TEMPREG);
+    rs2=HOST_TEMPREG;
+  }
   //if(imm==1) ...
   assem_debug("lsr %s,%s,#%d\n",regname[rt],regname[rs],imm);
   output_w32(0xe1a00020|rd_rn_rm(rt,0,rs)|(imm<<7));
@@ -1644,6 +1652,20 @@ void emit_subc(int s, int t, int sr)
   emit_adc(sr,sr,sr);
   emit_xorimm(sr,1,sr);
 }
+void emit_orrvs_imm(int rs,int imm,int rt);
+// ADDV/SUBV: t = t +/- s, T = signed overflow
+void emit_addv(int s, int t, int sr)
+{
+  emit_adds(t,s,t);
+  emit_andimm(sr,~1,sr);
+  emit_orrvs_imm(sr,1,sr);
+}
+void emit_subv(int s, int t, int sr)
+{
+  emit_subs(t,s,t);
+  emit_andimm(sr,~1,sr);
+  emit_orrvs_imm(sr,1,sr);
+}
 void emit_shrsr(int t, int sr)
 {
   emit_andimm(sr,~1,sr);
@@ -1829,26 +1851,16 @@ void emit_cmpstr(int s1, int s2, int sr, int temp)
   //emit_xor(s1,s2,s2);
   //emit_orrne_imm(sr,1,sr);
 }
+// NEGC Rm,Rn: rt = 0 - rs - T, T = borrow (rt<0: only T)
 void emit_negc(int rs, int rt, int sr)
 {
-assert(0);
-/*
-  assert(rs>=0&&rs<8);
-  if(rt<0) {
-    emit_shrimm(sr,1,sr); // Get C flag
-    emit_jc((int)out+10); // 6
-    emit_neg(rs,rs); // 2
-    emit_neg(rs,rs); // 2
-    emit_adc(sr,sr); // Save C flag
-  }else{
-    if(rs!=rt) emit_mov(rs,rt);
-    emit_shrimm(sr,1,sr); // Get C flag
-    emit_jc((int)out+9); // 6
-    emit_addimm(rt,-1,rt); // 3
-    emit_adc(sr,sr); // Save C flag
-    emit_not(rt,rt);
-  }
-*/
+  int t=rt>=0?rt:HOST_TEMPREG;
+  emit_xorimm(sr,1,sr);
+  emit_lsrs_imm(sr,1,sr); // C = !T
+  assem_debug("rscs %s,%s,#0\n",regname[t],regname[rs]);
+  output_w32(0xe2f00000|rd_rn_rm(t,rs,0));
+  emit_adc(sr,sr,sr);
+  emit_xorimm(sr,1,sr);
 }
 
 void emit_readword_indexed(int offset, int rs, int rt)

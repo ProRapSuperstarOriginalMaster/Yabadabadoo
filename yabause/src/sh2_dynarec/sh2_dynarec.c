@@ -2075,6 +2075,16 @@ void alu_assemble(int i,struct regstat *i_regs)
     {
       signed char s,t,sr,temp;
       t=get_reg(i_regs->regmap,rt1[i]);
+      #ifdef HOST_TEMPREG
+      if(t<0&&(opcode2[i]&3)) {
+        // Rn is not needed, T is: ADDC/ADDV/SUBC/SUBV on a copy
+        sr=get_reg(i_regs->regmap,SR);
+        if(sr>=0&&!(i_regs->u&(1LL<<TBIT))) {
+          emit_loadreg(rs2[i],HOST_TEMPREG);
+          t=HOST_TEMPREG;
+        }
+      }
+      #endif
       if(t>=0) {
         s=get_reg(i_regs->regmap,rs1[i]);
         sr=get_reg(i_regs->regmap,SR);
@@ -2083,12 +2093,10 @@ void alu_assemble(int i,struct regstat *i_regs)
         //assert(s2==t);
         if(opcode2[i]==8) emit_sub(t,s,t);
         if(opcode2[i]==10) emit_subc(s,t,sr);
-        //if(opcode2[i]==11) emit_subv(s,sr,temp);
-        assert(opcode2[i]!=11);
+        if(opcode2[i]==11) emit_subv(s,t,sr);
         if(opcode2[i]==12) emit_add(s,t,t);
         if(opcode2[i]==14) emit_addc(s,t,sr);
-        //if(opcode2[i]==15) emit_addv(s,sr,temp);
-        assert(opcode2[i]!=15);
+        if(opcode2[i]==15) emit_addv(s,t,sr);
       }
     }
   }
@@ -2114,7 +2122,7 @@ void alu_assemble(int i,struct regstat *i_regs)
   if(opcode[i]==6) { // NOT/SWAP/NEG
     int s=get_reg(i_regs->regmap,rs1[i]);
     int t=get_reg(i_regs->regmap,rt1[i]);
-    if(s<0) {
+    if(s<0&&t>=0) { // (no result register: the result is not needed)
       // FIXME: Preload?
       emit_loadreg(rs1[i],t);
       s=t;
@@ -2129,6 +2137,12 @@ void alu_assemble(int i,struct regstat *i_regs)
       int sr=get_reg(i_regs->regmap,SR);
       if(i_regs->u&(1LL<<rt1[i])) t=-1;
       assert(sr>=0);
+      #ifdef HOST_TEMPREG
+      if(s<0) {
+        emit_loadreg(rs1[i],HOST_TEMPREG);
+        s=HOST_TEMPREG;
+      }
+      #endif
       emit_negc(s,t,sr);
     }
   }
@@ -2164,6 +2178,10 @@ void imm8_assemble(int i,struct regstat *i_regs)
     assert(s>=0);
     assert(sr>=0); // Liveness analysis?
     assert(temp>=0);
+    if((i_regs->wasdoingcp>>s)&1) { // constant not loaded into s yet
+      emit_movimm(cpmap[i][s],temp);
+      s=temp;
+    }
     emit_cmpeqimm(s,imm[i],sr,temp);
   }
   else if(opcode[i]==12) {
@@ -2175,6 +2193,10 @@ void imm8_assemble(int i,struct regstat *i_regs)
       assert(s>=0);
       assert(sr>=0); // Liveness analysis?
       assert(temp>=0);
+      if((i_regs->wasdoingcp>>s)&1) { // constant not loaded into s yet
+        emit_movimm(cpmap[i][s],temp);
+        s=temp;
+      }
       emit_sh2tstimm(s,imm[i],sr,temp);
     }else{
       signed char s,t;
@@ -2944,6 +2966,15 @@ void flags_assemble(int i,struct regstat *i_regs)
 void complex_assemble(int i,struct regstat *i_regs)
 {
   if(opcode[i]==3&&opcode2[i]==4) { // DIV1
+    #ifdef HOST_TEMPREG
+    if(rs1[i]==rs2[i]) {
+      // DIV1 Rn,Rn: Rn is in register 0 only (complex_alloc). As in
+      // sh2int.c the divisor is Rn after the shift: (Rn<<1)|T into 1.
+      emit_andimm(2,1,HOST_TEMPREG);
+      emit_shlimm(0,1,1);
+      emit_or(1,HOST_TEMPREG,1);
+    }
+    #endif
     emit_call((pointer)div1);
   }
   if(opcode[i]==0&&opcode2[i]==15) { // MAC.L
@@ -3135,6 +3166,38 @@ void load_regs(signed char entry[],signed char regmap[],int rs1,int rs2,int rs3)
       }
     }
   }
+}
+
+// wb_invalidate() from a branch's registers to branch_regs: the dirty bits of
+// branch_regs are worked out per host register (clean_registers), so a dirty
+// register moved to another host register can arrive there clean and never be
+// written back. Write those back first.
+static void wb_invalidate_moved(signed char pre[],signed char entry[],u32 dirty,u32 entry_dirty,u64 u)
+{
+  int hr,nr;
+  for(hr=0;hr<HOST_REGS;hr++) {
+    if(hr!=EXCLUDE_REG&&pre[hr]>=0&&pre[hr]<TBIT&&((dirty>>hr)&1)&&!((u>>pre[hr])&1)) {
+      nr=get_reg(entry,pre[hr]);
+      if(nr>=0&&nr!=hr&&!((entry_dirty>>nr)&1)) emit_storereg(pre[hr],hr);
+    }
+  }
+  wb_invalidate(pre,entry,dirty,u);
+}
+
+// load_regs() after wb_invalidate(pre,regmap,...): a register that was in a
+// host register in pre has been moved (or reloaded) to its place in regmap.
+// Loading it again from memory would lose it when it is dirty or a constant
+// (a delay slot assembled with branch_regs, e.g. DIV1 with its fixed registers).
+static void load_regs_moved(signed char pre[],signed char regmap[],int rs1,int rs2,int rs3)
+{
+  signed char moved[HOST_REGS];
+  int hr;
+  for(hr=0;hr<HOST_REGS;hr++) {
+    int r=regmap[hr];
+    if(hr!=EXCLUDE_REG&&r>=0&&(r&63)<TEMPREG&&get_reg(pre,r)>=0) moved[hr]=r;
+    else moved[hr]=pre[hr];
+  }
+  load_regs(moved,regmap,rs1,rs2,rs3);
 }
 
 // Load registers prior to the start of a loop
@@ -3932,9 +3995,9 @@ void ujump_assemble(int i,struct regstat *i_regs)
   ds_assemble(i+1,i_regs);
   bc_unneeded=regs[i].u;
   bc_unneeded|=1LL<<rt1[i];
-  wb_invalidate(regs[i].regmap,branch_regs[i].regmap,regs[i].dirty,
+  wb_invalidate_moved(regs[i].regmap,branch_regs[i].regmap,regs[i].dirty,branch_regs[i].dirty,
                 bc_unneeded);
-  load_regs(regs[i].regmap,branch_regs[i].regmap,CCREG,CCREG,CCREG);
+  load_regs_moved(regs[i].regmap,branch_regs[i].regmap,CCREG,CCREG,CCREG);
   if(rt1[i]==PR) {
     int rt;
     unsigned int return_address;
@@ -3999,6 +4062,7 @@ void rjump_assemble(int i,struct regstat *i_regs)
 {
   signed char *i_regmap=i_regs->regmap;
   int temp;
+  int target_saved=0;
   int rs,cc,adj,rh,ht;
   u64 bc_unneeded;
   rs=get_reg(branch_regs[i].regmap,rs1[i]);
@@ -4021,6 +4085,12 @@ void rjump_assemble(int i,struct regstat *i_regs)
       else
         emit_mov(rs,temp);
       rs=temp;
+      // A COMPLEX slot calls a function, which can overwrite the copy:
+      // keep it in memory meanwhile
+      if(itype[i+1]==COMPLEX) {
+        emit_writeword(temp,slave?(pointer)&slave_pc:(pointer)&master_pc);
+        target_saved=1;
+      }
     }
   }
   address_generation(i+1,i_regs,regs[i].regmap_entry);
@@ -4063,9 +4133,10 @@ void rjump_assemble(int i,struct regstat *i_regs)
   bc_unneeded=regs[i].u;
   bc_unneeded|=1LL<<rt1[i];
   bc_unneeded&=~(1LL<<rs1[i]);
-  wb_invalidate(regs[i].regmap,branch_regs[i].regmap,regs[i].dirty,
+  wb_invalidate_moved(regs[i].regmap,branch_regs[i].regmap,regs[i].dirty,branch_regs[i].dirty,
                 bc_unneeded);
-  load_regs(regs[i].regmap,branch_regs[i].regmap,rs1[i],CCREG,CCREG);
+  load_regs_moved(regs[i].regmap,branch_regs[i].regmap,rs1[i],CCREG,CCREG);
+  if(target_saved) emit_readword(slave?(pointer)&slave_pc:(pointer)&master_pc,rs);
   if(rt1[i]==PR) {
     int rt,return_address;
     rt=get_reg(branch_regs[i].regmap,rt1[i]);
@@ -4666,9 +4737,9 @@ void sjump_assemble(int i,struct regstat *i_regs)
     ds_assemble(i+1,i_regs);
     bc_unneeded=regs[i].u;
     bc_unneeded&=~((1LL<<rs1[i])|(1LL<<rs2[i]));
-    wb_invalidate(regs[i].regmap,branch_regs[i].regmap,regs[i].dirty,
+    wb_invalidate_moved(regs[i].regmap,branch_regs[i].regmap,regs[i].dirty,branch_regs[i].dirty,
                   bc_unneeded);
-    load_regs(regs[i].regmap,branch_regs[i].regmap,CCREG,SR,SR);
+    load_regs_moved(regs[i].regmap,branch_regs[i].regmap,CCREG,SR,SR);
     cc=get_reg(branch_regs[i].regmap,CCREG);
     assert(cc==HOST_CCREG);
     if(unconditional) 
@@ -4797,17 +4868,17 @@ void sjump_assemble(int i,struct regstat *i_regs)
     if(!nop) {
       if(taken) set_jump_target(taken,(int)out);
       assem_debug("1:\n");
-      wb_invalidate(regs[i].regmap,branch_regs[i].regmap,regs[i].dirty,
+      wb_invalidate_moved(regs[i].regmap,branch_regs[i].regmap,regs[i].dirty,branch_regs[i].dirty,
                     ds_unneeded);
       // load regs
-      load_regs(regs[i].regmap,branch_regs[i].regmap,rs1[i+1],rs2[i+1],rs3[i+1]);
+      load_regs_moved(regs[i].regmap,branch_regs[i].regmap,rs1[i+1],rs2[i+1],rs3[i+1]);
       address_generation(i+1,&branch_regs[i],0);
       if(itype[i+1]==COMPLEX) {
         if((opcode[i+1]|4)==4&&opcode2[i+1]==15) { // MAC.W/MAC.L
-          load_regs(regs[i].regmap,branch_regs[i].regmap,MACL,MACH,MACH);
+          load_regs_moved(regs[i].regmap,branch_regs[i].regmap,MACL,MACH,MACH);
         }
       }
-      load_regs(regs[i].regmap,branch_regs[i].regmap,CCREG,CCREG,CCREG);
+      load_regs_moved(regs[i].regmap,branch_regs[i].regmap,CCREG,CCREG,CCREG);
       ds_assemble(i+1,&branch_regs[i]);
       cc=get_reg(branch_regs[i].regmap,CCREG);
       if(cc==-1) {
@@ -4841,16 +4912,16 @@ void sjump_assemble(int i,struct regstat *i_regs)
       if(nottaken1) set_jump_target(nottaken1,(int)out);
       set_jump_target(nottaken,(int)out);
       assem_debug("2:\n");
-      wb_invalidate(regs[i].regmap,branch_regs[i].regmap,regs[i].dirty,
+      wb_invalidate_moved(regs[i].regmap,branch_regs[i].regmap,regs[i].dirty,branch_regs[i].dirty,
                     ds_unneeded);
-      load_regs(regs[i].regmap,branch_regs[i].regmap,rs1[i+1],rs2[i+1],rs3[i+1]);
+      load_regs_moved(regs[i].regmap,branch_regs[i].regmap,rs1[i+1],rs2[i+1],rs3[i+1]);
       address_generation(i+1,&branch_regs[i],0);
       if(itype[i+1]==COMPLEX) {
         if((opcode[i+1]|4)==4&&opcode2[i+1]==15) { // MAC.W/MAC.L
-          load_regs(regs[i].regmap,branch_regs[i].regmap,MACL,MACH,MACH);
+          load_regs_moved(regs[i].regmap,branch_regs[i].regmap,MACL,MACH,MACH);
         }
       }
-      load_regs(regs[i].regmap,branch_regs[i].regmap,CCREG,CCREG,CCREG);
+      load_regs_moved(regs[i].regmap,branch_regs[i].regmap,CCREG,CCREG,CCREG);
       ds_assemble(i+1,&branch_regs[i]);
     }
   }
@@ -4968,6 +5039,36 @@ void bios_assemble(int i,struct regstat *i_regs)
     emit_call((pointer)master_handle_bios);
 }
 
+// MAC.L and MAC.W read MACH and MACL (the accumulator is not one of their rs*)
+static u64 unneeded_mac(u64 u,int i)
+{
+  if(itype[i]==COMPLEX&&(opcode[i]|4)==4&&opcode2[i]==15) u&=~((1LL<<MACH)|(1LL<<MACL));
+  return u;
+}
+
+// T is a bit of SR (TBIT stands for it alone): an instruction reading SR
+// (DIV1, STC SR, ...) needs T, one reading T needs the SR register
+static u64 unneeded_sr_t(u64 u,int i)
+{
+  if(rs1[i]==SR||rs2[i]==SR||rs3[i]==SR) u&=~(1LL<<TBIT);
+  if(rs1[i]==TBIT||rs2[i]==TBIT||rs3[i]==TBIT) u&=~(1LL<<SR);
+  return u;
+}
+
+// The registers unneeded before instruction i, from those unneeded after it
+// (u): what i writes is unneeded, what it reads is needed
+static u64 unneeded_step(u64 u,int i)
+{
+  if(rt1[i]>=0) u|=1LL<<rt1[i];
+  if(rt2[i]>=0) u|=1LL<<rt2[i];
+  if(rs1[i]>=0) u&=~(1LL<<rs1[i]);
+  if(rs2[i]>=0) u&=~(1LL<<rs2[i]);
+  if(rs3[i]>=0) u&=~(1LL<<rs3[i]);
+  u=unneeded_mac(u,i);
+  u=unneeded_sr_t(u,i);
+  return u;
+}
+
 // Basic liveness analysis for SH2 registers
 void unneeded_registers(int istart,int iend,int r)
 {
@@ -4993,11 +5094,7 @@ void unneeded_registers(int istart,int iend,int r)
         branch_unneeded_reg[i]=u;
         if(itype[i]!=CJUMP) {
           // Merge in delay slot
-          if(rt1[i+1]>=0) u|=1LL<<rt1[i+1];
-          if(rt2[i+1]>=0) u|=1LL<<rt2[i+1];
-          if(rs1[i+1]>=0) u&=~(1LL<<rs1[i+1]);
-          if(rs2[i+1]>=0) u&=~(1LL<<rs2[i+1]);
-          if(rs3[i+1]>=0) u&=~(1LL<<rs3[i+1]);
+          u=unneeded_step(u,i+1);
         }
       }
       else
@@ -5017,17 +5114,9 @@ void unneeded_registers(int istart,int iend,int r)
           }
           if(itype[i]!=CJUMP) {
             // Merge in delay slot
-            if(rt1[i+1]>=0) temp_u|=1LL<<rt1[i+1];
-            if(rt2[i+1]>=0) temp_u|=1LL<<rt2[i+1];
-            if(rs1[i+1]>=0) temp_u&=~(1LL<<rs1[i+1]);
-            if(rs2[i+1]>=0) temp_u&=~(1LL<<rs2[i+1]);
-            if(rs3[i+1]>=0) temp_u&=~(1LL<<rs3[i+1]);
+            temp_u=unneeded_step(temp_u,i+1);
           }
-          if(rt1[i]>=0) temp_u|=1LL<<rt1[i];
-          if(rt2[i]>=0) temp_u|=1LL<<rt2[i];
-          if(rs1[i]>=0) temp_u&=~(1LL<<rs1[i]);
-          if(rs2[i]>=0) temp_u&=~(1LL<<rs2[i]);
-          if(rs3[i]>=0) temp_u&=~(1LL<<rs3[i]);
+          temp_u=unneeded_step(temp_u,i);
           unneeded_reg[i]=temp_u;
           // Only go three levels deep.  This recursion can take an
           // excessive amount of time if there are a lot of nested loops.
@@ -5047,11 +5136,7 @@ void unneeded_registers(int istart,int iend,int r)
         //u=0; // for debugging
         //branch_unneeded_reg[i]=u; // for debugging
             // Merge in delay slot
-            if(rt1[i+1]>=0) u|=1LL<<rt1[i+1];
-            if(rt2[i+1]>=0) u|=1LL<<rt2[i+1];
-            if(rs1[i+1]>=0) u&=~(1LL<<rs1[i+1]);
-            if(rs2[i+1]>=0) u&=~(1LL<<rs2[i+1]);
-            if(rs3[i+1]>=0) u&=~(1LL<<rs3[i+1]);
+            u=unneeded_step(u,i+1);
           } else {
             // Conditional branch
             b=unneeded_reg[(ba[i]-start)>>1];
@@ -5060,11 +5145,7 @@ void unneeded_registers(int istart,int iend,int r)
         //branch_unneeded_reg[i]=b; // for debugging
             // Branch delay slot
             if(itype[i]!=CJUMP) {
-              if(rt1[i+1]>=0) b|=1LL<<rt1[i+1];
-              if(rt2[i+1]>=0) b|=1LL<<rt2[i+1];
-              if(rs1[i+1]>=0) b&=~(1LL<<rs1[i+1]);
-              if(rs2[i+1]>=0) b&=~(1LL<<rs2[i+1]);
-              if(rs3[i+1]>=0) b&=~(1LL<<rs3[i+1]);
+              b=unneeded_step(b,i+1);
             }
             u&=b;
             // Always need stack and status in case of interrupt
@@ -5111,6 +5192,8 @@ void unneeded_registers(int istart,int iend,int r)
     if(rs1[i]>=0) u&=~(1LL<<rs1[i]);
     if(rs2[i]>=0) u&=~(1LL<<rs2[i]);
     if(rs3[i]>=0) u&=~(1LL<<rs3[i]);
+    u=unneeded_mac(u,i);
+    u=unneeded_sr_t(u,i);
     // Source-target dependencies
     //uu&=~(tdep<<dep1[i]);
     //uu&=~(tdep<<dep2[i]);
@@ -6101,7 +6184,7 @@ static void cull_unused_regs(void)
       if(itype[i]==LOAD || itype[i]==STORE || itype[i]==RMW ||
          itype[i]==PCREL || itype[i]==SYSTEM )
         temp1=MOREG;
-      if(itype[i]==COMPLEX) {
+      if(itype[i]==COMPLEX&&(opcode[i]|4)==4&&opcode2[i]==15) { // MAC.L/MAC.W
         temp1=MACH;
         temp2=MACL;
       }
@@ -6141,7 +6224,10 @@ static void cull_unused_regs(void)
              itype[i+1]==RMW || itype[i+1]==PCREL ||
              itype[i+1]==SYSTEM || source[i]==0x002B /* RTE */ )
             temp1=MOREG;
-          if(itype[i+1]==COMPLEX) {
+          // MAC.L/MAC.W in the delay slot: the accumulator (only then: with
+          // another slot, MACH/MACL kept here while culled before the branch
+          // would be registers never loaded, written back as garbage)
+          if(itype[i+1]==COMPLEX&&(opcode[i+1]|4)==4&&opcode2[i+1]==15) {
             temp1=MACH;
             temp2=MACL;
           }
@@ -6191,7 +6277,7 @@ static void cull_unused_regs(void)
             if(itype[i]==LOAD || itype[i]==STORE || itype[i]==RMW ||
                itype[i]==PCREL || itype[i]==SYSTEM )
               temp1=MOREG;
-            if(itype[i]==COMPLEX) {
+            if(itype[i]==COMPLEX&&(opcode[i]|4)==4&&opcode2[i]==15) { // MAC.L/MAC.W
               temp1=MACH;
               temp2=MACL;
             }
@@ -7137,6 +7223,7 @@ int sh2_recompile_block(int addr)
         if(rs1[i+1]>=0) current.u&=~(1LL<<rs1[i+1]);
         if(rs2[i+1]>=0) current.u&=~(1LL<<rs2[i+1]);
         if(rs3[i+1]>=0) current.u&=~(1LL<<rs3[i+1]);
+        current.u=unneeded_mac(current.u,i+1);
         if(rs1[i+1]==TBIT||rs2[i+1]==TBIT) current.u&=~(1LL<<SR);
         if(rt1[i+1]==TBIT||rt2[i+1]==TBIT) current.u&=~(1LL<<SR);
         //current.u&=~((1LL<<rs1[i])|(1LL<<rs2[i]));
@@ -7160,6 +7247,7 @@ int sh2_recompile_block(int addr)
         if(rs1[i]>=0) current.u&=~(1LL<<rs1[i]);
         if(rs2[i]>=0) current.u&=~(1LL<<rs2[i]);
         if(rs3[i]>=0) current.u&=~(1LL<<rs3[i]);
+        current.u=unneeded_mac(current.u,i);
         if(rs1[i]==TBIT||rs2[i]==TBIT) current.u&=~(1LL<<SR);
         if(rt1[i]==TBIT||rt2[i]==TBIT) current.u&=~(1LL<<SR);
       } else {
@@ -7177,6 +7265,7 @@ int sh2_recompile_block(int addr)
         current.u=branch_unneeded_reg[i-1];
       }
       current.u&=~((1LL<<rs1[i])|(1LL<<rs2[i]));
+      current.u=unneeded_mac(current.u,i);
       memcpy(&temp,&current,sizeof(current));
       temp.wasdirty=temp.dirty;
       // TODO: Take into account unconditional branches, as below
@@ -7462,6 +7551,8 @@ int sh2_recompile_block(int addr)
             #endif
           }
           #endif
+          // BRAF/BSRF: PC + Rm (a COMPLEX delay slot has freed RTEMP)
+          if(opcode[i-1]==0&&opcode2[i-1]==3) alloc_reg(&branch_regs[i-1],i-1,RTEMP);
           if(opcode[i-1]==0&&opcode2[i-1]==11&&opcode3[i-1]==2) { // RTE
             alloc_reg(&branch_regs[i-1],i-1,SR); // SR will be loaded from stack
             dirty_reg(&branch_regs[i-1],SR);
