@@ -5744,6 +5744,8 @@ void disassemble_inst(int i)
     }
 }
 
+static u32 vram_shadow_pages[2][4];
+
 void sh2_dynarec_init()
 {
   idle_skip_off = getenv("YAB_DYNAREC_IDLE") && !atoi(getenv("YAB_DYNAREC_IDLE"));
@@ -5831,6 +5833,15 @@ void sh2_dynarec_init()
   master_cc=slave_cc=0;
   slave_ip=(void *)0; // Slave not running, go directly to interrupt handler
   CurrentSH2=MSH2;
+
+  // A previous session's cycles owed to the CPUs, and its VRAM code: the new
+  // VRAM is empty, and pages shadowed once slow down every later write to them
+  memset(yab_bus_wait,0,sizeof(yab_bus_wait));
+#ifdef YAB_KICKYIELD
+  memset(yab_kick,0,sizeof(yab_kick));
+#endif
+  memset(vram_shadow_pages,0,sizeof(vram_shadow_pages));
+  vram_shadow_any=0;
 
   arch_init();
 }

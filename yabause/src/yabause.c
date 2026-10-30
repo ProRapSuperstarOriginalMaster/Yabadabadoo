@@ -466,6 +466,9 @@ void YabFlushBackups(void)
 
 void YabauseDeInit(void) {
    YabProfReport();
+   /* queued sound work can raise interrupts on the SCU and the SH-2s, so it
+      finishes before they go */
+   M68KStop();
    SH2DeInit();
 
    if (BiosRom)
@@ -488,6 +491,18 @@ void YabauseDeInit(void) {
       T1MemoryDeInit(BupRam);
    }
    BupRam = NULL;
+
+   if (SH1Rom)
+      T2MemoryDeInit(SH1Rom);
+   SH1Rom = NULL;
+
+   if (SH1Dram)
+      T2MemoryDeInit(SH1Dram);
+   SH1Dram = NULL;
+
+   if (SH1MpegRom)
+      T2MemoryDeInit(SH1MpegRom);
+   SH1MpegRom = NULL;
 
    CartDeInit();
    Cs2DeInit();

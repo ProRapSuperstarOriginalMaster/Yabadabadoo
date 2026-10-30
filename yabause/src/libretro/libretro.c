@@ -1781,6 +1781,23 @@ static void crash_log_note(const char *string) { (void)string; }
 static unsigned crash_frame, crash_test_frame;
 #endif
 
+/* Where the frontend finds work RAM (RetroAchievements, RetroArch's cheats).
+ * It has to hear again when the RAM moves, as it does on a reset. */
+static void set_memory_maps(void)
+{
+   struct retro_memory_map mmaps           = {0};
+   struct retro_memory_descriptor descs[2] =
+   {
+      { RETRO_MEMDESC_SYSTEM_RAM, LowWram,  0, 0x0200000, 0, 0, 0x100000, "LowWram"  },
+      { RETRO_MEMDESC_SYSTEM_RAM, HighWram, 0, 0x6000000, 0, 0, 0x100000, "HighWram" },
+   };
+
+   mmaps.descriptors     = descs;
+   mmaps.num_descriptors = LowWram ? sizeof(descs) / sizeof(*descs) : 0;
+
+   environ_cb(RETRO_ENVIRONMENT_SET_MEMORY_MAPS, &mmaps);
+}
+
 bool retro_load_game(const struct retro_game_info *info)
 {
    int ret;
@@ -1936,17 +1953,8 @@ bool retro_load_game(const struct retro_game_info *info)
 
    log_cb(RETRO_LOG_DEBUG, "Enabling cheevos\n");
    bool cheevos_supported                  = true;
-   struct retro_memory_map mmaps           = {0};
-   struct retro_memory_descriptor descs[2] =
-   {
-      { RETRO_MEMDESC_SYSTEM_RAM, LowWram,  0, 0x0200000, 0, 0, 0x100000, "LowWram"  },
-      { RETRO_MEMDESC_SYSTEM_RAM, HighWram, 0, 0x6000000, 0, 0, 0x100000, "HighWram" },
-   };
 
-   mmaps.descriptors     = descs;
-   mmaps.num_descriptors = sizeof(descs) / sizeof(*descs);
-
-   environ_cb(RETRO_ENVIRONMENT_SET_MEMORY_MAPS, &mmaps);
+   set_memory_maps();
    environ_cb(RETRO_ENVIRONMENT_SET_SUPPORT_ACHIEVEMENTS, &cheevos_supported);
 
 #ifdef YABADABADOO_DEV
@@ -2018,8 +2026,30 @@ void retro_reset(void)
    devsession_reset();
 #endif
    YabauseResetButton();
-   YabauseInit(&yinit);
-   YabauseSetDecilineMode(deciline_mode);
+   /* YabauseInit allocates everything anew and opens the disc again, so the
+    * old session has to go first. Each reset used to leak about 5 MB and every
+    * file of the disc, until a disc with many tracks ran out of file
+    * descriptors and booted to the BIOS CD player. This also writes backup
+    * RAM, which YabauseInit reads back: a save just before the reset stays. */
+   YabauseDeInit();
+   if (YabauseInit(&yinit) != 0)
+   {
+      /* The old session can't come back. In practice the BIOS can't be read
+       * any more, so stop on the screen that says so. */
+      log_cb(RETRO_LOG_ERROR, "Reset failed, showing the no-BIOS screen\n");
+      YabauseDeInit();
+      crash_log_uninstall();
+      no_bios_screen   = true;
+      no_bios_msg_sent = false;
+      game_width       = 320;
+      game_height      = 240;
+   }
+   else
+   {
+      OSDChangeCore(OSDCORE_DUMMY);  /* as at load: YabauseInit picks the default */
+      YabauseSetDecilineMode(deciline_mode);
+   }
+   set_memory_maps();
 }
 
 void retro_run(void)
