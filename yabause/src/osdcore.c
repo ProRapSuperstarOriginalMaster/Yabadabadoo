@@ -77,6 +77,9 @@ int OSDInit(int coreid)
    if (OSD->Init() != 0)
       return -1;
 
+   for (i = 0; i < OSDMSG_COUNT; i++)
+      if (osdmessages[i].timeleft > 0)
+         free(osdmessages[i].message);
    memset(osdmessages, 0, sizeof(osdmessages));
    osdmessages[OSDMSG_FPS].hidden = 1;
    osdmessages[OSDMSG_DEBUG].hidden = 1;
@@ -121,6 +124,10 @@ void OSDPushMessage(int msgtype, int ttl, const char * format, ...)
    vsprintf(message, format, arglist);
    va_end(arglist);
 
+   /* Only OSDDisplayMessages frees a message, and the dummy OSD core never
+    * shows any: the FPS and debug messages pushed every frame leaked. */
+   if (osdmessages[msgtype].timeleft > 0)
+      free(osdmessages[msgtype].message);
    osdmessages[msgtype].type = msgtype;
    osdmessages[msgtype].message = strdup(message);
    osdmessages[msgtype].timetolive = ttl;
