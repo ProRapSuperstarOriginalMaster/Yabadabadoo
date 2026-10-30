@@ -5241,6 +5241,10 @@ ScspDeInit (void)
 
   scsp_shutdown();
 
+  if (ScspInternalVars)
+    free(ScspInternalVars);
+  ScspInternalVars = NULL;
+
   if (SoundRam)
     T2MemoryDeInit (SoundRam);
   SoundRam = NULL;

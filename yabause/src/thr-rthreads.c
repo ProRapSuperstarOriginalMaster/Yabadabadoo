@@ -170,10 +170,13 @@ int YabThreadStart(unsigned int id, void (*func)(void *), void *arg)
 		return -1;
 	}
 
-	thread_handle[id].mutex = slock_new();
+	/* A thread that was stopped and starts again (each reset stops the 68K's)
+	 * keeps its lock and condition */
+	if (!thread_handle[id].mutex)
+		thread_handle[id].mutex = slock_new();
 	thread_handle[id].wake_pending = 0;
 
-	if ((thread_handle[id].cond = scond_new()) == NULL)
+	if (!thread_handle[id].cond && (thread_handle[id].cond = scond_new()) == NULL)
 	{
 		return -1;
 	}
